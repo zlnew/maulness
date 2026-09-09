@@ -1,0 +1,15 @@
+[Unit]
+Description=Maulness: Personal AI Agent Harness (Antigravity ACP + Discord)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/www/personal/repo/maulness
+ExecStart=%h/www/personal/repo/maulness/.venv/bin/python -m maulness.daemon.service
+Restart=on-failure
+RestartSec=5s
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-%h/.config/maulness/env
+
+[Install]
+WantedBy=default.target
