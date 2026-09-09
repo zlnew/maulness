@@ -1,0 +1,13 @@
+services:
+  maulness:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${APP_IMAGE:-maulness:latest}
+    container_name: ${APP_CONTAINER_NAME:-maulness}
+    restart: unless-stopped
+    volumes:
+      - maulness-data:/root/.config/maulness
+
+volumes:
+  maulness-data:

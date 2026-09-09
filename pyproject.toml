@@ -1,0 +1,32 @@
+[project]
+name = "maulness"
+version = "0.1.0"
+description = "Personal AI Agent Harness (Antigravity ACP + Gemini + Discord + systemd)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.15.0",
+    "rich>=13.9.0",
+    "discord.py>=2.4.0",
+    "aiosqlite>=0.20.0",
+    "google-genai>=1.0.0",
+    "pydantic>=2.10.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+maulness = "maulness.cli.main:app"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
