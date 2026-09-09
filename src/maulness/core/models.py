@@ -64,3 +64,16 @@ class TaskRecord:
     discord_thread_id: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+
+@dataclass
+class SessionRecord:
+    id: str
+    task_id: Optional[str]
+    profile: str
+    engine: str
+    acp_session_id: Optional[str] = None
+    pid: Optional[int] = None
+    status: str = "active"
+    created_at: Optional[datetime] = None
+

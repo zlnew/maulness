@@ -4,7 +4,13 @@ from typing import Optional
 
 import aiosqlite
 
-from maulness.core.models import ApprovalStatus, TaskMode, TaskRecord, TaskStatus
+from maulness.core.models import (
+    ApprovalStatus,
+    SessionRecord,
+    TaskMode,
+    TaskRecord,
+    TaskStatus,
+)
 
 DEFAULT_DB_PATH = Path.home() / ".config" / "maulness" / "maulness.db"
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -111,3 +117,89 @@ class StorageManager:
                 )
                 for row in rows
             ]
+
+    async def create_session(
+        self,
+        session_id: str,
+        profile: str,
+        engine: str,
+        task_id: Optional[str] = None,
+        acp_session_id: Optional[str] = None,
+        pid: Optional[int] = None,
+    ) -> SessionRecord:
+        """Create a new agent session record."""
+        from maulness.core.models import SessionRecord
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO agent_sessions (id, task_id, profile, engine, acp_session_id, pid, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'active')
+                """,
+                (session_id, task_id, profile, engine, acp_session_id, pid),
+            )
+            await db.commit()
+
+        return SessionRecord(
+            id=session_id,
+            task_id=task_id,
+            profile=profile,
+            engine=engine,
+            acp_session_id=acp_session_id,
+            pid=pid,
+            status="active",
+        )
+
+    async def update_session_status(self, session_id: str, status: str = "closed"):
+        """Update session status (active, closed, failed)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE agent_sessions SET status = ? WHERE id = ?",
+                (status, session_id),
+            )
+            await db.commit()
+
+    async def get_session(self, session_id: str) -> Optional[SessionRecord]:
+        """Fetch session by ID."""
+        from maulness.core.models import SessionRecord
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM agent_sessions WHERE id = ?", (session_id,))
+            row = await cursor.fetchone()
+            if not row:
+                return None
+
+            return SessionRecord(
+                id=row["id"],
+                task_id=row["task_id"],
+                profile=row["profile"],
+                engine=row["engine"],
+                acp_session_id=row["acp_session_id"],
+                pid=row["pid"],
+                status=row["status"],
+            )
+
+    async def list_sessions(self, limit: int = 20) -> list[SessionRecord]:
+        """List active and recent sessions."""
+        from maulness.core.models import SessionRecord
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM agent_sessions ORDER BY created_at DESC LIMIT ?", (limit,)
+            )
+            rows = await cursor.fetchall()
+            return [
+                SessionRecord(
+                    id=row["id"],
+                    task_id=row["task_id"],
+                    profile=row["profile"],
+                    engine=row["engine"],
+                    acp_session_id=row["acp_session_id"],
+                    pid=row["pid"],
+                    status=row["status"],
+                )
+                for row in rows
+            ]
+

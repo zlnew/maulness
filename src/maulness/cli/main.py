@@ -1,6 +1,7 @@
 import asyncio
 import os
 import subprocess
+from pathlib import Path
 import typer
 import yaml
 from rich.console import Console
@@ -9,9 +10,9 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from maulness.config import config
+from maulness.core.pipeline import PipelineOrchestrator
 from maulness.core.profiles import ProfileManager
 from maulness.core.runner import TaskRunner
-from maulness.core.soul import get_soul_content
 from maulness.storage.db import StorageManager
 
 app = typer.Typer(
@@ -20,14 +21,14 @@ app = typer.Typer(
     add_completion=False,
 )
 daemon_app = typer.Typer(help="Manage the background daemon systemd service")
-task_app = typer.Typer(help="Manage tasks and execution history")
-profile_app = typer.Typer(help="Manage agent execution profiles")
-soul_app = typer.Typer(help="Manage SOUL.md personal doctrine")
+task_app = typer.Typer(help="Inspect tasks and execution history")
+session_app = typer.Typer(help="Inspect active and past agent sessions")
+profile_app = typer.Typer(help="Inspect agent execution profiles")
 
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(task_app, name="task")
+app.add_typer(session_app, name="session")
 app.add_typer(profile_app, name="profile")
-app.add_typer(soul_app, name="soul")
 
 console = Console()
 
@@ -82,7 +83,15 @@ def status():
     # Check Profiles
     pm = ProfileManager()
     profiles = pm.list_profiles()
-    table.add_row("Active Profiles", f"[green]{len(profiles)} Loaded[/green]", ", ".join(p.name for p in profiles))
+    table.add_row(
+        "Active Profiles",
+        f"[green]{len(profiles)} Loaded[/green]",
+        ", ".join(p.name for p in profiles),
+    )
+
+    # Context Workspace (cwd)
+    repo_name, repo_path = config.get_current_workspace()
+    table.add_row("Current Workspace", f"[green]{repo_name}[/green]", str(repo_path))
 
     # Database
     db_exists = config.db_path.exists()
@@ -96,71 +105,108 @@ def status():
 
 
 @app.command()
-def run(
-    repo: str = typer.Argument(..., help="Target repository name (e.g. expense-tracker, horizonx)"),
-    prompt: str = typer.Argument(..., help="The prompt or instruction to execute"),
-    profile: str = typer.Option("builder", "-p", "--profile", help="Profile to execute with (default, planner, builder, reviewer)"),
-):
-    """Execute a task in Direct Mode using the specified profile with live streaming."""
-    runner = TaskRunner()
-    try:
-        asyncio.run(runner.run_direct(repo_name=repo, prompt=prompt, profile_name=profile))
-    except KeyboardInterrupt:
-        console.print("\n[yellow][!] Aborted by user.[/yellow]")
-
-
-@app.command()
 def chat(
-    repo: str = typer.Argument(..., help="Target repository name (e.g. expense-tracker, horizonx)"),
-    profile: str = typer.Option("builder", "-p", "--profile", help="Initial profile to chat with (builder, planner, default)"),
+    profile: str = typer.Option(
+        "builder",
+        "-p",
+        "--profile",
+        help="Initial profile to chat with (builder, planner, default, reviewer)",
+    ),
 ):
-    """Start an interactive multi-turn REPL chat session with the agent in your terminal."""
-    workspace_path = config.resolve_repo_path(repo)
+    """Start an interactive multi-turn REPL chat session scoped to the current directory."""
+    repo_name, workspace_path = config.get_current_workspace()
     current_profile = profile
     runner = TaskRunner()
+    orchestrator = PipelineOrchestrator()
 
     console.print(
         Panel(
             f"[bold cyan]Maulness Interactive Workspace Chat[/bold cyan]\n"
-            f"Repository: [green]{repo}[/green] ([dim]{workspace_path}[/dim])\n"
-            f"Profile: [magenta]{current_profile}[/magenta]\n\n"
-            f"[dim]Special commands: /profile <name>, /diff, /clear, /exit[/dim]",
+            f"Repository: [green]{repo_name}[/green] ([dim]{workspace_path}[/dim])\n"
+            f"Active Profile: [magenta]{current_profile}[/magenta]\n\n"
+            f"[bold yellow]Slash Commands:[/bold yellow]\n"
+            f"  [cyan]/code <prompt>[/cyan]     Run direct solo builder with Antigravity ACP\n"
+            f"  [cyan]/pipeline <goal>[/cyan]   Run 3-stage assembly line (Plan ➔ Build ➔ Review)\n"
+            f"  [cyan]/profile <name>[/cyan]    Switch profile on the fly (builder, planner, default)\n"
+            f"  [cyan]/diff[/cyan]              Inspect current uncommitted git changes\n"
+            f"  [cyan]/clear[/cyan]             Clear screen\n"
+            f"  [cyan]/exit[/cyan]              Exit session\n"
+            f"[dim]Tip: Plain text without slash commands chats directly with the active profile.[/dim]",
             border_style="cyan",
         )
     )
 
     while True:
         try:
-            user_input = console.input(f"\n[bold green]maulness[/bold green] ([cyan]{repo}[/cyan]:[magenta]{current_profile}[/magenta]) > ")
-            prompt = user_input.strip()
-            if not prompt:
+            user_input = console.input(
+                f"\n[bold green]maulness[/bold green] ([cyan]{repo_name}[/cyan]:[magenta]{current_profile}[/magenta]) > "
+            )
+            raw_prompt = user_input.strip()
+            if not raw_prompt:
                 continue
 
-            if prompt in ("/exit", "/quit", "exit", "quit"):
+            # Standard control commands
+            if raw_prompt in ("/exit", "/quit", "exit", "quit"):
                 console.print("[yellow]Exiting chat session. Goodbye Maul![/yellow]")
                 break
 
-            if prompt == "/clear":
+            if raw_prompt == "/clear":
                 console.clear()
                 continue
 
-            if prompt == "/diff":
-                res = subprocess.run(["git", "diff", "HEAD"], cwd=str(workspace_path), capture_output=True, text=True)
+            if raw_prompt == "/diff":
+                res = subprocess.run(
+                    ["git", "diff", "HEAD"],
+                    cwd=str(workspace_path),
+                    capture_output=True,
+                    text=True,
+                )
                 diff = res.stdout or "(No uncommitted changes)"
                 console.print(Syntax(diff, "diff", theme="monokai"))
                 continue
 
-            if prompt.startswith("/profile "):
-                new_profile = prompt.split(" ", 1)[1].strip()
+            if raw_prompt.startswith("/profile "):
+                new_profile = raw_prompt.split(" ", 1)[1].strip()
                 current_profile = new_profile
-                console.print(f"[green]Switched active profile to [magenta]{current_profile}[/magenta][/green]")
+                console.print(
+                    f"[green]Switched active profile to [magenta]{current_profile}[/magenta][/green]"
+                )
                 continue
 
-            # Execute turn with live streaming
+            # Direct Solo Execution slash commands (/code or /run or /do)
+            if raw_prompt.startswith(("/code ", "/run ", "/do ")):
+                cmd_parts = raw_prompt.split(" ", 1)
+                code_prompt = cmd_parts[1].strip()
+                console.print(f"[bold cyan][*] Running solo builder: [white]{code_prompt}[/white][/bold cyan]\n")
+                asyncio.run(
+                    runner.run_direct(
+                        repo_name=repo_name,
+                        prompt=code_prompt,
+                        profile_name="builder",
+                    )
+                )
+                continue
+
+            # Multi-Route Pipeline slash commands (/pipeline or /task or /plan)
+            if raw_prompt.startswith(("/pipeline ", "/task ", "/plan ")):
+                cmd_parts = raw_prompt.split(" ", 1)
+                pipeline_prompt = cmd_parts[1].strip()
+                console.print(f"[bold magenta][*] Launching pipeline: [white]{pipeline_prompt}[/white][/bold magenta]\n")
+                asyncio.run(
+                    orchestrator.run_pipeline(
+                        repo_name=repo_name,
+                        title=pipeline_prompt[:80],
+                        prompt=pipeline_prompt,
+                        auto_proceed=False,
+                    )
+                )
+                continue
+
+            # Default: Conversational turn with the active profile
             asyncio.run(
                 runner.run_direct(
-                    repo_name=repo,
-                    prompt=prompt,
+                    repo_name=repo_name,
+                    prompt=raw_prompt,
                     profile_name=current_profile,
                 )
             )
@@ -170,124 +216,9 @@ def chat(
             break
 
 
-@profile_app.command("list")
-def profile_list():
-    """List all available profiles."""
-    pm = ProfileManager()
-    profiles = pm.list_profiles()
-
-    table = Table(title="Available Agent Profiles", border_style="magenta")
-    table.add_column("Profile", style="bold magenta")
-    table.add_column("Provider", style="cyan")
-    table.add_column("Model / Command", style="yellow")
-    table.add_column("Description")
-
-    for p in profiles:
-        target = p.model or p.command or "-"
-        table.add_row(p.name, p.provider, target, p.description)
-
-    console.print(table)
-
-
-@profile_app.command("show")
-def profile_show(name: str = typer.Argument(..., help="Profile name to inspect")):
-    """Display YAML specification for a profile."""
-    pm = ProfileManager()
-    profile = pm.get_profile(name)
-
-    data = profile.model_dump()
-    yaml_str = yaml.dump(data, sort_keys=False)
-    syntax = Syntax(yaml_str, "yaml", theme="monokai", line_numbers=True)
-    console.print(Panel(syntax, title=f"Profile — {profile.name}", border_style="magenta"))
-
-
-@soul_app.command("show")
-def soul_show():
-    """Display active SOUL.md personal doctrine."""
-    soul = get_soul_content()
-    console.print(Panel(soul, title="SOUL.md — Personal Operating Doctrine", border_style="green"))
-
-
-@soul_app.command("edit")
-def soul_edit():
-    """Open SOUL.md in default terminal editor."""
-    soul_file = config.config_dir / "SOUL.md"
-    editor = os.getenv("EDITOR", "nano")
-    subprocess.run([editor, str(soul_file)])
-
-
-@daemon_app.command("status")
-def daemon_status():
-    """Check background daemon systemd status."""
-    subprocess.run(["systemctl", "--user", "status", "maulness.service"])
-
-
-@daemon_app.command("start")
-def daemon_start():
-    """Start the background daemon service."""
-    res = subprocess.run(["systemctl", "--user", "start", "maulness.service"])
-    if res.returncode == 0:
-        console.print("[green][+] Started maulness.service successfully.[/green]")
-    else:
-        console.print("[red][x] Failed to start maulness.service.[/red]")
-
-
-@daemon_app.command("stop")
-def daemon_stop():
-    """Stop the background daemon service."""
-    res = subprocess.run(["systemctl", "--user", "stop", "maulness.service"])
-    if res.returncode == 0:
-        console.print("[yellow][!] Stopped maulness.service.[/yellow]")
-    else:
-        console.print("[red][x] Failed to stop maulness.service.[/red]")
-
-
-@daemon_app.command("restart")
-def daemon_restart():
-    """Restart the background daemon service."""
-    res = subprocess.run(["systemctl", "--user", "restart", "maulness.service"])
-    if res.returncode == 0:
-        console.print("[green][+] Restarted maulness.service.[/green]")
-    else:
-        console.print("[red][x] Failed to restart maulness.service.[/red]")
-
-
-@daemon_app.command("logs")
-def daemon_logs(
-    follow: bool = typer.Option(True, "-f", "--follow", help="Follow log output in real time"),
-    lines: int = typer.Option(50, "-n", "--lines", help="Number of lines to show"),
-):
-    """View daemon logs via journalctl."""
-    cmd = ["journalctl", "--user", "-u", "maulness.service", f"-n{lines}"]
-    if follow:
-        cmd.append("-f")
-    subprocess.run(cmd)
-
-
-@task_app.command("create")
-def task_create(
-    repo: str = typer.Argument(..., help="Target repository name"),
-    title: str = typer.Argument(..., help="Task title / headline"),
-    prompt: str = typer.Argument(..., help="Detailed requirements and constraints"),
-    auto_proceed: bool = typer.Option(False, "--yes", "-y", help="Auto-proceed through planning gate"),
-):
-    """Create and execute a task in Multi-Route Mode (Planner ➔ Builder ➔ Reviewer)."""
-    from maulness.core.pipeline import PipelineOrchestrator
-
-    orchestrator = PipelineOrchestrator()
-    try:
-        asyncio.run(
-            orchestrator.run_pipeline(
-                repo_name=repo,
-                title=title,
-                prompt=prompt,
-                auto_proceed=auto_proceed,
-            )
-        )
-    except KeyboardInterrupt:
-        console.print("\n[yellow][!] Pipeline aborted by user.[/yellow]")
-
-
+# ==========================================
+# Task Management (Strictly list & show)
+# ==========================================
 @task_app.command("list")
 def task_list(limit: int = typer.Option(20, "-n", "--limit", help="Number of tasks to show")):
     """List recent and active tasks."""
@@ -299,7 +230,7 @@ def task_list(limit: int = typer.Option(20, "-n", "--limit", help="Number of tas
 
     tasks = asyncio.run(_list())
     if not tasks:
-        console.print("[dim]No tasks recorded yet. Run `maulness run <repo> <prompt>` to start one.[/dim]")
+        console.print("[dim]No tasks recorded yet. Run `maulness chat` to start one.[/dim]")
         return
 
     table = Table(title="Recent & Active Tasks", border_style="cyan")
@@ -354,6 +285,156 @@ def task_show(task_id: str = typer.Argument(..., help="Task ID to inspect")):
             border_style="cyan",
         )
     )
+
+
+# ==========================================
+# Session Management (list & show)
+# ==========================================
+@session_app.command("list")
+def session_list(limit: int = typer.Option(20, "-n", "--limit", help="Number of sessions to show")):
+    """List active and historical agent sessions."""
+    storage = StorageManager(db_path=config.db_path)
+
+    async def _list():
+        await storage.initialize()
+        return await storage.list_sessions(limit=limit)
+
+    sessions = asyncio.run(_list())
+    if not sessions:
+        console.print("[dim]No sessions recorded yet.[/dim]")
+        return
+
+    table = Table(title="Agent Sessions", border_style="green")
+    table.add_column("Session ID", style="bold")
+    table.add_column("Profile", style="magenta")
+    table.add_column("Engine", style="cyan")
+    table.add_column("Status", style="yellow")
+    table.add_column("Task ID", style="dim")
+
+    for s in sessions:
+        table.add_row(
+            s.id,
+            s.profile,
+            s.engine,
+            s.status,
+            s.task_id or "-",
+        )
+
+    console.print(table)
+
+
+@session_app.command("show")
+def session_show(session_id: str = typer.Argument(..., help="Session ID to inspect")):
+    """Show details of a specific agent session."""
+    storage = StorageManager(db_path=config.db_path)
+
+    async def _get():
+        await storage.initialize()
+        return await storage.get_session(session_id)
+
+    session = asyncio.run(_get())
+    if not session:
+        console.print(f"[red][x] Session '{session_id}' not found.[/red]")
+        return
+
+    console.print(
+        Panel(
+            f"[bold cyan]ID:[/bold cyan] {session.id}\n"
+            f"[bold cyan]Profile:[/bold cyan] {session.profile}\n"
+            f"[bold cyan]Engine:[/bold cyan] {session.engine}\n"
+            f"[bold cyan]Status:[/bold cyan] {session.status}\n"
+            f"[bold cyan]Task ID:[/bold cyan] {session.task_id or 'None'}\n"
+            f"[bold cyan]ACP Session ID:[/bold cyan] {session.acp_session_id or 'None'}\n"
+            f"[bold cyan]Process PID:[/bold cyan] {session.pid or 'None'}",
+            title=f"Session Details — {session.id}",
+            border_style="green",
+        )
+    )
+
+
+# ==========================================
+# Profile Management (list & show)
+# ==========================================
+@profile_app.command("list")
+def profile_list():
+    """List all available profiles."""
+    pm = ProfileManager()
+    profiles = pm.list_profiles()
+
+    table = Table(title="Available Agent Profiles", border_style="magenta")
+    table.add_column("Profile", style="bold magenta")
+    table.add_column("Provider", style="cyan")
+    table.add_column("Model / Command", style="yellow")
+    table.add_column("Description")
+
+    for p in profiles:
+        target = p.model or p.command or "-"
+        table.add_row(p.name, p.provider, target, p.description)
+
+    console.print(table)
+
+
+@profile_app.command("show")
+def profile_show(name: str = typer.Argument(..., help="Profile name to inspect")):
+    """Display YAML specification for a profile."""
+    pm = ProfileManager()
+    profile = pm.get_profile(name)
+
+    data = profile.model_dump()
+    yaml_str = yaml.dump(data, sort_keys=False)
+    syntax = Syntax(yaml_str, "yaml", theme="monokai", line_numbers=True)
+    console.print(Panel(syntax, title=f"Profile — {profile.name}", border_style="magenta"))
+
+
+# ==========================================
+# Daemon Management (start, stop, restart, status, logs)
+# ==========================================
+@daemon_app.command("status")
+def daemon_status():
+    """Check background daemon systemd status."""
+    subprocess.run(["systemctl", "--user", "status", "maulness.service"])
+
+
+@daemon_app.command("start")
+def daemon_start():
+    """Start the background daemon service."""
+    res = subprocess.run(["systemctl", "--user", "start", "maulness.service"])
+    if res.returncode == 0:
+        console.print("[green][+] Started maulness.service successfully.[/green]")
+    else:
+        console.print("[red][x] Failed to start maulness.service.[/red]")
+
+
+@daemon_app.command("stop")
+def daemon_stop():
+    """Stop the background daemon service."""
+    res = subprocess.run(["systemctl", "--user", "stop", "maulness.service"])
+    if res.returncode == 0:
+        console.print("[yellow][!] Stopped maulness.service.[/yellow]")
+    else:
+        console.print("[red][x] Failed to stop maulness.service.[/red]")
+
+
+@daemon_app.command("restart")
+def daemon_restart():
+    """Restart the background daemon service."""
+    res = subprocess.run(["systemctl", "--user", "restart", "maulness.service"])
+    if res.returncode == 0:
+        console.print("[green][+] Restarted maulness.service.[/green]")
+    else:
+        console.print("[red][x] Failed to restart maulness.service.[/red]")
+
+
+@daemon_app.command("logs")
+def daemon_logs(
+    follow: bool = typer.Option(True, "-f", "--follow", help="Follow log output in real time"),
+    lines: int = typer.Option(50, "-n", "--lines", help="Number of lines to show"),
+):
+    """View daemon logs via journalctl."""
+    cmd = ["journalctl", "--user", "-u", "maulness.service", f"-n{lines}"]
+    if follow:
+        cmd.append("-f")
+    subprocess.run(cmd)
 
 
 def main():

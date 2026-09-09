@@ -45,6 +45,19 @@ class Config:
     def has_discord(self) -> bool:
         return bool(self.discord_bot_token and self.owner_discord_id)
 
+    def get_current_workspace(self, custom_path: Optional[Path] = None) -> tuple[str, Path]:
+        """Detect repository name and directory from current working directory (cwd)."""
+        target = (custom_path or Path.cwd()).resolve()
+
+        # If inside workspace_root/repo/<name>, detect the repo folder
+        try:
+            rel = target.relative_to(self.repo_dir)
+            repo_name = rel.parts[0]
+            return repo_name, self.repo_dir / repo_name
+        except ValueError:
+            # Fallback to current folder name and target
+            return target.name, target
+
     def resolve_repo_path(self, repo_name: str) -> Path:
         """Resolve a repository name to an absolute workspace directory path."""
         target = self.repo_dir / repo_name
