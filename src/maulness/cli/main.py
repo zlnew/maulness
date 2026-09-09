@@ -101,12 +101,73 @@ def run(
     prompt: str = typer.Argument(..., help="The prompt or instruction to execute"),
     profile: str = typer.Option("builder", "-p", "--profile", help="Profile to execute with (default, planner, builder, reviewer)"),
 ):
-    """Execute a task in Direct Mode using the specified profile."""
+    """Execute a task in Direct Mode using the specified profile with live streaming."""
     runner = TaskRunner()
     try:
         asyncio.run(runner.run_direct(repo_name=repo, prompt=prompt, profile_name=profile))
     except KeyboardInterrupt:
         console.print("\n[yellow][!] Aborted by user.[/yellow]")
+
+
+@app.command()
+def chat(
+    repo: str = typer.Argument(..., help="Target repository name (e.g. expense-tracker, horizonx)"),
+    profile: str = typer.Option("builder", "-p", "--profile", help="Initial profile to chat with (builder, planner, default)"),
+):
+    """Start an interactive multi-turn REPL chat session with the agent in your terminal."""
+    workspace_path = config.resolve_repo_path(repo)
+    current_profile = profile
+    runner = TaskRunner()
+
+    console.print(
+        Panel(
+            f"[bold cyan]Maulness Interactive Workspace Chat[/bold cyan]\n"
+            f"Repository: [green]{repo}[/green] ([dim]{workspace_path}[/dim])\n"
+            f"Profile: [magenta]{current_profile}[/magenta]\n\n"
+            f"[dim]Special commands: /profile <name>, /diff, /clear, /exit[/dim]",
+            border_style="cyan",
+        )
+    )
+
+    while True:
+        try:
+            user_input = console.input(f"\n[bold green]maulness[/bold green] ([cyan]{repo}[/cyan]:[magenta]{current_profile}[/magenta]) > ")
+            prompt = user_input.strip()
+            if not prompt:
+                continue
+
+            if prompt in ("/exit", "/quit", "exit", "quit"):
+                console.print("[yellow]Exiting chat session. Goodbye Maul![/yellow]")
+                break
+
+            if prompt == "/clear":
+                console.clear()
+                continue
+
+            if prompt == "/diff":
+                res = subprocess.run(["git", "diff", "HEAD"], cwd=str(workspace_path), capture_output=True, text=True)
+                diff = res.stdout or "(No uncommitted changes)"
+                console.print(Syntax(diff, "diff", theme="monokai"))
+                continue
+
+            if prompt.startswith("/profile "):
+                new_profile = prompt.split(" ", 1)[1].strip()
+                current_profile = new_profile
+                console.print(f"[green]Switched active profile to [magenta]{current_profile}[/magenta][/green]")
+                continue
+
+            # Execute turn with live streaming
+            asyncio.run(
+                runner.run_direct(
+                    repo_name=repo,
+                    prompt=prompt,
+                    profile_name=current_profile,
+                )
+            )
+
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[yellow]Session terminated.[/yellow]")
+            break
 
 
 @profile_app.command("list")
