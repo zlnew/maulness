@@ -1,24 +1,33 @@
 import asyncio
+import os
 import subprocess
 import typer
+import yaml
 from rich.console import Console
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
 
 from maulness.config import config
+from maulness.core.profiles import ProfileManager
 from maulness.core.runner import TaskRunner
+from maulness.core.soul import get_soul_content
 from maulness.storage.db import StorageManager
 
 app = typer.Typer(
     name="maulness",
-    help="Maulness: Personal AI Agent Harness (Antigravity ACP + Gemini + Discord)",
+    help="Maulness: Personal AI Agent Harness (Antigravity ACP + Multi-Provider + Discord)",
     add_completion=False,
 )
 daemon_app = typer.Typer(help="Manage the background daemon systemd service")
 task_app = typer.Typer(help="Manage tasks and execution history")
+profile_app = typer.Typer(help="Manage agent execution profiles")
+soul_app = typer.Typer(help="Manage SOUL.md personal doctrine")
 
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(task_app, name="task")
+app.add_typer(profile_app, name="profile")
+app.add_typer(soul_app, name="soul")
 
 console = Console()
 
@@ -70,6 +79,11 @@ def status():
             f"Binary '{agy_binary}' not on PATH",
         )
 
+    # Check Profiles
+    pm = ProfileManager()
+    profiles = pm.list_profiles()
+    table.add_row("Active Profiles", f"[green]{len(profiles)} Loaded[/green]", ", ".join(p.name for p in profiles))
+
     # Database
     db_exists = config.db_path.exists()
     table.add_row(
@@ -85,13 +99,60 @@ def status():
 def run(
     repo: str = typer.Argument(..., help="Target repository name (e.g. expense-tracker, horizonx)"),
     prompt: str = typer.Argument(..., help="The prompt or instruction to execute"),
+    profile: str = typer.Option("builder", "-p", "--profile", help="Profile to execute with (default, planner, builder, reviewer)"),
 ):
-    """Execute a task in Direct Mode (solo Antigravity ACP loop)."""
+    """Execute a task in Direct Mode using the specified profile."""
     runner = TaskRunner()
     try:
-        asyncio.run(runner.run_direct(repo_name=repo, prompt=prompt))
+        asyncio.run(runner.run_direct(repo_name=repo, prompt=prompt, profile_name=profile))
     except KeyboardInterrupt:
         console.print("\n[yellow][!] Aborted by user.[/yellow]")
+
+
+@profile_app.command("list")
+def profile_list():
+    """List all available profiles."""
+    pm = ProfileManager()
+    profiles = pm.list_profiles()
+
+    table = Table(title="Available Agent Profiles", border_style="magenta")
+    table.add_column("Profile", style="bold magenta")
+    table.add_column("Provider", style="cyan")
+    table.add_column("Model / Command", style="yellow")
+    table.add_column("Description")
+
+    for p in profiles:
+        target = p.model or p.command or "-"
+        table.add_row(p.name, p.provider, target, p.description)
+
+    console.print(table)
+
+
+@profile_app.command("show")
+def profile_show(name: str = typer.Argument(..., help="Profile name to inspect")):
+    """Display YAML specification for a profile."""
+    pm = ProfileManager()
+    profile = pm.get_profile(name)
+
+    data = profile.model_dump()
+    yaml_str = yaml.dump(data, sort_keys=False)
+    syntax = Syntax(yaml_str, "yaml", theme="monokai", line_numbers=True)
+    console.print(Panel(syntax, title=f"Profile — {profile.name}", border_style="magenta"))
+
+
+@soul_app.command("show")
+def soul_show():
+    """Display active SOUL.md personal doctrine."""
+    soul = get_soul_content()
+    console.print(Panel(soul, title="SOUL.md — Personal Operating Doctrine", border_style="green"))
+
+
+@soul_app.command("edit")
+def soul_edit():
+    """Open SOUL.md in default terminal editor."""
+    soul_file = config.config_dir / "SOUL.md"
+    editor = os.getenv("EDITOR", "nano")
+    subprocess.run([editor, str(soul_file)])
 
 
 @daemon_app.command("status")
@@ -140,6 +201,30 @@ def daemon_logs(
     if follow:
         cmd.append("-f")
     subprocess.run(cmd)
+
+
+@task_app.command("create")
+def task_create(
+    repo: str = typer.Argument(..., help="Target repository name"),
+    title: str = typer.Argument(..., help="Task title / headline"),
+    prompt: str = typer.Argument(..., help="Detailed requirements and constraints"),
+    auto_proceed: bool = typer.Option(False, "--yes", "-y", help="Auto-proceed through planning gate"),
+):
+    """Create and execute a task in Multi-Route Mode (Planner ➔ Builder ➔ Reviewer)."""
+    from maulness.core.pipeline import PipelineOrchestrator
+
+    orchestrator = PipelineOrchestrator()
+    try:
+        asyncio.run(
+            orchestrator.run_pipeline(
+                repo_name=repo,
+                title=title,
+                prompt=prompt,
+                auto_proceed=auto_proceed,
+            )
+        )
+    except KeyboardInterrupt:
+        console.print("\n[yellow][!] Pipeline aborted by user.[/yellow]")
 
 
 @task_app.command("list")
