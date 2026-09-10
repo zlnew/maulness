@@ -51,8 +51,10 @@ class Config:
         self._load_yaml_config()
 
     def _load_yaml_config(self) -> None:
-        """Load optional root configuration from ~/.config/maulness/config.yaml."""
+        """Load optional root configuration from ~/.config/maulness/config.yaml or config.yml."""
         cfg_yaml = self.config_dir / "config.yaml"
+        if not cfg_yaml.exists():
+            cfg_yaml = self.config_dir / "config.yml"
         if cfg_yaml.exists():
             try:
                 import yaml
