@@ -59,43 +59,84 @@ class GeminiProvider(BaseProvider):
 
         _EFFORT_BUDGET = {"low": 1024, "medium": 8192, "high": 24576}
 
+        max_tokens = self.profile.max_tokens or 4096
+        effort = self.profile.reasoning_effort
         gen_config_kwargs: dict = {
             "system_instruction": self.profile.effective_system_prompt(),
             "temperature": self.profile.temperature,
-            "max_output_tokens": self.profile.max_tokens,
         }
-        effort = self.profile.reasoning_effort
         if effort:
             budget = _EFFORT_BUDGET.get(effort.lower(), 8192)
             gen_config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
+            # Ensure output budget has room for both reasoning tokens and visible output text
+            max_tokens = max(max_tokens, budget + 4096)
 
+        gen_config_kwargs["max_output_tokens"] = max_tokens
         gen_config = types.GenerateContentConfig(**gen_config_kwargs)
 
         accumulated = []
-        response_stream = await client.aio.models.generate_content_stream(
-            model=model_name,
-            contents=prompt,
-            config=gen_config,
-        )
+        init_timeout = min(float(config.stream_idle_timeout_seconds), 20.0)
+
+        try:
+            response_stream = await asyncio.wait_for(
+                client.aio.models.generate_content_stream(
+                    model=model_name,
+                    contents=prompt,
+                    config=gen_config,
+                ),
+                timeout=init_timeout,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Gemini API connection handshake timed out after {int(init_timeout)}s (model '{model_name}' overloaded)"
+            )
 
         idle_timeout = config.stream_idle_timeout_seconds
         stream_iter = response_stream.__aiter__()
+        is_first_chunk = True
+
         while True:
             try:
-                chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=idle_timeout)
+                chunk_timeout = 25.0 if is_first_chunk else idle_timeout
+                chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=chunk_timeout)
+                is_first_chunk = False
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
+                if is_first_chunk:
+                    raise TimeoutError(
+                        f"Gemini model '{model_name}' timed out waiting for first token response after 25s"
+                    )
                 raise TimeoutError(
                     f"Gemini stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
                 )
 
-            # Process candidate parts for thought and text content
+            # Process candidate parts for thought, tool calls, and text content
             has_parts = False
             if hasattr(chunk, "candidates") and chunk.candidates:
                 for cand in chunk.candidates:
                     if hasattr(cand, "content") and cand.content:
                         for part in cand.content.parts:
+                            # Handle tool/function calls if returned
+                            if getattr(part, "function_call", None):
+                                fn = part.function_call
+                                has_parts = True
+                                tool_desc = f"[Tool Invocation: {fn.name}({dict(fn.args) if fn.args else ''})]"
+                                accumulated.append(tool_desc)
+                                if on_tool_call:
+                                    await on_tool_call(
+                                        AgentToolCallEvent(
+                                            call_id=f"call_{fn.name}",
+                                            tool_name=fn.name,
+                                            args=dict(fn.args) if fn.args else {},
+                                            session_id=session_id,
+                                        )
+                                    )
+                                if on_message:
+                                    await on_message(
+                                        AgentMessageEvent(delta=tool_desc, session_id=session_id)
+                                    )
+
                             part_text = getattr(part, "text", None)
                             if not part_text:
                                 continue
@@ -119,4 +160,8 @@ class GeminiProvider(BaseProvider):
                         AgentMessageEvent(delta=chunk.text, session_id=session_id)
                     )
 
-        return "".join(accumulated)
+        result_text = "".join(accumulated).strip()
+        if not result_text:
+            raise RuntimeError(f"Gemini model '{model_name}' completed stream but returned an empty response")
+
+        return result_text

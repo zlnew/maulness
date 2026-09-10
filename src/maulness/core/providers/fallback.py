@@ -96,6 +96,8 @@ class FallbackProviderChain(BaseProvider):
                     on_tool_call=on_tool_call,
                     on_approval=on_approval,
                 )
+                if not res or not res.strip():
+                    raise RuntimeError(f"Provider {prov_type}:{prov_model} completed but returned an empty response")
                 self.last_used_provider = provider
                 return res
             except Exception as e:

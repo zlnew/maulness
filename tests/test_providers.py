@@ -146,3 +146,30 @@ def test_format_user_friendly_error():
     assert "API key" in format_user_friendly_error(Exception("API_KEY_INVALID"))
 
 
+@pytest.mark.asyncio
+async def test_fallback_provider_chain_rejects_empty_response():
+    from unittest.mock import AsyncMock
+    from maulness.core.providers.fallback import FallbackProviderChain
+    from maulness.core.providers.base import BaseProvider
+
+    p1 = Profile(identity={"name": "p1"}, agent={"provider": "gemini", "model": "gemini-3.8-flash"})
+    p2 = Profile(identity={"name": "p2"}, agent={"provider": "ollama", "model": "gemma4:31b-cloud"})
+
+    mock1 = AsyncMock(spec=BaseProvider)
+    mock1.profile = p1
+    mock1.run.return_value = "   "  # Empty / whitespace response
+
+    mock2 = AsyncMock(spec=BaseProvider)
+    mock2.profile = p2
+    mock2.run.return_value = "Valid fallback response"
+
+    chain = FallbackProviderChain(primary=mock1, fallbacks=[mock2])
+    result = await chain.run(session_id="empty_test", prompt="hello")
+
+    assert result == "Valid fallback response"
+    assert chain.last_used_provider == mock2
+    mock1.run.assert_called_once()
+    mock2.run.assert_called_once()
+
+
+
