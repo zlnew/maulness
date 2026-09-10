@@ -448,6 +448,7 @@ class AgentCard(Static):
             lines = [line.strip() for line in full_thought.splitlines() if line.strip()]
             snippet = lines[-1][:75] if lines else "Thinking..."
             self.thought_static.update(f"[dim italic #7aa2f7]💭 Thinking ({elapsed:.1f}s):[/dim italic #7aa2f7] [dim #a9b1d6]{snippet}[/dim #a9b1d6]")
+            self.thought_static.add_class("visible")
             self.status_label.update("[dim #7aa2f7]󰑮 Thinking...[/dim #7aa2f7]")
 
     def record_tool_call(self, tool_name: str, args: Any = None) -> None:
@@ -462,6 +463,7 @@ class AgentCard(Static):
             elif "AbsolutePath" in args:
                 summary = f": {args['AbsolutePath']}"
         self.tools_static.update(f"[bold #e0af68]⚡ Tool:[/bold #e0af68] [dim #a9b1d6]{tool_name}{summary}[/dim #a9b1d6]")
+        self.tools_static.add_class("visible")
 
     def append_message(self, delta: str, force_render: bool = False) -> None:
         if not self.has_started_message:
@@ -469,7 +471,9 @@ class AgentCard(Static):
             self.thought_duration = time.time() - self.thought_start_time
             if self.thought_text:
                 self.thought_static.update(f"[dim #565f89]💭 Thought for {self.thought_duration:.1f}s[/dim #565f89]")
+                self.thought_static.add_class("visible")
             else:
+                self.thought_static.remove_class("visible")
                 self.thought_static.update("")
             self.status_label.update("[dim #737aa2]󰑮 Streaming response...[/dim #737aa2]")
 
@@ -488,6 +492,7 @@ class AgentCard(Static):
         if not self.has_started_message and self.thought_text:
             duration = time.time() - self.thought_start_time
             self.thought_static.update(f"[dim #565f89]💭 Thought for {duration:.1f}s[/dim #565f89]")
+            self.thought_static.add_class("visible")
         self._render_message()
 
     def set_status(self, status: str) -> None:
@@ -590,6 +595,7 @@ class MaulnessTUIApp(App):
     }
 
     .thought-box {
+        display: none;
         color: #737aa2;
         background: #16161e;
         padding: 0 1;
@@ -597,12 +603,21 @@ class MaulnessTUIApp(App):
         border-left: thick #414868;
     }
 
+    .thought-box.visible {
+        display: block;
+    }
+
     .tools-box {
+        display: none;
         color: #e0af68;
         background: #16161e;
         padding: 0 1;
         margin-bottom: 1;
         border-left: thick #e0af68;
+    }
+
+    .tools-box.visible {
+        display: block;
     }
 
     #bottom-container {
