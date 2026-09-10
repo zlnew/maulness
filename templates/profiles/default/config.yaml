@@ -1,10 +1,16 @@
-name: default
-description: "Tom — Master Shipwright and chief builder for default workspace operations"
-provider: acp
-command: "agy"
-model: null
-inject_soul: true
-workspace: inherit
-fallbacks:
-  - provider: gemini
-    model: gemini-2.5-flash
+identity:
+  name: default
+  description: "Tom — Master Shipwright and chief builder for default workspace operations"
+  soul_inject: true
+
+model:
+  provider: acp
+  command: "agy"
+
+execution:
+  workspace: inherit
+
+resilience:
+  fallbacks:
+    - provider: gemini
+      model: gemini-2.5-flash

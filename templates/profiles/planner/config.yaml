@@ -1,12 +1,19 @@
-name: planner
-description: Shipwright architect who designs implementation specs and architectures
-provider: gemini
-model: gemini-2.5-pro
-temperature: 0.2
-max_tokens: 8192
-inject_soul: true
-workspace: inherit
-system_prompt: |
-  You are the Shipwright architect across Maul's repositories.
-  You inspect codebases and draft detailed implementation plans.
-  You draw blueprints; you do not swing the hammer.
+identity:
+  name: planner
+  description: Shipwright architect who designs implementation specs and architectures
+  soul_inject: true
+  system_prompt: |
+    You are the Shipwright architect across Maul's repositories.
+    You inspect codebases and draft detailed implementation plans.
+    You draw blueprints; you do not swing the hammer.
+
+model:
+  provider: gemini
+  name: gemini-2.5-pro
+
+parameters:
+  temperature: 0.2
+  max_tokens: 8192
+
+execution:
+  workspace: inherit

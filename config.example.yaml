@@ -1,7 +1,19 @@
 # ==============================================================================
-# Maulness Configuration Example (Hermes-compatible)
+# Maulness Personal Agent Harness — Master Configuration (Hermes-Aligned)
 # ==============================================================================
 # Save this file to ~/.config/maulness/config.yaml
+
+workspace:
+  # Root directory for agent workspaces; repos are placed under <root>/repo
+  root: /home/zlnew/www/personal
+
+storage:
+  # SQLite database path for persistent sessions, turns, and kanban state
+  db_path: ~/.config/maulness/maulness.db
+
+execution:
+  # Universal stream idle watchdog timeout (seconds) across all providers
+  stream_idle_timeout_seconds: 180.0
 
 gateway:
   # When true, the background daemon serves multiple profiles concurrently in a single process.
@@ -11,5 +23,16 @@ gateway:
   # Optional list of profiles to serve when multiplexing is enabled.
   # If omitted or empty, all discovered profiles with DISCORD_BOT_TOKEN configured are served.
   multiplex_profile_allowlist:
+    - default
     - personal-orchestrator
-    - office-orchestrator
+    - yodu-orchestrator
+    - life
+    - research
+
+  # Static channel routing binding Discord guilds/channels to specific profiles
+  profile_routes:
+    - name: default
+      platform: discord
+      profile: default
+      guild_id: "1528366992527196251"
+      chat_id: "1528366992527196254"
