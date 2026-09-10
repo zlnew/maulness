@@ -94,9 +94,55 @@ async def test_fallback_provider_chain_execution_failover():
     mock_fallback.run.return_value = "Fallback succeeded!"
 
     chain = FallbackProviderChain(primary=mock_primary, fallbacks=[mock_fallback])
-    result = await chain.run(session_id="s1", prompt="test prompt")
+    thought_events = []
+    async def on_thought(ev):
+        thought_events.append(ev.delta)
+
+    result = await chain.run(session_id="s1", prompt="test prompt", on_thought=on_thought)
 
     assert result == "Fallback succeeded!"
+    assert chain.last_used_provider == mock_fallback
+    assert len(thought_events) == 1
+    assert "⚠️ Provider [gemini:default] failed (Rate limit / quota exceeded (429))" in thought_events[0]
+    assert "Switching to fallback [anthropic:default]" in thought_events[0]
     mock_primary.run.assert_called_once()
     mock_fallback.run.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_fallback_provider_chain_all_fail_aggregates_errors():
+    from unittest.mock import AsyncMock
+    from maulness.core.providers.fallback import FallbackProviderChain
+    from maulness.core.providers.base import BaseProvider
+
+    p1 = Profile(identity={"name": "p1"}, agent={"provider": "gemini", "model": "gemini-3.8-flash"})
+    p2 = Profile(identity={"name": "p2"}, agent={"provider": "ollama", "model": "gemma4:31b-cloud"})
+
+    mock1 = AsyncMock(spec=BaseProvider)
+    mock1.profile = p1
+    mock1.run.side_effect = RuntimeError("HTTP 500 Internal Server Error")
+
+    mock2 = AsyncMock(spec=BaseProvider)
+    mock2.profile = p2
+    mock2.run.side_effect = TimeoutError("Stream timed out")
+
+    chain = FallbackProviderChain(primary=mock1, fallbacks=[mock2])
+    with pytest.raises(RuntimeError) as exc_info:
+        await chain.run(session_id="s2", prompt="test")
+
+    err_text = str(exc_info.value)
+    assert "All configured providers failed" in err_text
+    assert "gemini:gemini-3.8-flash ➔ Internal server error (500)" in err_text
+    assert "ollama:gemma4:31b-cloud ➔ Request timed out" in err_text
+
+
+def test_format_user_friendly_error():
+    from maulness.core.providers.fallback import format_user_friendly_error
+
+    assert "500" in format_user_friendly_error(RuntimeError("500 Internal Server Error"))
+    assert "429" in format_user_friendly_error(Exception("RESOURCE_EXHAUSTED: quota reached"))
+    assert "401" in format_user_friendly_error(Exception("CreditsError: balance 0"))
+    assert "timed out" in format_user_friendly_error(TimeoutError("No response for 180s"))
+    assert "API key" in format_user_friendly_error(Exception("API_KEY_INVALID"))
+
 

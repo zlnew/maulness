@@ -420,9 +420,10 @@ class SystemCard(Static):
 class AgentCard(Static):
     """Card displaying compact thought ticker, tool badges, and clean assistant response."""
 
-    def __init__(self, profile_name: str):
+    def __init__(self, profile_name: str, model_info: Optional[str] = None):
         super().__init__(classes="agent-card")
         self.profile_name = profile_name
+        self.model_info = model_info
         self.thought_text: list[str] = []
         self.message_text: list[str] = []
         self.thought_start_time = time.time()
@@ -437,7 +438,8 @@ class AgentCard(Static):
         self._last_render_time = 0.0
 
     def compose(self) -> ComposeResult:
-        yield Label(f"[bold magenta]Maulness[/bold magenta] [dim]({self.profile_name})[/dim]", classes="card-header")
+        tag = f"{self.profile_name} • {self.model_info}" if self.model_info else self.profile_name
+        yield Label(f"[bold magenta]Maulness[/bold magenta] [dim]({tag})[/dim]", classes="card-header")
         yield self.thought_static
         yield self.tools_static
         yield self.message_static
@@ -445,6 +447,8 @@ class AgentCard(Static):
 
     def append_thought(self, delta: str) -> None:
         self.thought_text.append(delta)
+        if "⚠️ Provider" in delta or "Switching to fallback" in delta:
+            self.status_label.update(f"[bold yellow]{delta.strip()}[/bold yellow]")
         if not self.has_started_message:
             elapsed = time.time() - self.thought_start_time
             full_thought = "".join(self.thought_text).strip()
@@ -452,7 +456,8 @@ class AgentCard(Static):
             snippet = lines[-1][:75] if lines else "Thinking..."
             self.thought_static.update(f"[dim italic cyan]💭 Thinking ({elapsed:.1f}s):[/dim italic cyan] [dim]{snippet}[/dim]")
             self.thought_static.add_class("visible")
-            self.status_label.update("[dim cyan]󰑮 Thinking...[/dim cyan]")
+            if "⚠️ Provider" not in delta:
+                self.status_label.update("[dim cyan]󰑮 Thinking...[/dim cyan]")
 
     def record_tool_call(self, tool_name: str, args: Any = None) -> None:
         summary = ""
@@ -1429,7 +1434,9 @@ class MaulnessTUIApp(App):
 
         branch = get_git_branch(self.workspace_path)
         user_card = UserCard(prompt, self.repo_name, branch)
-        agent_card = AgentCard(self.current_profile)
+        prof = self.profile_manager.get_profile(self.current_profile)
+        model_info = f"{prof.provider}:{prof.model or prof.command or 'default'}" if prof else None
+        agent_card = AgentCard(self.current_profile, model_info=model_info)
 
         await chat_view.mount(user_card)
         await chat_view.mount(agent_card)

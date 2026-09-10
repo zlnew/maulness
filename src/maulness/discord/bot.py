@@ -266,8 +266,12 @@ class MaulnessBot(commands.Bot):
         """Execute a conversational chat prompt in Discord and stream the response."""
         self.total_prompts += 1
         target_profile = profile or self.bound_profile
-        current_msg = await channel.send(f"💭 **{target_profile.name}** is thinking...\n> {prompt[:100]}")
+        model_tag = target_profile.model or target_profile.command or "default"
+        provider_tag = f"{target_profile.provider}:{model_tag}"
+        current_msg = await channel.send(f"💭 **{target_profile.name}** is thinking... `[{provider_tag}]`\n> {prompt[:100]}")
         active_msgs = [current_msg]
+        start_time = time.time()
+        fallback_alerts: list[str] = []
 
         async def flush_chunk(text: str, is_final: bool, is_overflow: bool = False):
             nonlocal current_msg
@@ -285,7 +289,27 @@ class MaulnessBot(commands.Bot):
         debouncer = MessageStreamDebouncer(flush_callback=flush_chunk)
 
         async def on_thought(event: AgentThoughtEvent):
-            pass
+            if "⚠️ Provider" in event.delta or "Switching to fallback" in event.delta:
+                clean_alert = event.delta.strip()
+                fallback_alerts.append(clean_alert)
+                if not debouncer.full_text.strip():
+                    alert_block = "\n".join(f"> {a}" for a in fallback_alerts)
+                    try:
+                        await current_msg.edit(
+                            content=f"💭 **{target_profile.name}** is thinking... `[{provider_tag}]`\n> {prompt[:100]}\n\n{alert_block}"
+                        )
+                    except Exception as e:
+                        logger.debug("Failed to edit Discord thinking message with fallback notice: %s", e)
+
+        async def on_tool_call(event: AgentToolCallEvent):
+            logger.info("[%s] Tool call in channel %s: %s", target_profile.name, channel_id, event.tool_name)
+            if not debouncer.full_text.strip():
+                try:
+                    await current_msg.edit(
+                        content=f"💭 **{target_profile.name}** is thinking... `[{provider_tag}]`\n> {prompt[:100]}\n\n> ⚡ *Executing tool: `{event.tool_name}`...*"
+                    )
+                except Exception as e:
+                    logger.debug("Failed to edit Discord thinking message with tool call: %s", e)
 
         async def on_message_chunk(event: AgentMessageEvent):
             self.total_chars_out += len(event.delta)
@@ -340,10 +364,19 @@ class MaulnessBot(commands.Bot):
                     on_init=on_init,
                     on_thought=on_thought,
                     on_message=on_message_chunk,
+                    on_tool_call=on_tool_call,
                     on_approval=on_approval,
                 )
                 if res and not debouncer.full_text:
                     await debouncer.write(res)
+
+                # If response was fulfilled by a fallback provider, attach a subtle footnote
+                used_prov = getattr(provider, "last_used_provider", None)
+                if used_prov and hasattr(provider, "primary") and used_prov != getattr(provider, "primary", None):
+                    used_tag = f"{used_prov.profile.provider}:{used_prov.profile.model or used_prov.profile.command or 'default'}"
+                    footnote = f"\n\n*(⚡ Responded via fallback `{used_tag}` after primary provider failure)*"
+                    await debouncer.write(footnote)
+
                 last_cid = getattr(provider, "last_conversation_id", None)
                 if channel_id and last_cid:
                     self.channel_conversations[channel_id] = last_cid
@@ -361,7 +394,8 @@ class MaulnessBot(commands.Bot):
         except Exception as e:
             logger.exception("[%s] Error executing chat prompt: %s", target_profile.name, e)
             try:
-                await channel.send(f"❌ **Error [{target_profile.name}]:** {e}")
+                err_text = str(e).strip()
+                await channel.send(f"❌ **Execution Error [{target_profile.name}]:**\n```\n{err_text[:1500]}\n```")
             except Exception:
                 pass
         finally:
@@ -369,6 +403,14 @@ class MaulnessBot(commands.Bot):
                 self.channel_tasks.pop(channel_id, None)
             self.active_tasks.pop(session_key, None)
             await debouncer.close()
+            elapsed = time.time() - start_time
+            logger.info(
+                "[%s] Completed chat prompt in channel %s in %.2fs (output: %d chars)",
+                target_profile.name,
+                channel_id,
+                elapsed,
+                len(debouncer.full_text),
+            )
 
             # Process next queued prompt in channel if any
             if channel_id and self.channel_queues.get(channel_id):

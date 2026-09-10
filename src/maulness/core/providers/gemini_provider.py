@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 from google import genai
@@ -89,17 +90,29 @@ class GeminiProvider(BaseProvider):
                     f"Gemini stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
                 )
 
-            # Check for thinking parts if present
+            # Process candidate parts for thought and text content
+            has_parts = False
             if hasattr(chunk, "candidates") and chunk.candidates:
                 for cand in chunk.candidates:
                     if hasattr(cand, "content") and cand.content:
                         for part in cand.content.parts:
-                            if getattr(part, "thought", None) and on_thought:
-                                await on_thought(
-                                    AgentThoughtEvent(delta=part.text, session_id=session_id)
-                                )
+                            part_text = getattr(part, "text", None)
+                            if not part_text:
+                                continue
+                            has_parts = True
+                            if getattr(part, "thought", None):
+                                if on_thought:
+                                    await on_thought(
+                                        AgentThoughtEvent(delta=part_text, session_id=session_id)
+                                    )
+                            else:
+                                accumulated.append(part_text)
+                                if on_message:
+                                    await on_message(
+                                        AgentMessageEvent(delta=part_text, session_id=session_id)
+                                    )
 
-            if chunk.text:
+            if not has_parts and getattr(chunk, "text", None):
                 accumulated.append(chunk.text)
                 if on_message:
                     await on_message(
