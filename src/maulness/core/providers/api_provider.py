@@ -114,6 +114,9 @@ class UnifiedApiProvider(BaseProvider):
             "max_tokens": self.profile.max_tokens,
             "stream": True,
         }
+        effort = self.profile.reasoning_effort
+        if effort:
+            payload["reasoning_effort"] = effort
 
         idle_timeout = config.stream_idle_timeout_seconds
         accumulated = []
@@ -171,6 +174,11 @@ class UnifiedApiProvider(BaseProvider):
             "temperature": self.profile.temperature,
             "stream": True,
         }
+        _EFFORT_BUDGET = {"low": 1024, "medium": 8192, "high": 24576}
+        effort = self.profile.reasoning_effort
+        if effort:
+            payload["thinking"] = {"type": "enabled", "budget_tokens": _EFFORT_BUDGET.get(effort.lower(), 8192)}
+            payload["temperature"] = 1  # Anthropic requires temperature=1 when thinking is enabled
 
         idle_timeout = config.stream_idle_timeout_seconds
         accumulated = []

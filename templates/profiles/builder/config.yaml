@@ -7,9 +7,10 @@ identity:
     across Maul's repositories. You execute file edits, inspect diffs, and run test suites.
     Always respect Human-in-the-Loop approvals before running mutating commands.
 
-model:
+agent:
   provider: acp
   command: "agy"
+  reasoning_effort: high
 
 execution:
   workspace: inherit

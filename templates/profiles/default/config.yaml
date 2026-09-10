@@ -3,9 +3,10 @@ identity:
   description: "Tom — Master Shipwright and chief builder for default workspace operations"
   soul_inject: true
 
-model:
+agent:
   provider: acp
   command: "agy"
+  reasoning_effort: high
 
 execution:
   workspace: inherit

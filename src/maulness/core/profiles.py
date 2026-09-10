@@ -30,22 +30,25 @@ class VertexConfig(BaseModel):
     location: Optional[str] = "us-central1"
 
 
-class ModelConfig(BaseModel):
+class AgentConfig(BaseModel):
+    """Routing + execution identity block (mirrors Hermes 'agent:' schema)."""
     provider: str = "acp"
-    name: Optional[str] = None  # target model identifier
-    base_url: Optional[str] = None  # custom endpoint (e.g. OpenCode, Ollama, DeepSeek)
+    model: Optional[str] = None        # target model identifier (e.g. "gemini-2.5-pro")
+    base_url: Optional[str] = None     # custom endpoint (e.g. OpenCode, Ollama, DeepSeek)
     api_key_env: Optional[str] = None
-    command: Optional[str] = None  # CLI command for ACP (e.g. "agy", "opencode run")
+    command: Optional[str] = None      # CLI command for ACP (e.g. "agy", "opencode run")
+    reasoning_effort: Optional[str] = None  # "low" | "medium" | "high"
     vertex: Optional[VertexConfig] = None
 
     @model_validator(mode="before")
     @classmethod
-    def _remap_model_alias(cls, data: Any) -> Any:
+    def _normalize_agent_fields(cls, data: Any) -> Any:
         if isinstance(data, str):
-            return {"name": data}
+            return {"model": data}
         if isinstance(data, dict):
-            if "model" in data and "name" not in data:
-                data["name"] = data.pop("model")
+            # Accept legacy "name" field as "model" inside this block
+            if "name" in data and "model" not in data:
+                data["model"] = data.pop("name")
         return data
 
 
@@ -69,6 +72,7 @@ class FallbackItem(BaseModel):
     base_url: Optional[str] = None
     api_key_env: Optional[str] = None
     command: Optional[str] = None
+    reasoning_effort: Optional[str] = None
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
 
@@ -81,7 +85,7 @@ class Profile(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     identity: IdentityConfig
-    model_cfg: ModelConfig = Field(default_factory=ModelConfig, alias="model")
+    agent_cfg: AgentConfig = Field(default_factory=AgentConfig, alias="agent")
     parameters: ParameterConfig = Field(default_factory=ParameterConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
@@ -97,24 +101,30 @@ class Profile(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _normalize_config_structure(cls, data: Any) -> Any:
-        """Transparently accepts both new grouped YAML and legacy flat YAML."""
+        """Transparently accepts new grouped YAML (agent:), old grouped (model:), and legacy flat YAML."""
         if not isinstance(data, dict):
             return data
 
-        # Check if already using the new grouped structure
+        # ── New grouped structure: identity: + agent: (or old model: block) ───
         if "identity" in data and isinstance(data["identity"], (dict, IdentityConfig)):
-            # Normalize vertex if passed as flat inside model or top-level
+            # Rename legacy "model:" block → "agent:" if present
+            if "model" in data and isinstance(data["model"], dict) and "agent" not in data:
+                data["agent"] = data.pop("model")
+
+            # Normalize legacy cloud: block into agent.vertex
             if "cloud" in data and isinstance(data["cloud"], dict):
                 cloud_data = data["cloud"]
-                if "model" in data and isinstance(data["model"], dict):
-                    data["model"]["vertex"] = {
+                agent_block = data.get("agent", {})
+                if isinstance(agent_block, dict):
+                    agent_block["vertex"] = {
                         "enabled": cloud_data.get("vertex", True),
                         "project": cloud_data.get("project"),
                         "location": cloud_data.get("location", "us-central1"),
                     }
+                    data["agent"] = agent_block
             return data
 
-        # Otherwise, dynamically reshape flat legacy keys into structured groups
+        # ── Legacy flat YAML: reshape into grouped structure ───────────────────
         vertex_cfg = None
         if data.get("vertex") or data.get("project"):
             vertex_cfg = {
@@ -139,12 +149,13 @@ class Profile(BaseModel):
                 "soul_inject": data.get("soul_inject", data.get("inject_soul", True)),
                 "soul_params": data.get("soul_params", {}),
             },
-            "model": {
+            "agent": {
                 "provider": data.get("provider", "acp"),
-                "name": data.get("model") or data.get("model_name"),
+                "model": data.get("model") or data.get("model_name"),
                 "base_url": data.get("base_url"),
                 "api_key_env": data.get("api_key_env"),
                 "command": data.get("command"),
+                "reasoning_effort": data.get("reasoning_effort"),
                 "vertex": vertex_cfg,
             },
             "parameters": {
@@ -173,7 +184,7 @@ class Profile(BaseModel):
     @model_validator(mode="after")
     def _validate_acp_command(self) -> "Profile":
         """Enforce explicit command requirement for ACP provider."""
-        if self.model_cfg.provider.lower().strip() == "acp" and not (self.model_cfg.command and self.model_cfg.command.strip()):
+        if self.agent_cfg.provider.lower().strip() == "acp" and not (self.agent_cfg.command and self.agent_cfg.command.strip()):
             raise ValueError(
                 f"Profile '{self.name}' specifies provider 'acp' but has no 'command' configured in config.yaml"
             )
@@ -204,39 +215,43 @@ class Profile(BaseModel):
 
     @property
     def provider(self) -> str:
-        return self.model_cfg.provider
+        return self.agent_cfg.provider
 
     @property
     def model(self) -> Optional[str]:
-        return self.model_cfg.name
+        return self.agent_cfg.model
 
     @property
     def model_name(self) -> Optional[str]:
-        return self.model_cfg.name
+        return self.agent_cfg.model
 
     @property
     def base_url(self) -> Optional[str]:
-        return self.model_cfg.base_url
+        return self.agent_cfg.base_url
 
     @property
     def api_key_env(self) -> Optional[str]:
-        return self.model_cfg.api_key_env
+        return self.agent_cfg.api_key_env
 
     @property
     def command(self) -> Optional[str]:
-        return self.model_cfg.command
+        return self.agent_cfg.command
+
+    @property
+    def reasoning_effort(self) -> Optional[str]:
+        return self.agent_cfg.reasoning_effort
 
     @property
     def vertex(self) -> bool:
-        return bool(self.model_cfg.vertex and self.model_cfg.vertex.enabled)
+        return bool(self.agent_cfg.vertex and self.agent_cfg.vertex.enabled)
 
     @property
     def project(self) -> Optional[str]:
-        return self.model_cfg.vertex.project if self.model_cfg.vertex else None
+        return self.agent_cfg.vertex.project if self.agent_cfg.vertex else None
 
     @property
     def location(self) -> Optional[str]:
-        return self.model_cfg.vertex.location if self.model_cfg.vertex else "us-central1"
+        return self.agent_cfg.vertex.location if self.agent_cfg.vertex else "us-central1"
 
     @property
     def temperature(self) -> float:

@@ -54,11 +54,19 @@ class GeminiProvider(BaseProvider):
         client = genai.Client(api_key=api_key)
         model_name = self.profile.model or "gemini-2.5-flash"
 
-        gen_config = types.GenerateContentConfig(
-            system_instruction=self.profile.effective_system_prompt(),
-            temperature=self.profile.temperature,
-            max_output_tokens=self.profile.max_tokens,
-        )
+        _EFFORT_BUDGET = {"low": 1024, "medium": 8192, "high": 24576}
+
+        gen_config_kwargs: dict = {
+            "system_instruction": self.profile.effective_system_prompt(),
+            "temperature": self.profile.temperature,
+            "max_output_tokens": self.profile.max_tokens,
+        }
+        effort = self.profile.reasoning_effort
+        if effort:
+            budget = _EFFORT_BUDGET.get(effort.lower(), 8192)
+            gen_config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
+
+        gen_config = types.GenerateContentConfig(**gen_config_kwargs)
 
         accumulated = []
         response_stream = await client.aio.models.generate_content_stream(

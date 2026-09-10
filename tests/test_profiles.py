@@ -82,10 +82,11 @@ identity:
   name: grouped_bot
   description: "Grouped bot test"
   system_prompt: "You are grouped."
-model:
+agent:
   provider: opencode_zen
-  name: gpt-4o
+  model: gpt-4o
   base_url: https://api.opencode.ai/v1
+  reasoning_effort: high
   vertex:
     enabled: false
 parameters:
@@ -98,6 +99,7 @@ resilience:
   fallbacks:
     - provider: gemini
       model: gemini-2.5-flash
+      reasoning_effort: medium
 """
     (prof_dir / "config.yaml").write_text(grouped_yaml, encoding="utf-8")
 
@@ -108,14 +110,17 @@ resilience:
     assert p.provider == "opencode_zen"
     assert p.model == "gpt-4o"
     assert p.base_url == "https://api.opencode.ai/v1"
+    assert p.reasoning_effort == "high"
     assert p.temperature == 0.3
     assert p.max_tokens == 2048
     assert p.yolo is True
     assert len(p.fallbacks) == 1
     assert p.fallbacks[0]["provider"] == "gemini"
     assert p.fallbacks[0]["model"] == "gemini-2.5-flash"
+    assert p.fallbacks[0]["reasoning_effort"] == "medium"
     assert p.resilience.fallbacks[0].provider == "gemini"
     assert p.resilience.fallbacks[0].model == "gemini-2.5-flash"
+    assert p.resilience.fallbacks[0].reasoning_effort == "medium"
 
 
 def test_standard_api_key_resolution_without_api_key_env():
@@ -147,3 +152,66 @@ def test_dual_target_memory_loading_and_injection(tmp_path):
     assert "Workspace Knowledge & Lessons Learned (MEMORY.md)" in effective
     assert "Docker port 8000 is used by expense-tracker" in effective
 
+
+def test_reasoning_effort_flat_yaml():
+    """Legacy flat YAML with reasoning_effort key is normalized correctly."""
+    p = Profile(
+        name="thinker",
+        provider="gemini",
+        model="gemini-2.5-pro",
+        reasoning_effort="high",
+    )
+    assert p.reasoning_effort == "high"
+    assert p.agent_cfg.reasoning_effort == "high"
+
+
+def test_reasoning_effort_defaults_to_none():
+    """Profile without reasoning_effort defaults to None."""
+    p = Profile(name="gemini-bot", provider="gemini")
+    assert p.reasoning_effort is None
+
+
+def test_legacy_model_block_migrates_to_agent(tmp_path):
+    """Old-style 'model:' block in grouped YAML is transparently migrated to 'agent:'."""
+    prof_dir = tmp_path / "legacy_grouped"
+    prof_dir.mkdir()
+    old_yaml = """
+identity:
+  name: legacy_grouped
+  description: "Legacy grouped profile"
+model:
+  provider: gemini
+  name: gemini-2.5-pro
+parameters:
+  temperature: 0.1
+"""
+    (prof_dir / "config.yaml").write_text(old_yaml, encoding="utf-8")
+    pm = ProfileManager(profiles_dir=tmp_path)
+    p = pm.get_profile("legacy_grouped")
+    assert p.provider == "gemini"
+    assert p.model == "gemini-2.5-pro"
+    assert p.temperature == 0.1
+
+
+def test_fallback_reasoning_effort_propagated():
+    """FallbackItem.reasoning_effort is propagated through factory into provider."""
+    from maulness.core.providers.factory import get_provider_for_profile
+    from maulness.core.providers.fallback import FallbackProviderChain
+
+    profile = Profile(
+        name="smart-gemini",
+        provider="gemini",
+        reasoning_effort="high",
+        fallbacks=[
+            {
+                "provider": "anthropic",
+                "model": "claude-3-7-sonnet-20250219",
+                "reasoning_effort": "medium",
+            }
+        ],
+    )
+    provider = get_provider_for_profile(profile)
+    assert isinstance(provider, FallbackProviderChain)
+    fb_profile = provider.fallbacks[0].profile
+    assert fb_profile.reasoning_effort == "medium"
+    assert fb_profile.provider == "anthropic"

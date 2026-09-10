@@ -101,6 +101,15 @@ class AcpProvider(BaseProvider):
                     f"{prompt}"
                 )
 
+        # Append --model from profile.model if not already specified in command
+        if self.profile.model and "--model" not in self.profile.command:
+            cmd.extend(["--model", self.profile.model])
+
+        # Append --effort from profile.reasoning_effort if not already specified in command
+        effort = self.profile.reasoning_effort
+        if effort and "--effort" not in self.profile.command:
+            cmd.extend(["--effort", effort])
+
         cmd.extend(["--output-format", "stream-json", "-p", effective_prompt])
 
         proc = await asyncio.create_subprocess_exec(

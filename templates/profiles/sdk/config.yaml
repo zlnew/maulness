@@ -6,9 +6,9 @@ identity:
     You are an in-process Antigravity agent running via the official Python SDK.
     You inspect codebases, execute targeted commands, and produce clean, minimal solutions.
 
-model:
+agent:
   provider: antigravity_sdk
-  name: gemini-2.5-flash
+  model: gemini-2.5-flash
 
 execution:
   workspace: inherit
