@@ -112,3 +112,66 @@ async def test_acp_approval_request_flow():
     assert sent_response["result"]["approved"] is True
 
     await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_agy_stream_conversation_persistence(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+    from maulness.core.profiles import Profile
+    from maulness.core.providers.acp_provider import AcpProvider
+
+    profile = Profile(name="builder", command="agy --output-format stream-json")
+    provider = AcpProvider(profile)
+
+    captured_cmds = []
+
+    class MockProcess:
+        def __init__(self, cmd):
+            captured_cmds.append(cmd)
+            self.returncode = 0
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+
+            # Feed test events
+            self.stdout.feed_data(
+                b'{"event":"init","conversation_id":"conv-abc-123"}\n'
+                b'{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"Sure!"}}\n'
+                b'{"event":"result","result":{"conversation_id":"conv-abc-123","response":"Sure!"}}\n'
+            )
+            self.stdout.feed_eof()
+
+        async def wait(self):
+            return 0
+
+    def mock_exec(*cmd, **kwargs):
+        return MockProcess(list(cmd))
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(side_effect=mock_exec))
+
+    init_convs = []
+
+    async def on_init(cid: str):
+        init_convs.append(cid)
+
+    # Turn 1: Fresh conversation
+    res1 = await provider.run(
+        session_id="task_1",
+        prompt="First prompt",
+        on_init=on_init,
+    )
+    assert res1 == "Sure!"
+    assert init_convs == ["conv-abc-123"]
+    assert provider.last_conversation_id == "conv-abc-123"
+    assert "--conversation" not in captured_cmds[0]
+
+    # Turn 2: Resumed conversation
+    res2 = await provider.run(
+        session_id="task_2",
+        prompt="Second prompt",
+        conversation_id="conv-abc-123",
+    )
+    assert res2 == "Sure!"
+    assert "--conversation" in captured_cmds[1]
+    conv_idx = captured_cmds[1].index("--conversation")
+    assert captured_cmds[1][conv_idx + 1] == "conv-abc-123"
+

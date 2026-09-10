@@ -21,11 +21,17 @@ logger = logging.getLogger("maulness.providers.acp")
 class AcpProvider(BaseProvider):
     """Antigravity subprocess provider supporting native stream-json and standard ACP JSON-RPC."""
 
+    def __init__(self, profile: Profile):
+        super().__init__(profile)
+        self.last_conversation_id: Optional[str] = None
+
     async def run(
         self,
         session_id: str,
         prompt: str,
         workspace_path: Optional[Path] = None,
+        conversation_id: Optional[str] = None,
+        on_init: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None,
         on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
         on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
         on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
@@ -43,6 +49,8 @@ class AcpProvider(BaseProvider):
                 session_id=session_id,
                 prompt=prompt,
                 cwd=cwd,
+                conversation_id=conversation_id,
+                on_init=on_init,
                 on_thought=on_thought,
                 on_message=on_message,
                 on_tool_call=on_tool_call,
@@ -67,13 +75,18 @@ class AcpProvider(BaseProvider):
         session_id: str,
         prompt: str,
         cwd: str,
+        conversation_id: Optional[str] = None,
+        on_init: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None,
         on_thought=None,
         on_message=None,
         on_tool_call=None,
         on_approval=None,
     ) -> str:
         """Stream output from Antigravity agy CLI in native stream-json format."""
-        cmd = [binary, "--output-format", "stream-json", "-p", prompt]
+        cmd = [binary]
+        if conversation_id:
+            cmd.extend(["--conversation", conversation_id])
+        cmd.extend(["--output-format", "stream-json", "-p", prompt])
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -101,7 +114,14 @@ class AcpProvider(BaseProvider):
                     continue
 
                 event = data.get("event")
-                if event == "step_update":
+                if event == "init":
+                    conv_id = data.get("conversation_id")
+                    if conv_id:
+                        self.last_conversation_id = conv_id
+                        if on_init:
+                            await on_init(conv_id)
+
+                elif event == "step_update":
                     su = data.get("step_update", {})
                     step_type = su.get("step_type")
                     text_delta = su.get("text_delta")
@@ -127,6 +147,9 @@ class AcpProvider(BaseProvider):
 
                 elif event == "result":
                     res = data.get("result", {})
+                    conv_id = res.get("conversation_id")
+                    if conv_id:
+                        self.last_conversation_id = conv_id
                     resp_text = res.get("response")
                     if resp_text and not accumulated:
                         accumulated.append(resp_text)

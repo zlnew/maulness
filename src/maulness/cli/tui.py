@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -769,6 +770,8 @@ class MaulnessTUIApp(App):
         self.session_start_time = time.time()
         self.total_prompts = 0
         self.total_chars_out = 0
+        self.active_session_id = f"tui_{uuid.uuid4().hex[:8]}"
+        self.active_acp_session_id: Optional[str] = None
 
     def compose(self) -> ComposeResult:
         branch = get_git_branch(self.workspace_path)
@@ -1118,6 +1121,8 @@ class MaulnessTUIApp(App):
     def action_clear_chat(self) -> None:
         chat_view = self.query_one("#chat-view", VerticalScroll)
         chat_view.remove_children()
+        self.active_acp_session_id = None
+        self.active_session_id = f"tui_{uuid.uuid4().hex[:8]}"
 
     def action_view_diff(self) -> None:
         self.push_screen(DiffModal(self.workspace_path))
@@ -1128,6 +1133,7 @@ class MaulnessTUIApp(App):
         def _on_profile_selected(selected: Optional[str]):
             if selected:
                 self.current_profile = selected
+                self.active_acp_session_id = None
                 self._update_top_bar()
                 chat_input = self.query_one("#chat-input", Input)
                 chat_input.placeholder = f"Ask {self.current_profile} or type / for commands, !<cmd>..."
@@ -1215,6 +1221,7 @@ class MaulnessTUIApp(App):
                 f"• Output Characters: [bold #7aa2f7]{self.total_chars_out:,}[/bold #7aa2f7]\n"
                 f"• Estimated Output Tokens: [bold #89dceb]~{est_tokens:,}[/bold #89dceb]\n"
                 f"• Active Profile: [bold #cba6f7]{self.current_profile}[/bold #cba6f7] ({prof.provider})\n"
+                f"• Antigravity Session: [bold #bb9af7]{self.active_acp_session_id or '(fresh turn)'}[/bold #bb9af7]\n"
                 f"• Session Uptime: [bold #e0af68]{m}m {s}s[/bold #e0af68]\n"
                 f"• Estimated Cost: [bold #a6e3a1]$0.00[/bold #a6e3a1] (Local Antigravity ACP / Free Tier)"
             )
@@ -1244,6 +1251,7 @@ class MaulnessTUIApp(App):
                 f"• Git Branch: [bold #89dceb]{branch}[/bold #89dceb] ({dirty_str})\n"
                 f"• Active Profile: [bold #cba6f7]{self.current_profile}[/bold #cba6f7] ({prof.provider})\n"
                 f"• Target Engine: [bold #7aa2f7]{target}[/bold #7aa2f7]\n"
+                f"• Antigravity Session: [bold #bb9af7]{self.active_acp_session_id or '(none)'}[/bold #bb9af7]\n"
                 f"• Profile Workspace: [dim]{ws_cfg}[/dim]\n"
                 f"• Soul Doctrine: [bold #a6e3a1]Enabled[/bold #a6e3a1] (~/.config/maulness/SOUL.md)\n"
                 f"• Storage DB: [dim]{config.db_path}[/dim]\n"
@@ -1273,6 +1281,9 @@ class MaulnessTUIApp(App):
                 summary=summary,
                 token_count=self.total_chars_out // 4,
             )
+            self.total_chars_out = 0
+            self.active_acp_session_id = None
+            self.active_session_id = f"tui_{uuid.uuid4().hex[:8]}"
             chat_view = self.query_one("#chat-view", VerticalScroll)
             chat_view.remove_children()
             await chat_view.mount(
@@ -1399,12 +1410,19 @@ class MaulnessTUIApp(App):
         async def on_approval(event: ApprovalRequestEvent) -> bool:
             return await self.push_screen_wait(ApprovalModal(event))
 
+        async def on_init(conv_id: str):
+            self.active_acp_session_id = conv_id
+            logger.info("Attached to Antigravity conversation: %s", conv_id)
+
         try:
             task = await self.runner.run_direct(
                 repo_name=self.repo_name,
                 prompt=prompt,
                 workspace_path=self.workspace_path,
                 profile_name=self.current_profile,
+                session_id=self.active_session_id,
+                conversation_id=self.active_acp_session_id,
+                on_init=on_init,
                 on_thought=on_thought,
                 on_message=on_message,
                 on_tool_call=on_tool_call,

@@ -40,13 +40,16 @@ class TaskRunner:
         prompt: str,
         workspace_path: Optional[Path] = None,
         profile_name: str = "builder",
+        session_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        on_init: Optional[Callable[[str], Coroutine]] = None,
         on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine]] = None,
         on_message: Optional[Callable[[AgentMessageEvent], Coroutine]] = None,
         on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine]] = None,
         on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine]] = None,
         verbose: bool = True,
     ) -> TaskRecord:
-        """Execute a task in Direct Mode with the selected profile."""
+        """Execute a task in Direct Mode with the selected profile and conversation persistence."""
         await self.storage.initialize()
 
         profile = self.profile_manager.get_profile(profile_name)
@@ -63,6 +66,26 @@ class TaskRunner:
             workspace_path=str(target_workspace),
             mode=TaskMode.DIRECT,
         )
+
+        session_rec_id = session_id or f"session_{uuid.uuid4().hex[:10]}"
+        session = await self.storage.get_session(session_rec_id)
+        if not session:
+            session = await self.storage.create_session(
+                session_id=session_rec_id,
+                task_id=task_id,
+                profile=profile.name,
+                engine=profile.provider,
+                acp_session_id=conversation_id,
+            )
+
+        effective_conv_id = conversation_id or (session.acp_session_id if session else None)
+
+        async def internal_init_handler(conv_id: str):
+            self.last_conversation_id = conv_id
+            if session_rec_id:
+                await self.storage.update_session_acp_id(session_rec_id, conv_id)
+            if on_init:
+                await on_init(conv_id)
 
         if verbose:
             console.print(
@@ -114,6 +137,8 @@ class TaskRunner:
                 session_id=task_id,
                 prompt=prompt,
                 workspace_path=target_workspace,
+                conversation_id=effective_conv_id,
+                on_init=internal_init_handler,
                 on_thought=default_thought_handler,
                 on_message=default_message_handler,
                 on_tool_call=on_tool_call,

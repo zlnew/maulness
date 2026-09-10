@@ -159,6 +159,15 @@ class StorageManager:
             )
             await db.commit()
 
+    async def update_session_acp_id(self, session_id: str, acp_session_id: str):
+        """Update backend ACP/Antigravity conversation ID for a session."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE agent_sessions SET acp_session_id = ? WHERE id = ?",
+                (acp_session_id, session_id),
+            )
+            await db.commit()
+
     async def get_session(self, session_id: str) -> Optional[SessionRecord]:
         """Fetch session by ID."""
         from maulness.core.models import SessionRecord

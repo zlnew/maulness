@@ -131,6 +131,9 @@ def run_plain_chat(initial_profile: str = "default"):
         )
     )
 
+    active_conversation_id: Optional[str] = None
+    session_id: str = f"cli_{uuid.uuid4().hex[:8]}"
+
     while True:
         try:
             user_input = console.input(
@@ -147,6 +150,8 @@ def run_plain_chat(initial_profile: str = "default"):
 
             if raw_prompt == "/clear":
                 console.clear()
+                active_conversation_id = None
+                session_id = f"cli_{uuid.uuid4().hex[:8]}"
                 continue
 
             if raw_prompt == "/diff":
@@ -164,6 +169,7 @@ def run_plain_chat(initial_profile: str = "default"):
                 parts = raw_prompt.split(" ", 1)
                 if len(parts) > 1 and parts[1].strip():
                     current_profile = parts[1].strip()
+                    active_conversation_id = None
                     console.print(
                         f"[green]Switched active profile to [magenta]{current_profile}[/magenta][/green]"
                     )
@@ -212,6 +218,10 @@ def run_plain_chat(initial_profile: str = "default"):
                 )
                 continue
 
+            async def on_init(conv_id: str):
+                nonlocal active_conversation_id
+                active_conversation_id = conv_id
+
             # Direct prompt turn with active profile (no /code prefix required)
             asyncio.run(
                 runner.run_direct(
@@ -219,6 +229,9 @@ def run_plain_chat(initial_profile: str = "default"):
                     prompt=raw_prompt,
                     workspace_path=workspace_path,
                     profile_name=current_profile,
+                    session_id=session_id,
+                    conversation_id=active_conversation_id,
+                    on_init=on_init,
                 )
             )
 
