@@ -248,6 +248,8 @@ class MaulnessBot(commands.Bot):
             repo="Target repository name (e.g. expense-tracker, horizonx, peek)",
             prompt="The instruction or task to perform",
             profile="Profile to use (builder, planner, default, reviewer)",
+            worktree="Execute in an isolated git worktree (non-destructive)",
+            yolo="YOLO mode: bypass HITL approval on mutating actions",
         )
         @app_commands.choices(repo=REPO_CHOICES)
         async def run_cmd(
@@ -255,6 +257,8 @@ class MaulnessBot(commands.Bot):
             repo: str,
             prompt: str,
             profile: Optional[str] = None,
+            worktree: bool = False,
+            yolo: bool = False,
         ):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
@@ -335,6 +339,8 @@ class MaulnessBot(commands.Bot):
                         repo_name=repo,
                         prompt=prompt,
                         profile_name=effective_profile,
+                        use_worktree=worktree,
+                        yolo=yolo,
                         on_thought=on_thought,
                         on_message=on_message,
                         on_approval=on_approval,
@@ -375,9 +381,18 @@ class MaulnessBot(commands.Bot):
             repo="Target repository name",
             title="Task headline",
             prompt="Detailed task requirements",
+            worktree="Run builder in an isolated git worktree",
+            yolo="YOLO mode: bypass HITL approval on mutating actions",
         )
         @app_commands.choices(repo=REPO_CHOICES)
-        async def task_cmd(interaction: discord.Interaction, repo: str, title: str, prompt: str):
+        async def task_cmd(
+            interaction: discord.Interaction,
+            repo: str,
+            title: str,
+            prompt: str,
+            worktree: bool = False,
+            yolo: bool = False,
+        ):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
                 return
@@ -440,6 +455,8 @@ class MaulnessBot(commands.Bot):
                         title=title,
                         prompt=prompt,
                         discord_thread_id=thread_id,
+                        use_worktree=worktree,
+                        yolo=yolo,
                         on_thought=on_thought,
                         on_message=on_message,
                         on_approval=on_approval,
@@ -466,3 +483,51 @@ class MaulnessBot(commands.Bot):
             bg_task = asyncio.create_task(_run_pipeline_coro())
             self.channel_tasks[exec_channel.id] = f"task_{exec_channel.id}"
             self.active_tasks[f"task_{exec_channel.id}"] = bg_task
+
+        @self.tree.command(name="memory", description="Display active workspace memory (MEMORY.md) and user profile (USER.md)")
+        @app_commands.describe(profile="Optional profile name to inspect")
+        async def memory_cmd(interaction: discord.Interaction, profile: Optional[str] = None):
+            if self.owner_id and interaction.user.id != self.owner_id:
+                await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
+                return
+
+            target_prof = self.profile_manager.get_profile(profile or self.profile_name)
+            embed = discord.Embed(
+                title=f"Durable Memory & User Profile — `{target_prof.name}`",
+                color=0x06B6D4,
+            )
+
+            mem_text = (target_prof.memory_content or "No MEMORY.md found.")[:1000]
+            user_text = (target_prof.user_content or "No USER.md found.")[:1000]
+
+            embed.add_field(name="🧠 Workspace Memory (MEMORY.md)", value=mem_text, inline=False)
+            embed.add_field(name="👤 User Profile (USER.md)", value=user_text, inline=False)
+            await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="yolo", description="Show YOLO mode status and usage guidance")
+        async def yolo_cmd(interaction: discord.Interaction):
+            if self.owner_id and interaction.user.id != self.owner_id:
+                await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
+                return
+
+            embed = discord.Embed(
+                title="⚡ YOLO Mode Guidance",
+                description="YOLO mode auto-approves mutating actions (shell commands, file edits, git operations) without waiting for button confirmations in Discord.",
+                color=0xEF4444,
+            )
+            embed.add_field(
+                name="Usage in `/run`",
+                value="`/run repo:<name> prompt:<text> yolo:True`",
+                inline=False,
+            )
+            embed.add_field(
+                name="Usage in `/task`",
+                value="`/task repo:<name> title:<text> prompt:<text> yolo:True`",
+                inline=False,
+            )
+            embed.add_field(
+                name="CLI Equivalent",
+                value="`maulness run <prompt> --yolo` or `/yolo` in `maulness chat`",
+                inline=False,
+            )
+            await interaction.response.send_message(embed=embed)

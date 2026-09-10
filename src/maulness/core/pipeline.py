@@ -49,6 +49,7 @@ class PipelineOrchestrator:
         pipeline_def: Optional[PipelineDefinition] = None,
         discord_thread_id: Optional[int] = None,
         use_worktree: bool = False,
+        yolo: bool = False,
         on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine]] = None,
         on_message: Optional[Callable[[AgentMessageEvent], Coroutine]] = None,
         on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine]] = None,
@@ -60,6 +61,7 @@ class PipelineOrchestrator:
     ) -> TaskRecord:
         """Execute a declarative pipeline across defined stages."""
         await self.storage.initialize()
+        effective_auto_proceed = auto_proceed or yolo
         target_workspace = Path(workspace_path).resolve() if workspace_path else config.resolve_repo_path(repo_name)
         task_id = f"task_{uuid.uuid4().hex[:10]}"
 
@@ -97,7 +99,7 @@ class PipelineOrchestrator:
 
             for idx, stage in enumerate(definition.stages, start=1):
                 # Check gate before stage begins if specified
-                if stage.gate and not auto_proceed:
+                if stage.gate and not effective_auto_proceed:
                     proceed = True
                     if on_gate:
                         proceed = await on_gate(stage.gate.prompt)
@@ -186,7 +188,8 @@ class PipelineOrchestrator:
             fetched = await self.storage.get_task(task_id)
             return fetched or task
 
-        if use_worktree:
+        effective_use_worktree = use_worktree or any(s.use_worktree for s in definition.stages)
+        if effective_use_worktree:
             with self.worktree_manager.isolated_worktree(
                 target_workspace, branch_prefix=f"pipe-{task_id[:6]}"
             ) as wt_path:

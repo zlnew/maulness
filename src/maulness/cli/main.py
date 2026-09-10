@@ -29,6 +29,8 @@ session_app = typer.Typer(help="Inspect active and past agent sessions")
 profile_app = typer.Typer(help="Inspect agent execution profiles")
 discord_app = typer.Typer(help="Manage Discord bot gateways")
 soul_app = typer.Typer(help="Inspect and edit SOUL.md personal doctrines")
+memory_app = typer.Typer(help="Inspect and edit MEMORY.md workspace knowledge")
+user_app = typer.Typer(help="Inspect and edit USER.md working style and preferences")
 db_app = typer.Typer(help="Database maintenance and migration commands")
 
 app.add_typer(daemon_app, name="daemon")
@@ -37,6 +39,8 @@ app.add_typer(session_app, name="session")
 app.add_typer(profile_app, name="profile")
 app.add_typer(discord_app, name="discord")
 app.add_typer(soul_app, name="soul")
+app.add_typer(memory_app, name="memory")
+app.add_typer(user_app, name="user")
 app.add_typer(db_app, name="db")
 
 console = Console()
@@ -127,6 +131,9 @@ def run(
     worktree: bool = typer.Option(
         False, "-w", "--worktree", help="Execute inside an isolated git worktree"
     ),
+    yolo: bool = typer.Option(
+        False, "-y", "--yolo", help="YOLO mode: bypass human confirmation on mutating tools"
+    ),
 ):
     """Execute a direct task on a repository with the specified profile."""
     runner = TaskRunner()
@@ -141,6 +148,7 @@ def run(
             workspace_path=target_workspace,
             profile_name=profile,
             use_worktree=worktree,
+            yolo=yolo,
         )
     )
 
@@ -149,6 +157,8 @@ def run_plain_chat(initial_profile: str = "default"):
     """Plain REPL interactive fallback without the full-screen TUI."""
     repo_name, workspace_path = config.get_current_workspace()
     current_profile = initial_profile
+    yolo_mode = False
+    worktree_mode = False
     runner = TaskRunner()
     pipeline_manager = PipelineManager()
     orchestrator = PipelineOrchestrator(pipeline_manager=pipeline_manager)
@@ -161,6 +171,8 @@ def run_plain_chat(initial_profile: str = "default"):
             f"[bold yellow]Commands:[/bold yellow]\n"
             f"  [cyan]/pipeline [name] <goal>[/cyan]  Run declarative pipeline (standard, quick, plan_only, audit)\n"
             f"  [cyan]/profile <name>[/cyan]         Switch profile on the fly (builder, planner, default, reviewer)\n"
+            f"  [cyan]/yolo[/cyan]                   Toggle YOLO mode (bypass human confirmation)\n"
+            f"  [cyan]/worktree[/cyan]               Toggle isolated Git worktree execution\n"
             f"  [cyan]/diff[/cyan]                   Inspect current uncommitted git changes\n"
             f"  [cyan]!<cmd>[/cyan]                  Run workspace shell command (e.g. !git status, !pytest)\n"
             f"  [cyan]/clear[/cyan]                  Clear screen\n"
@@ -175,8 +187,15 @@ def run_plain_chat(initial_profile: str = "default"):
 
     while True:
         try:
+            status_badges = []
+            if yolo_mode:
+                status_badges.append("[red]YOLO[/red]")
+            if worktree_mode:
+                status_badges.append("[cyan]WT[/cyan]")
+            badge_str = f" [{','.join(status_badges)}]" if status_badges else ""
+
             user_input = console.input(
-                f"\n[bold green]maulness[/bold green] ([cyan]{repo_name}[/cyan]:[magenta]{current_profile}[/magenta]) > "
+                f"\n[bold green]maulness[/bold green] ([cyan]{repo_name}[/cyan]:[magenta]{current_profile}[/magenta]{badge_str}) > "
             )
             raw_prompt = user_input.strip()
             if not raw_prompt:
@@ -191,6 +210,18 @@ def run_plain_chat(initial_profile: str = "default"):
                 console.clear()
                 active_conversation_id = None
                 session_id = f"cli_{uuid.uuid4().hex[:8]}"
+                continue
+
+            if raw_prompt == "/yolo":
+                yolo_mode = not yolo_mode
+                state = "[bold red]ENABLED (Auto-approving mutating tools)[/bold red]" if yolo_mode else "[bold green]DISABLED (HITL confirmations active)[/bold green]"
+                console.print(f"[*] YOLO mode: {state}")
+                continue
+
+            if raw_prompt == "/worktree":
+                worktree_mode = not worktree_mode
+                state = "[bold cyan]ENABLED (Isolated git worktree)[/bold cyan]" if worktree_mode else "[dim]DISABLED (Direct repo workspace)[/dim]"
+                console.print(f"[*] Worktree isolation: {state}")
                 continue
 
             if raw_prompt == "/diff":
@@ -252,7 +283,9 @@ def run_plain_chat(initial_profile: str = "default"):
                         prompt=goal,
                         workspace_path=workspace_path,
                         pipeline_name=p_name,
-                        auto_proceed=False,
+                        use_worktree=worktree_mode,
+                        yolo=yolo_mode,
+                        auto_proceed=yolo_mode,
                     )
                 )
                 continue
@@ -270,6 +303,8 @@ def run_plain_chat(initial_profile: str = "default"):
                     profile_name=current_profile,
                     session_id=session_id,
                     conversation_id=active_conversation_id,
+                    use_worktree=worktree_mode,
+                    yolo=yolo_mode,
                     on_init=on_init,
                 )
             )
@@ -658,6 +693,130 @@ def soul_edit(
                 target.write_text(tpl_soul.read_text(encoding="utf-8"))
             else:
                 target.write_text("# Maul Personal Agent Doctrine\n")
+
+    subprocess.run([editor, str(target)])
+
+
+# ==========================================
+# Workspace Memory Management (show, edit)
+# ==========================================
+@memory_app.command("show")
+def memory_show(
+    profile: Optional[str] = typer.Option(
+        None, "-p", "--profile", help="Profile name (defaults to global memory)"
+    ),
+):
+    """Print durable MEMORY.md workspace knowledge."""
+    pm = ProfileManager()
+    if profile:
+        prof = pm.get_profile(profile)
+        if prof.memory_content:
+            console.print(
+                Panel(
+                    prof.memory_content,
+                    title=f"MEMORY.md ({prof.name})",
+                    border_style="cyan",
+                )
+            )
+        else:
+            console.print(f"[dim]No profile-specific MEMORY.md found for '{profile}'.[/dim]")
+    else:
+        root_mem = config.config_dir / "MEMORY.md"
+        if root_mem.exists():
+            console.print(
+                Panel(
+                    root_mem.read_text(encoding="utf-8"),
+                    title="Maulness Workspace Knowledge (MEMORY.md)",
+                    border_style="cyan",
+                )
+            )
+        else:
+            console.print("[dim]No MEMORY.md found.[/dim]")
+
+
+@memory_app.command("edit")
+def memory_edit(
+    profile: Optional[str] = typer.Option(
+        None, "-p", "--profile", help="Profile name (defaults to global memory)"
+    ),
+):
+    """Open MEMORY.md in $EDITOR."""
+    editor = os.getenv("EDITOR", "nano")
+    if profile:
+        target = config.config_dir / "profiles" / profile / "MEMORY.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            target.write_text(f"# {profile.title()} Workspace Memory\n")
+    else:
+        target = config.config_dir / "MEMORY.md"
+        if not target.exists():
+            tpl = Path(__file__).resolve().parent.parent.parent.parent / "templates" / "MEMORY.md"
+            if tpl.exists():
+                target.write_text(tpl.read_text(encoding="utf-8"))
+            else:
+                target.write_text("# Workspace Knowledge (MEMORY.md)\n")
+
+    subprocess.run([editor, str(target)])
+
+
+# ==========================================
+# User Profile & Working Style (show, edit)
+# ==========================================
+@user_app.command("show")
+def user_show(
+    profile: Optional[str] = typer.Option(
+        None, "-p", "--profile", help="Profile name (defaults to global user profile)"
+    ),
+):
+    """Print user preferences and working style (USER.md)."""
+    pm = ProfileManager()
+    if profile:
+        prof = pm.get_profile(profile)
+        if prof.user_content:
+            console.print(
+                Panel(
+                    prof.user_content,
+                    title=f"USER.md ({prof.name})",
+                    border_style="green",
+                )
+            )
+        else:
+            console.print(f"[dim]No profile-specific USER.md found for '{profile}'.[/dim]")
+    else:
+        root_user = config.config_dir / "USER.md"
+        if root_user.exists():
+            console.print(
+                Panel(
+                    root_user.read_text(encoding="utf-8"),
+                    title="User Profile & Style (USER.md)",
+                    border_style="green",
+                )
+            )
+        else:
+            console.print("[dim]No USER.md found.[/dim]")
+
+
+@user_app.command("edit")
+def user_edit(
+    profile: Optional[str] = typer.Option(
+        None, "-p", "--profile", help="Profile name (defaults to global user profile)"
+    ),
+):
+    """Open USER.md in $EDITOR."""
+    editor = os.getenv("EDITOR", "nano")
+    if profile:
+        target = config.config_dir / "profiles" / profile / "USER.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            target.write_text(f"# {profile.title()} User Profile\n")
+    else:
+        target = config.config_dir / "USER.md"
+        if not target.exists():
+            tpl = Path(__file__).resolve().parent.parent.parent.parent / "templates" / "USER.md"
+            if tpl.exists():
+                target.write_text(tpl.read_text(encoding="utf-8"))
+            else:
+                target.write_text("# User Profile (USER.md)\n")
 
     subprocess.run([editor, str(target)])
 

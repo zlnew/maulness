@@ -36,6 +36,9 @@ class Profile(BaseModel):
     # Hermes Directory-based attributes
     profile_dir: Optional[Path] = None
     soul_content: Optional[str] = None
+    memory_content: Optional[str] = None
+    user_content: Optional[str] = None
+    fallbacks: list[dict[str, Any]] = Field(default_factory=list)
     env_vars: dict[str, str] = Field(default_factory=dict)
     skills_dir: Optional[Path] = None
 
@@ -100,6 +103,16 @@ class Profile(BaseModel):
             if soul:
                 interpolated_global_soul = self.interpolate_soul_text(soul)
                 parts.append("\n---\n## Personal Operating Doctrine (SOUL.md)\n" + interpolated_global_soul)
+
+        # User-specific operating preferences (USER.md)
+        if self.user_content and self.user_content.strip():
+            interpolated_user = self.interpolate_soul_text(self.user_content.strip())
+            parts.append("\n---\n## User Profile & Working Style (USER.md)\n" + interpolated_user)
+
+        # Durable workspace memory & lessons learned (MEMORY.md)
+        if self.memory_content and self.memory_content.strip():
+            interpolated_mem = self.interpolate_soul_text(self.memory_content.strip())
+            parts.append("\n---\n## Workspace Knowledge & Lessons Learned (MEMORY.md)\n" + interpolated_mem)
 
         # Append effective skills index
         skill_mgr = SkillManager()
@@ -191,6 +204,24 @@ class ProfileManager:
             if soul_file.exists():
                 soul_content = soul_file.read_text(encoding="utf-8").strip()
 
+            memory_content = None
+            memory_file = profile_dir / "MEMORY.md"
+            if memory_file.exists():
+                memory_content = memory_file.read_text(encoding="utf-8").strip()
+            else:
+                root_mem = config.config_dir / "MEMORY.md"
+                if root_mem.exists():
+                    memory_content = root_mem.read_text(encoding="utf-8").strip()
+
+            user_content = None
+            user_file = profile_dir / "USER.md"
+            if user_file.exists():
+                user_content = user_file.read_text(encoding="utf-8").strip()
+            else:
+                root_user = config.config_dir / "USER.md"
+                if root_user.exists():
+                    user_content = root_user.read_text(encoding="utf-8").strip()
+
             env_vars: dict[str, str] = {}
             env_file = profile_dir / ".env"
             if env_file.exists():
@@ -204,6 +235,8 @@ class ProfileManager:
                 **data,
                 profile_dir=profile_dir,
                 soul_content=soul_content,
+                memory_content=memory_content,
+                user_content=user_content,
                 env_vars=env_vars,
                 skills_dir=skills_dir,
             )

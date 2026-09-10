@@ -80,3 +80,25 @@ def test_standard_api_key_resolution_without_api_key_env():
         env_vars={"ANTHROPIC_API_KEY": "sk-ant-test-123"},
     )
     assert profile.get_api_key() == "sk-ant-test-123"
+
+
+def test_dual_target_memory_loading_and_injection(tmp_path):
+    prof_dir = tmp_path / "memory_bot"
+    prof_dir.mkdir()
+    (prof_dir / "config.yaml").write_text("name: memory_bot\nprovider: gemini\nmodel: gemini-2.5-flash", encoding="utf-8")
+    (prof_dir / "SOUL.md").write_text("# Persona\nI am helpful.", encoding="utf-8")
+    (prof_dir / "USER.md").write_text("# User Style\nMaul prefers concise bullet points.", encoding="utf-8")
+    (prof_dir / "MEMORY.md").write_text("# Workspace Memory\nDocker port 8000 is used by expense-tracker.", encoding="utf-8")
+
+    pm = ProfileManager(profiles_dir=tmp_path)
+    profile = pm.get_profile("memory_bot")
+
+    assert profile.user_content == "# User Style\nMaul prefers concise bullet points."
+    assert profile.memory_content == "# Workspace Memory\nDocker port 8000 is used by expense-tracker."
+
+    effective = profile.effective_system_prompt()
+    assert "User Profile & Working Style (USER.md)" in effective
+    assert "Maul prefers concise bullet points" in effective
+    assert "Workspace Knowledge & Lessons Learned (MEMORY.md)" in effective
+    assert "Docker port 8000 is used by expense-tracker" in effective
+

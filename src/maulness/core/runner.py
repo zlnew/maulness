@@ -16,6 +16,7 @@ from maulness.core.models import (
     TaskRecord,
     TaskStatus,
 )
+from maulness.core.approvals import ApprovalClassifier
 from maulness.core.profiles import ProfileManager
 from maulness.core.providers.factory import get_provider_for_profile
 from maulness.core.worktree import WorktreeManager
@@ -46,6 +47,7 @@ class TaskRunner:
         session_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         use_worktree: bool = False,
+        yolo: bool = False,
         on_init: Optional[Callable[[str], Coroutine]] = None,
         on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine]] = None,
         on_message: Optional[Callable[[AgentMessageEvent], Coroutine]] = None,
@@ -92,17 +94,27 @@ class TaskRunner:
                 await on_init(conv_id)
 
         if verbose:
+            yolo_badge = " [bold red][YOLO][/bold red]" if yolo else ""
             console.print(
                 f"[bold cyan][*] Task {task_id} initialized for [green]{repo_name}[/green] "
-                f"using profile [magenta]{profile.name}[/magenta] ([dim]{profile.provider}[/dim])[/bold cyan]"
+                f"using profile [magenta]{profile.name}[/magenta] ([dim]{profile.provider}[/dim]){yolo_badge}[/bold cyan]"
             )
             console.print(f"[dim]Workspace: {target_workspace}[/dim]\n")
 
         # Set task to BUILDING
         await self.storage.update_task_status(task_id, TaskStatus.BUILDING)
 
+        classifier = ApprovalClassifier(yolo_mode=yolo)
+
         # Default terminal approval handler if none provided
         async def terminal_approval_handler(event: ApprovalRequestEvent) -> bool:
+            if classifier.should_auto_approve(event.tool_name, event.args):
+                if verbose:
+                    console.print(
+                        f"[dim cyan]⚡ [Auto-Approved{' / YOLO' if yolo else ''}] {event.tool_name}[/dim cyan]"
+                    )
+                return True
+
             if on_approval:
                 return await on_approval(event)
 

@@ -23,6 +23,7 @@ class PipelineStage(BaseModel):
     output_key: Optional[str] = None
     requires_diff: bool = False
     requires_approval: bool = False
+    use_worktree: bool = False
     prompt: str
     gate: Optional[PipelineGate] = None
 

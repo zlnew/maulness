@@ -21,6 +21,7 @@ stages:
     profile: builder
     status: building
     output_key: build_summary
+    use_worktree: true
     prompt: |
       Goal: {title}
 

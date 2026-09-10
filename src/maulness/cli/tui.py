@@ -772,6 +772,8 @@ class MaulnessTUIApp(App):
         self.total_chars_out = 0
         self.active_session_id = f"tui_{uuid.uuid4().hex[:8]}"
         self.active_acp_session_id: Optional[str] = None
+        self.yolo_mode = False
+        self.use_worktree = False
 
     def compose(self) -> ComposeResult:
         branch = get_git_branch(self.workspace_path)
@@ -839,6 +841,8 @@ class MaulnessTUIApp(App):
 
         # 4. Global actions and shell helpers
         commands.extend([
+            ("/yolo", "Toggle YOLO mode: bypass human approval on mutating actions"),
+            ("/worktree", "Toggle isolated Git worktree execution"),
             ("/diff", "Inspect uncommitted git changes in current workspace"),
             ("!<command>", "Shell: Execute command in current workspace (e.g. !git status)"),
             ("/clear", "Clear chat history and transcript view"),
@@ -863,6 +867,13 @@ class MaulnessTUIApp(App):
 
     def _update_statusline(self) -> None:
         statusline = self.query_one("#vim-statusline", Static)
+        badges = []
+        if self.yolo_mode:
+            badges.append("[bold red]YOLO[/bold red]")
+        if self.use_worktree:
+            badges.append("[bold cyan]WT[/bold cyan]")
+        badge_str = f" │ {' '.join(badges)}" if badges else ""
+
         if self.is_busy:
             mode_badge = "[bold white on red] BUSY [/bold white on red]"
             hints = "[bold red]Ctrl+C / Esc: STOP / CANCEL TASK[/bold red]"
@@ -873,16 +884,18 @@ class MaulnessTUIApp(App):
             mode_badge = "[bold black on green] NORMAL [/bold black on green]"
             hints = "[dim]i: insert │ /: commands │ j/k: scroll │ d/u: page │ gg/G: top/bottom │ ?: help │ q: quit[/dim]"
 
-        statusline.update(f"{mode_badge}  {hints}")
+        statusline.update(f"{mode_badge}  {hints}{badge_str}")
 
     def _update_top_bar(self) -> None:
         branch = get_git_branch(self.workspace_path)
         daemon_str = get_daemon_status()
         status_text = "[yellow]busy[/yellow]" if self.is_busy else "[green]idle[/green]"
+        yolo_badge = " │ [bold red]YOLO[/bold red]" if self.yolo_mode else ""
+        wt_badge = " │ [bold cyan]WT[/bold cyan]" if self.use_worktree else ""
         top_bar = self.query_one("#top-bar", Static)
         top_bar.update(
             f"[bold red]⚡ MAULNESS[/bold red] │ [bold green]repo:[/bold green] {self.repo_name} │ "
-            f"[bold cyan]branch:[/bold cyan] {branch} │ [bold magenta]profile:[/bold magenta] {self.current_profile} │ "
+            f"[bold cyan]branch:[/bold cyan] {branch} │ [bold magenta]profile:[/bold magenta] {self.current_profile}{yolo_badge}{wt_badge} │ "
             f"{daemon_str} │ {status_text}"
         )
 
@@ -1323,6 +1336,26 @@ class MaulnessTUIApp(App):
             self.action_clear_chat()
             return
 
+        if raw_text == "/yolo":
+            self.yolo_mode = not self.yolo_mode
+            status = "ENABLED (Auto-approving mutating actions)" if self.yolo_mode else "DISABLED (HITL confirmations active)"
+            chat_view = self.query_one("#chat-view", VerticalScroll)
+            await chat_view.mount(SystemCard("YOLO Mode", status))
+            self._update_top_bar()
+            self._update_statusline()
+            chat_view.scroll_end(animate=False)
+            return
+
+        if raw_text == "/worktree":
+            self.use_worktree = not self.use_worktree
+            status = "ENABLED (Tasks execute in isolated git worktrees)" if self.use_worktree else "DISABLED (Tasks execute in direct repo workspace)"
+            chat_view = self.query_one("#chat-view", VerticalScroll)
+            await chat_view.mount(SystemCard("Worktree Isolation", status))
+            self._update_top_bar()
+            self._update_statusline()
+            chat_view.scroll_end(animate=False)
+            return
+
         if raw_text == "/diff":
             self.action_view_diff()
             return
@@ -1422,6 +1455,8 @@ class MaulnessTUIApp(App):
                 profile_name=self.current_profile,
                 session_id=self.active_session_id,
                 conversation_id=self.active_acp_session_id,
+                use_worktree=self.use_worktree,
+                yolo=self.yolo_mode,
                 on_init=on_init,
                 on_thought=on_thought,
                 on_message=on_message,
@@ -1484,6 +1519,9 @@ class MaulnessTUIApp(App):
                 prompt=goal,
                 workspace_path=self.workspace_path,
                 pipeline_name=pipeline_name,
+                use_worktree=self.use_worktree,
+                yolo=self.yolo_mode,
+                auto_proceed=self.yolo_mode,
                 on_thought=on_thought,
                 on_message=on_message,
                 on_approval=on_approval,
