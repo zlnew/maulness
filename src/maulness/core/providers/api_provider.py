@@ -103,7 +103,9 @@ class UnifiedApiProvider(BaseProvider):
             headers["X-Title"] = "Maulness"
 
         default_model = "gpt-4o"
-        if provider_type.startswith("opencode") or provider_type == "deepseek":
+        if provider_type == "ollama":
+            default_model = "llama3"
+        elif provider_type.startswith("opencode") or provider_type == "deepseek":
             default_model = "deepseek-ai/deepseek-coder-v3"
 
         payload = {

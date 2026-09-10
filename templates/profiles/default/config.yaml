@@ -19,6 +19,8 @@ resilience:
     - provider: gemini
       model: gemini-3.7-flash
       reasoning_effort: high
+    - provider: gemini
+      model: gemini-3.6-flash
     - provider: ollama
       model: gemma4:31b-cloud
       base_url: http://localhost:11434/v1

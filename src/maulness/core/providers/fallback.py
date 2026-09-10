@@ -18,6 +18,10 @@ def format_user_friendly_error(error: Exception) -> str:
     """Extract a concise, human-readable summary from various provider exceptions."""
     err_str = str(error)
     # Check status codes
+    if "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str:
+        return "Service temporarily overloaded / unavailable (503)"
+    if "502" in err_str or "504" in err_str or "BAD_GATEWAY" in err_str:
+        return "Gateway error from upstream model provider"
     if "500" in err_str:
         return "Internal server error (500) from upstream model provider"
     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
