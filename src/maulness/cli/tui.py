@@ -2,16 +2,19 @@ import asyncio
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 
 from rich.markdown import Markdown as RichMarkdown
 from rich.syntax import Syntax
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Static
+from textual.widgets import Button, Input, Label, OptionList, Static
+from textual.widgets.option_list import Option
 
 from maulness.config import config
 from maulness.core.models import (
@@ -51,21 +54,130 @@ def get_daemon_status() -> str:
             timeout=2.0,
         )
         if res.stdout.strip() == "active":
-            return "[green]daemon: active[/green]"
+            return "[#a6e3a1]● active[/#a6e3a1]"
     except Exception:
         pass
-    return "[dim]daemon: off[/dim]"
+    return "[#6c7086]○ standby[/#6c7086]"
+
+
+# Available slash commands for the interactive Command Palette
+AVAILABLE_COMMANDS = [
+    ("/pipeline standard ", "Standard 3-stage pipeline (Plan ➔ Confirm ➔ Build ➔ Review)"),
+    ("/pipeline quick ", "Fast 2-stage execution (Builder ➔ Reviewer)"),
+    ("/pipeline plan_only ", "Architecture spec drafting only (no file changes)"),
+    ("/pipeline audit", "Independent code review and security audit on current diff"),
+    ("/profile builder", "Switch to Senior Builder (Antigravity ACP)"),
+    ("/profile planner", "Switch to Shipwright Architect (Gemini Pro)"),
+    ("/profile reviewer", "Switch to Independent Diff Auditor (Gemini Flash)"),
+    ("/profile default", "Switch to Ambient Conversational Assistant"),
+    ("/diff", "Inspect uncommitted git changes in current workspace"),
+    ("!git status", "Shell: Check working tree and git status"),
+    ("!pytest", "Shell: Run pytest test suite"),
+    ("/clear", "Clear chat history and transcript view"),
+    ("/help", "Show keyboard shortcuts and command reference"),
+    ("/exit", "Exit Maulness interactive session"),
+]
 
 
 # ==============================================================================
 # Modal Dialogs
 # ==============================================================================
+class CommandPaletteModal(ModalScreen[Optional[str]]):
+    """Neovim Telescope-style Command Palette for slash commands & actions."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, initial_query: str = ""):
+        super().__init__()
+        self.initial_query = initial_query.lstrip("/")
+
+    def compose(self) -> ComposeResult:
+        with Container(classes="palette-dialog"):
+            yield Label("[bold #bb9af7]󰍉 Command Palette[/bold #bb9af7] [dim #737aa2](Type to filter, ↑/↓ to move, Enter to select, Esc to close)[/dim #737aa2]", classes="palette-title")
+            yield Input(value=self.initial_query, placeholder="Filter commands (/pipeline, /profile, /diff, !<cmd>)...", id="palette-filter")
+            ol = OptionList(id="palette-options")
+            yield ol
+
+    def on_mount(self) -> None:
+        self._populate_options(self.initial_query)
+        self.query_one("#palette-filter", Input).focus()
+
+    def _populate_options(self, query: str) -> None:
+        ol = self.query_one("#palette-options", OptionList)
+        ol.clear_options()
+        q = query.lower().strip()
+
+        scored = []
+        for cmd, desc in AVAILABLE_COMMANDS:
+            cmd_clean = cmd.strip()
+            if not q:
+                scored.append((0, cmd, desc))
+            elif cmd_clean.lower() == f"/{q}" or cmd_clean.lower() == q:
+                scored.append((100, cmd, desc))
+            elif cmd_clean.lower().startswith(f"/{q}") or cmd_clean.lower().startswith(q):
+                scored.append((80, cmd, desc))
+            elif q in cmd.lower():
+                scored.append((50, cmd, desc))
+            elif q in desc.lower():
+                scored.append((10, cmd, desc))
+
+        # Sort descending by score
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for _, cmd, desc in scored:
+            prompt_markup = f"[bold #7aa2f7]{cmd}[/bold #7aa2f7] [dim #737aa2]— {desc}[/dim #737aa2]"
+            ol.add_option(Option(prompt_markup, id=cmd))
+
+        if ol.option_count > 0:
+            ol.highlighted = 0
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._populate_options(event.value.strip())
+
+    def on_key(self, event: events.Key) -> None:
+        ol = self.query_one("#palette-options", OptionList)
+        if event.key in ("down", "ctrl+n"):
+            event.prevent_default()
+            event.stop()
+            if ol.option_count > 0:
+                if ol.highlighted is None:
+                    ol.highlighted = 0
+                elif ol.highlighted < ol.option_count - 1:
+                    ol.highlighted += 1
+        elif event.key in ("up", "ctrl+p"):
+            event.prevent_default()
+            event.stop()
+            if ol.option_count > 0:
+                if ol.highlighted is not None and ol.highlighted > 0:
+                    ol.highlighted -= 1
+        elif event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            if ol.highlighted is not None and ol.option_count > 0:
+                opt = ol.get_option_at_index(ol.highlighted)
+                self.dismiss(str(opt.id))
+            else:
+                self.dismiss(None)
+        elif event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            self.dismiss(None)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(str(event.option.id))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class ApprovalModal(ModalScreen[bool]):
     """HITL Tool Approval Modal Dialog."""
 
     BINDINGS = [
         Binding("y", "allow", "Allow"),
         Binding("n", "deny", "Deny"),
+        Binding("enter", "allow", "Allow"),
         Binding("escape", "deny", "Deny"),
     ]
 
@@ -75,8 +187,8 @@ class ApprovalModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="modal-dialog"):
-            yield Label("[bold yellow]⚠️  HITL Approval Required[/bold yellow]", classes="modal-title")
-            yield Label(f"[bold cyan]Tool:[/bold cyan] {self.event.tool_name}", classes="modal-row")
+            yield Label("[bold #e0af68]⚠️  HITL Tool Approval Required[/bold #e0af68]", classes="modal-title")
+            yield Label(f"[bold #7aa2f7]Tool:[/bold #7aa2f7] {self.event.tool_name}", classes="modal-row")
             try:
                 formatted_args = json.dumps(self.event.args, indent=2)
             except Exception:
@@ -93,10 +205,7 @@ class ApprovalModal(ModalScreen[bool]):
         self.dismiss(False)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-allow":
-            self.dismiss(True)
-        else:
-            self.dismiss(False)
+        self.dismiss(event.button.id == "btn-allow")
 
 
 class GateModal(ModalScreen[bool]):
@@ -105,6 +214,7 @@ class GateModal(ModalScreen[bool]):
     BINDINGS = [
         Binding("y", "proceed", "Proceed"),
         Binding("n", "stop", "Stop"),
+        Binding("enter", "proceed", "Proceed"),
         Binding("escape", "stop", "Stop"),
     ]
 
@@ -114,7 +224,7 @@ class GateModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="modal-dialog"):
-            yield Label("[bold magenta]🚦 Pipeline Stage Gate[/bold magenta]", classes="modal-title")
+            yield Label("[bold #bb9af7]🚦 Pipeline Confirmation Gate[/bold #bb9af7]", classes="modal-title")
             yield Label(self.gate_prompt, classes="modal-row")
             with Horizontal(classes="modal-buttons"):
                 yield Button("Proceed (y)", variant="primary", id="btn-proceed")
@@ -127,18 +237,21 @@ class GateModal(ModalScreen[bool]):
         self.dismiss(False)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-proceed":
-            self.dismiss(True)
-        else:
-            self.dismiss(False)
+        self.dismiss(event.button.id == "btn-proceed")
 
 
 class DiffModal(ModalScreen[None]):
-    """Full-screen / large scrollable git diff inspector."""
+    """Neovim-styled scrollable git diff inspector."""
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
         Binding("q", "close", "Close"),
+        Binding("j", "scroll_down", "Scroll Down"),
+        Binding("k", "scroll_up", "Scroll Up"),
+        Binding("d", "page_down", "Half Page Down"),
+        Binding("u", "page_up", "Half Page Up"),
+        Binding("G", "scroll_end", "Scroll End"),
+        Binding("g", "scroll_home", "Scroll Home"),
     ]
 
     def __init__(self, workspace_path: Path):
@@ -147,21 +260,39 @@ class DiffModal(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="diff-dialog"):
-            yield Label("[bold cyan]🔍 Workspace Uncommitted Changes (git diff HEAD)[/bold cyan]")
+            yield Label("[bold #7aa2f7]🔍 Git Diff HEAD[/bold #7aa2f7] [dim #737aa2](j/k to scroll, q or Esc to close)[/dim #737aa2]")
             res = subprocess.run(
                 ["git", "diff", "HEAD"],
                 cwd=str(self.workspace_path),
                 capture_output=True,
                 text=True,
             )
-            diff_text = res.stdout.strip() or "(No uncommitted diffs detected in working directory)"
-            with VerticalScroll(classes="diff-scroll"):
+            diff_text = res.stdout.strip() or "(No uncommitted diffs detected in current workspace)"
+            with VerticalScroll(id="diff-scroll-view"):
                 yield Static(Syntax(diff_text, "diff", theme="monokai"))
             with Horizontal(classes="modal-buttons"):
-                yield Button("Close (Esc)", variant="primary", id="btn-close")
+                yield Button("Close (q / Esc)", variant="default", id="btn-close")
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+    def action_scroll_down(self) -> None:
+        self.query_one("#diff-scroll-view", VerticalScroll).scroll_down()
+
+    def action_scroll_up(self) -> None:
+        self.query_one("#diff-scroll-view", VerticalScroll).scroll_up()
+
+    def action_page_down(self) -> None:
+        self.query_one("#diff-scroll-view", VerticalScroll).scroll_page_down()
+
+    def action_page_up(self) -> None:
+        self.query_one("#diff-scroll-view", VerticalScroll).scroll_page_up()
+
+    def action_scroll_end(self) -> None:
+        self.query_one("#diff-scroll-view", VerticalScroll).scroll_end()
+
+    def action_scroll_home(self) -> None:
+        self.query_one("#diff-scroll-view", VerticalScroll).scroll_home()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(None)
@@ -180,28 +311,30 @@ class ProfileModal(ModalScreen[Optional[str]]):
         self.current_profile = current_profile
 
     def compose(self) -> ComposeResult:
-        with Container(classes="modal-dialog"):
-            yield Label("[bold magenta]Select Active Agent Profile[/bold magenta]", classes="modal-title")
-            with VerticalScroll():
-                for p in self.profiles:
-                    is_active = " [green]●[/green]" if p.name == self.current_profile else ""
-                    yield Button(
-                        f"{p.name} ({p.provider}) — {p.description[:40]}{is_active}",
-                        id=f"prof_{p.name}",
-                        classes="profile-button",
-                    )
-            with Horizontal(classes="modal-buttons"):
-                yield Button("Cancel", variant="default", id="btn-cancel")
+        with Container(classes="palette-dialog"):
+            yield Label("[bold #bb9af7]Select Active Profile[/bold #bb9af7] [dim #737aa2](Enter to switch, Esc to cancel)[/dim #737aa2]", classes="palette-title")
+            ol = OptionList(id="profile-options")
+            yield ol
+
+    def on_mount(self) -> None:
+        ol = self.query_one("#profile-options", OptionList)
+        for idx, p in enumerate(self.profiles):
+            is_active = " [bold #a6e3a1]● ACTIVE[/bold #a6e3a1]" if p.name == self.current_profile else ""
+            label = f"[bold #7aa2f7]{p.name}[/bold #7aa2f7] ({p.provider}) — [dim #737aa2]{p.description[:50]}[/dim #737aa2]{is_active}"
+            ol.add_option(Option(label, id=p.name))
+            if p.name == self.current_profile:
+                ol.highlighted = idx
+        ol.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(str(event.option.id))
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            self.dismiss(None)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id and event.button.id.startswith("prof_"):
-            selected = event.button.id[len("prof_") :]
-            self.dismiss(selected)
-        else:
-            self.dismiss(None)
 
 
 class HelpModal(ModalScreen[None]):
@@ -209,35 +342,48 @@ class HelpModal(ModalScreen[None]):
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
+        Binding("q", "close", "Close"),
     ]
 
     def compose(self) -> ComposeResult:
         help_markdown = """
-# Maulness TUI Shortcuts & Commands
+# Maulness Terminal TUI — Neovim Keybindings & Commands
 
-### Keyboard Shortcuts
-- **Ctrl + P**: Switch Active Profile
-- **Ctrl + D**: View Git Diff Modal
-- **Ctrl + L**: Clear Chat Transcript
-- **Ctrl + Q**: Quit Application
-- **F1**: Show This Help
+### Neovim Modal Navigation
+- **NORMAL Mode** (Green status badge):
+  - `i` or `a` : Enter **INSERT** mode (focus input bar)
+  - `/` : Open **Command Palette** (Telescope-style slash picker)
+  - `j` / `k` : Scroll chat view down / up
+  - `d` / `u` : Half-page scroll down / up (`Ctrl+D` / `Ctrl+U`)
+  - `G` : Scroll to bottom of chat
+  - `gg` : Scroll to top of chat
+  - `: ` or `!` : Enter INSERT mode pre-filled with `! ` (shell command)
+  - `p` : Open Profile Switcher modal
+  - `?` : Open this Help reference
+  - `q` : Quit Maulness
+
+- **INSERT Mode** (Blue status badge):
+  - Type prompt naturally (runs directly with active profile)
+  - `Escape` : Exit to **NORMAL** mode
+  - `Tab` or `Ctrl+K` : Trigger Command Palette
+  - `Enter` : Submit prompt / execute command
 
 ### Slash Commands
-- `/pipeline [name] <goal>` : Execute declarative pipeline (`standard`, `quick`, `plan_only`, `audit`)
-- `/profile <name>` : Switch profile on the fly (`builder`, `planner`, `reviewer`, `default`)
-- `/diff` : Inspect uncommitted git diff
-- `/clear` : Clear chat window
-- `/exit` or `/quit` : Exit Maulness
+- `/pipeline standard <goal>` : 3-stage pipeline (Plan ➔ Confirm ➔ Build ➔ Review)
+- `/pipeline quick <goal>` : Fast 2-stage execution (Builder ➔ Reviewer)
+- `/pipeline plan_only <goal>` : Architecture spec drafting only
+- `/pipeline audit` : Review uncommitted git diff
+- `/profile <name>` : Switch active profile (`builder`, `planner`, `reviewer`, `default`)
+- `/diff` : Full-screen scrollable git diff inspector
 - `!<command>` : Execute local workspace shell command (e.g. `!git status`, `!pytest`)
-
-### Natural Language
-Any plain text typed without a `/` or `!` is executed immediately by the **Active Profile** (default: `builder` via Antigravity ACP).
+- `/clear` : Clear chat transcript
+- `/exit` : Quit
 """
         with Container(classes="diff-dialog"):
             with VerticalScroll():
                 yield Static(RichMarkdown(help_markdown))
             with Horizontal(classes="modal-buttons"):
-                yield Button("Close (Esc)", variant="primary", id="btn-close")
+                yield Button("Close (q / Esc)", variant="default", id="btn-close")
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -259,12 +405,12 @@ class UserCard(Static):
         self.branch = branch
 
     def compose(self) -> ComposeResult:
-        yield Label(f"[bold blue]Maul[/bold blue] ([cyan]{self.repo}:{self.branch}[/cyan])", classes="user-header")
-        yield Static(self.prompt)
+        yield Label(f"[bold #7aa2f7]Maul[/bold #7aa2f7] [dim #565f89]({self.repo}:{self.branch})[/dim #565f89]", classes="card-header")
+        yield Static(self.prompt, classes="card-body")
 
 
 class SystemCard(Static):
-    """Card displaying system notifications or shell command results."""
+    """Card displaying system messages or shell command execution."""
 
     def __init__(self, title: str, content: str, is_error: bool = False):
         super().__init__(classes="system-card")
@@ -273,9 +419,9 @@ class SystemCard(Static):
         self.is_error = is_error
 
     def compose(self) -> ComposeResult:
-        color = "red" if self.is_error else "yellow"
-        yield Label(f"[bold {color}]{self.card_title}[/bold {color}]")
-        yield Static(self.card_content)
+        color = "#f7768e" if self.is_error else "#e0af68"
+        yield Label(f"[bold {color}]{self.card_title}[/bold {color}]", classes="card-header")
+        yield Static(self.card_content, classes="card-body")
 
 
 class AgentCard(Static):
@@ -286,12 +432,12 @@ class AgentCard(Static):
         self.profile_name = profile_name
         self.thought_text: list[str] = []
         self.message_text: list[str] = []
-        self.status_label = Label("[dim]Thinking...[/dim]")
+        self.status_label = Label("[dim #737aa2]󰑮 Thinking...[/dim #737aa2]")
         self.thought_static = Static("", classes="thought-box")
-        self.message_static = Static("")
+        self.message_static = Static("", classes="card-body")
 
     def compose(self) -> ComposeResult:
-        yield Label(f"[bold magenta]Maulness[/bold magenta] ([magenta]{self.profile_name}[/magenta])", classes="agent-header")
+        yield Label(f"[bold #bb9af7]Maulness[/bold #bb9af7] [dim #565f89]({self.profile_name})[/dim #565f89]", classes="card-header")
         yield self.thought_static
         yield self.message_static
         yield self.status_label
@@ -299,7 +445,7 @@ class AgentCard(Static):
     def append_thought(self, delta: str) -> None:
         self.thought_text.append(delta)
         text = "".join(self.thought_text)
-        self.thought_static.update(f"[dim italic grey70]💭 {text[-200:].strip()}[/dim italic grey70]")
+        self.thought_static.update(f"[dim italic #737aa2]💭 {text[-200:].strip()}[/dim italic #737aa2]")
 
     def append_message(self, delta: str) -> None:
         self.message_text.append(delta)
@@ -318,13 +464,13 @@ class PipelineCard(Static):
         self.pipeline_name = pipeline_name
         self.goal = goal
         self.stages_static = Static("")
-        self.status_label = Label("[dim]Initializing pipeline...[/dim]")
-        self.output_static = Static("")
+        self.status_label = Label("[dim #737aa2]󰑮 Initializing pipeline...[/dim #737aa2]")
+        self.output_static = Static("", classes="card-body")
 
     def compose(self) -> ComposeResult:
         yield Label(
-            f"[bold magenta]Pipeline: {self.pipeline_name}[/bold magenta] — [cyan]{self.goal[:60]}[/cyan]",
-            classes="agent-header",
+            f"[bold #bb9af7]Pipeline: {self.pipeline_name}[/bold #bb9af7] — [dim #7aa2f7]{self.goal[:60]}[/dim #7aa2f7]",
+            classes="card-header",
         )
         yield self.stages_static
         yield self.output_static
@@ -332,9 +478,9 @@ class PipelineCard(Static):
 
     def update_stage(self, stage_name: str, profile: str, current: int, total: int) -> None:
         self.stages_static.update(
-            f"[bold yellow]▶ Stage {current}/{total}:[/bold yellow] [bold white]{stage_name}[/bold white] ([magenta]{profile}[/magenta])"
+            f"[bold #e0af68]▶ Stage {current}/{total}:[/bold #e0af68] [bold #c0caf5]{stage_name}[/bold #c0caf5] ([#bb9af7]{profile}[/#bb9af7])"
         )
-        self.status_label.update(f"[dim]Running stage {current} of {total}...[/dim]")
+        self.status_label.update(f"[dim #737aa2]Running stage {current} of {total}...[/dim #737aa2]")
 
     def append_output(self, delta: str) -> None:
         self.output_static.update(RichMarkdown(delta))
@@ -347,102 +493,143 @@ class PipelineCard(Static):
 # Main Textual App
 # ==============================================================================
 class MaulnessTUIApp(App):
-    """Full-screen interactive Textual terminal harness for Maulness."""
+    """Full-screen Neovim-styled terminal harness for Maulness."""
 
     TITLE = "Maulness ⚡"
     CSS = """
     Screen {
-        background: #0f172a;
-        color: #f1f5f9;
+        background: #1a1b26;
+        color: #c0caf5;
     }
 
     #top-bar {
         dock: top;
         height: 3;
-        background: #1e293b;
-        color: #e2e8f0;
+        background: #16161e;
+        color: #a9b1d6;
         padding: 0 2;
-        border-bottom: solid #334155;
+        border-bottom: solid #24283b;
     }
 
     #chat-view {
         height: 1fr;
         padding: 1 2;
+        background: #1a1b26;
     }
 
     .user-card {
-        background: #1e293b;
-        border: round #3b82f6;
+        background: #24283b;
+        border: round #7aa2f7;
         padding: 1 2;
         margin: 1 0;
-    }
-
-    .user-header {
-        color: #60a5fa;
-        text-style: bold;
-        margin-bottom: 0;
     }
 
     .agent-card {
-        background: #1e1b4b;
-        border: round #8b5cf6;
+        background: #1f2335;
+        border: round #bb9af7;
         padding: 1 2;
         margin: 1 0;
-    }
-
-    .agent-header {
-        color: #c084fc;
-        text-style: bold;
-        margin-bottom: 1;
-    }
-
-    .thought-box {
-        color: #94a3b8;
-        background: #090d16;
-        padding: 0 1;
-        margin-bottom: 1;
-        border-left: thick #64748b;
     }
 
     .system-card {
-        background: #1c1917;
-        border: round #78716c;
+        background: #1f2335;
+        border: round #414868;
         padding: 1 2;
         margin: 1 0;
     }
 
-    #bottom-bar {
-        dock: bottom;
-        height: 3;
-        background: #1e293b;
+    .card-header {
+        margin-bottom: 1;
+    }
+
+    .card-body {
+        margin-top: 0;
+    }
+
+    .thought-box {
+        color: #737aa2;
+        background: #16161e;
         padding: 0 1;
-        border-top: solid #334155;
+        margin-bottom: 1;
+        border-left: thick #414868;
+    }
+
+    #bottom-container {
+        dock: bottom;
+        height: 6;
+        background: #16161e;
+        border-top: solid #24283b;
+        padding: 0 1;
+    }
+
+    #vim-statusline {
+        height: 1;
+        background: #16161e;
+        color: #a9b1d6;
+        padding: 0 1;
+    }
+
+    #input-row {
+        height: 4;
+        background: #1f2335;
+        border: tall #414868;
+        padding: 0 1;
+    }
+
+    #input-row.focused-insert {
+        border: tall #7aa2f7;
     }
 
     #chat-input {
         width: 1fr;
-        background: #0f172a;
+        background: transparent;
         border: none;
-        color: #f8fafc;
+        color: #c0caf5;
     }
 
     #chat-input:focus {
         border: none;
     }
 
+    /* Modals */
+    .palette-dialog {
+        width: 75%;
+        max-height: 22;
+        background: #1f2335;
+        border: double #bb9af7;
+        padding: 1 2;
+    }
+
+    .palette-title {
+        margin-bottom: 1;
+    }
+
+    #palette-filter {
+        background: #16161e;
+        border: tall #414868;
+        color: #c0caf5;
+        margin-bottom: 1;
+    }
+
+    #palette-options {
+        max-height: 12;
+        background: #16161e;
+        border: tall #24283b;
+    }
+
     .modal-dialog {
         width: 70%;
         max-height: 80%;
-        background: #1e293b;
-        border: thick #8b5cf6;
+        background: #1f2335;
+        border: thick #bb9af7;
         padding: 1 2;
     }
 
     .diff-dialog {
-        width: 85%;
-        height: 85%;
-        background: #0f172a;
-        border: thick #3b82f6;
+        width: 90%;
+        height: 90%;
+        background: #16161e;
+        border: thick #7aa2f7;
         padding: 1 2;
     }
 
@@ -461,7 +648,7 @@ class MaulnessTUIApp(App):
         margin-bottom: 1;
     }
 
-    .diff-scroll {
+    #diff-scroll-view {
         height: 1fr;
         margin: 1 0;
     }
@@ -470,16 +657,11 @@ class MaulnessTUIApp(App):
         height: 3;
         align: right middle;
     }
-
-    .profile-button {
-        width: 100%;
-        margin-bottom: 1;
-    }
     """
 
     BINDINGS = [
-        Binding("ctrl+p", "select_profile", "Switch Profile"),
-        Binding("ctrl+d", "view_diff", "View Diff"),
+        Binding("ctrl+p", "select_profile", "Profile"),
+        Binding("ctrl+d", "view_diff", "Diff"),
         Binding("ctrl+l", "clear_chat", "Clear"),
         Binding("ctrl+q", "quit_app", "Quit"),
         Binding("f1", "show_help", "Help"),
@@ -497,42 +679,163 @@ class MaulnessTUIApp(App):
             pipeline_manager=self.pipeline_manager,
         )
         self.is_busy = False
+        self.mode = "insert"  # "normal" or "insert"
+        self._last_g_time = 0.0
 
     def compose(self) -> ComposeResult:
         branch = get_git_branch(self.workspace_path)
         daemon_str = get_daemon_status()
 
         yield Static(
-            f"[bold red]⚡ MAULNESS[/bold red] │ [bold green]repo:[/bold green] {self.repo_name} │ "
-            f"[bold cyan]branch:[/bold cyan] {branch} │ [bold magenta]profile:[/bold magenta] {self.current_profile} │ "
-            f"{daemon_str} │ [dim]F1: Help, Ctrl+P: Profile, Ctrl+D: Diff, Ctrl+Q: Quit[/dim]",
+            f"[bold #f7768e]⚡ MAULNESS[/bold #f7768e] │ [bold #a6e3a1]repo:[/bold #a6e3a1] {self.repo_name} │ "
+            f"[bold #89dceb]branch:[/bold #89dceb] {branch} │ [bold #cba6f7]profile:[/bold #cba6f7] {self.current_profile} │ "
+            f"{daemon_str}",
             id="top-bar",
         )
 
         with VerticalScroll(id="chat-view"):
             yield Static(
-                f"[dim]Welcome back, Maul. Harness active in [green]{self.workspace_path}[/green].\n"
-                f"Plain text runs with [magenta]{self.current_profile}[/magenta]. "
-                f"Use [cyan]/pipeline <goal>[/cyan] for multi-stage pipelines or [cyan]!<cmd>[/cyan] for shell commands.[/dim]",
+                f"[dim #737aa2]Welcome back, Maul. Scoped to [bold #a6e3a1]{self.workspace_path}[/bold #a6e3a1].\n"
+                f"• Natural language executes with [bold #cba6f7]{self.current_profile}[/bold #cba6f7].\n"
+                f"• Press [bold #7aa2f7]/[/bold #7aa2f7] or [bold #7aa2f7]Tab[/bold #7aa2f7] for Telescope Command Palette.\n"
+                f"• Press [bold #7aa2f7]Esc[/bold #7aa2f7] for NORMAL mode ([#a6e3a1]j/k[/#a6e3a1] scroll, [#a6e3a1]i[/#a6e3a1] insert, [#a6e3a1]?[/#a6e3a1] help).[/dim #737aa2]",
                 classes="system-card",
             )
 
-        with Horizontal(id="bottom-bar"):
-            yield Input(
-                placeholder=f"Ask {self.current_profile} or /pipeline, /profile, /diff, !<cmd>...",
-                id="chat-input",
-            )
+        with Container(id="bottom-container"):
+            yield Static("", id="vim-statusline")
+            with Horizontal(id="input-row", classes="focused-insert"):
+                yield Input(
+                    placeholder=f"Ask {self.current_profile} or /pipeline, /profile, /diff, !<cmd>...",
+                    id="chat-input",
+                )
+
+    def on_mount(self) -> None:
+        self.set_mode("insert")
+        self._update_statusline()
+        self._update_top_bar()
+
+    def set_mode(self, new_mode: str) -> None:
+        self.mode = new_mode
+        chat_input = self.query_one("#chat-input", Input)
+        input_row = self.query_one("#input-row", Horizontal)
+
+        if self.mode == "insert":
+            input_row.add_class("focused-insert")
+            chat_input.focus()
+        else:
+            input_row.remove_class("focused-insert")
+            self.set_focus(None)
+
+        self._update_statusline()
+
+    def _update_statusline(self) -> None:
+        statusline = self.query_one("#vim-statusline", Static)
+        if self.mode == "insert":
+            mode_badge = "[bold #16161e on #7aa2f7] INSERT [/bold #16161e on #7aa2f7]"
+            hints = "[dim #737aa2]Esc: normal mode │ / or Tab: commands │ Enter: send[/dim #737aa2]"
+        else:
+            mode_badge = "[bold #16161e on #a6e3a1] NORMAL [/bold #16161e on #a6e3a1]"
+            hints = "[dim #737aa2]i: insert │ /: commands │ j/k: scroll │ d/u: page │ gg/G: top/bottom │ ?: help │ q: quit[/dim #737aa2]"
+
+        statusline.update(f"{mode_badge}  {hints}")
 
     def _update_top_bar(self) -> None:
         branch = get_git_branch(self.workspace_path)
         daemon_str = get_daemon_status()
-        status_text = "[yellow]busy[/yellow]" if self.is_busy else "[green]idle[/green]"
+        status_text = "[#e0af68]busy[/#e0af68]" if self.is_busy else "[#a6e3a1]idle[/#a6e3a1]"
         top_bar = self.query_one("#top-bar", Static)
         top_bar.update(
-            f"[bold red]⚡ MAULNESS[/bold red] │ [bold green]repo:[/bold green] {self.repo_name} │ "
-            f"[bold cyan]branch:[/bold cyan] {branch} │ [bold magenta]profile:[/bold magenta] {self.current_profile} │ "
-            f"{daemon_str} │ [dim]{status_text}[/dim]"
+            f"[bold #f7768e]⚡ MAULNESS[/bold #f7768e] │ [bold #a6e3a1]repo:[/bold #a6e3a1] {self.repo_name} │ "
+            f"[bold #89dceb]branch:[/bold #89dceb] {branch} │ [bold #cba6f7]profile:[/bold #cba6f7] {self.current_profile} │ "
+            f"{daemon_str} │ {status_text}"
         )
+
+    def on_key(self, event: events.Key) -> None:
+        chat_view = self.query_one("#chat-view", VerticalScroll)
+
+        # NORMAL MODE KEY HANDLING
+        if self.mode == "normal":
+            if event.key in ("j", "down"):
+                chat_view.scroll_down()
+            elif event.key in ("k", "up"):
+                chat_view.scroll_up()
+            elif event.key in ("d", "ctrl+d"):
+                chat_view.scroll_page_down()
+            elif event.key in ("u", "ctrl+u"):
+                chat_view.scroll_page_up()
+            elif event.key == "G":
+                chat_view.scroll_end()
+            elif event.key == "g":
+                now = time.time()
+                if now - self._last_g_time < 1.5:
+                    chat_view.scroll_home()
+                    self._last_g_time = 0.0
+                else:
+                    self._last_g_time = now
+            elif event.key in ("i", "a", "enter"):
+                self.set_mode("insert")
+            elif event.key == "slash":
+                self.open_command_palette()
+            elif event.key in ("colon", "exclamation_mark"):
+                chat_input = self.query_one("#chat-input", Input)
+                chat_input.value = "! "
+                self.set_mode("insert")
+            elif event.key == "p":
+                self.action_select_profile()
+            elif event.key in ("question_mark", "f1"):
+                self.action_show_help()
+            elif event.key == "q":
+                self.exit()
+            return
+
+        # INSERT MODE KEY HANDLING
+        if self.mode == "insert":
+            if event.key == "escape":
+                self.set_mode("normal")
+            elif event.key in ("tab", "ctrl+k"):
+                chat_input = self.query_one("#chat-input", Input)
+                val = chat_input.value
+                self.open_command_palette(val if val.startswith("/") else "")
+
+    def open_command_palette(self, initial_query: str = "") -> None:
+        def _on_command_selected(selected: Optional[str]) -> None:
+            if not selected:
+                self.set_mode("insert")
+                return
+
+            # Direct action commands
+            if selected == "/diff":
+                self.action_view_diff()
+                self.set_mode("normal")
+                return
+            if selected == "/clear":
+                self.action_clear_chat()
+                self.set_mode("normal")
+                return
+            if selected == "/help":
+                self.action_show_help()
+                self.set_mode("normal")
+                return
+            if selected == "/exit":
+                self.exit()
+                return
+
+            # Profile switch from command
+            if selected.startswith("/profile "):
+                p_name = selected[len("/profile ") :].strip()
+                self.current_profile = p_name
+                self._update_top_bar()
+                self.set_mode("insert")
+                return
+
+            # Fill input and switch to insert mode
+            chat_input = self.query_one("#chat-input", Input)
+            chat_input.value = selected
+            self.set_mode("insert")
+            chat_input.cursor_position = len(selected)
+
+        self.push_screen(CommandPaletteModal(initial_query), callback=_on_command_selected)
 
     def action_quit_app(self) -> None:
         self.exit()
@@ -544,14 +847,18 @@ class MaulnessTUIApp(App):
     def action_view_diff(self) -> None:
         self.push_screen(DiffModal(self.workspace_path))
 
-    async def action_select_profile(self) -> None:
+    def action_select_profile(self) -> None:
         profiles = self.profile_manager.list_profiles()
-        selected = await self.push_screen_wait(ProfileModal(profiles, self.current_profile))
-        if selected:
-            self.current_profile = selected
-            self._update_top_bar()
-            chat_input = self.query_one("#chat-input", Input)
-            chat_input.placeholder = f"Ask {self.current_profile} or /pipeline, /profile, /diff, !<cmd>..."
+
+        def _on_profile_selected(selected: Optional[str]):
+            if selected:
+                self.current_profile = selected
+                self._update_top_bar()
+                chat_input = self.query_one("#chat-input", Input)
+                chat_input.placeholder = f"Ask {self.current_profile} or /pipeline, /profile, /diff, !<cmd>..."
+            self.set_mode("normal")
+
+        self.push_screen(ProfileModal(profiles, self.current_profile), callback=_on_profile_selected)
 
     def action_show_help(self) -> None:
         self.push_screen(HelpModal())
@@ -570,7 +877,7 @@ class MaulnessTUIApp(App):
             chat_view.scroll_end(animate=False)
             return
 
-        # Handle Slash Commands & Shell Escapes
+        # Direct Slash Commands
         if raw_text in ("/exit", "/quit", "exit", "quit"):
             self.exit()
             return
@@ -594,14 +901,15 @@ class MaulnessTUIApp(App):
                 self._update_top_bar()
                 chat_input.placeholder = f"Ask {self.current_profile} or /pipeline, /profile, /diff, !<cmd>..."
             else:
-                await self.action_select_profile()
+                self.action_select_profile()
             return
 
         # Local Shell Command Escape: !<cmd>
         if raw_text.startswith("!"):
             cmd = raw_text[1:].strip()
+            branch = get_git_branch(self.workspace_path)
             chat_view = self.query_one("#chat-view", VerticalScroll)
-            await chat_view.mount(UserCard(raw_text, self.repo_name, get_git_branch(self.workspace_path)))
+            await chat_view.mount(UserCard(raw_text, self.repo_name, branch))
             try:
                 res = subprocess.run(
                     cmd,
@@ -622,7 +930,6 @@ class MaulnessTUIApp(App):
         if raw_text.startswith("/pipeline "):
             pipeline_body = raw_text[len("/pipeline ") :].strip()
             parts = pipeline_body.split(" ", 1)
-            # Check if first part matches known pipeline name
             known_pipelines = {p.name for p in self.pipeline_manager.list_pipelines()}
             if len(parts) == 2 and parts[0] in known_pipelines:
                 p_name, goal = parts[0], parts[1].strip()
@@ -663,15 +970,16 @@ class MaulnessTUIApp(App):
             task = await self.runner.run_direct(
                 repo_name=self.repo_name,
                 prompt=prompt,
+                workspace_path=self.workspace_path,
                 profile_name=self.current_profile,
                 on_thought=on_thought,
                 on_message=on_message,
                 on_approval=on_approval,
                 verbose=False,
             )
-            agent_card.set_status(f"[green]✓ Completed ({task.status.value})[/green]")
+            agent_card.set_status(f"[#a6e3a1]✓ Completed ({task.status.value})[/#a6e3a1]")
         except Exception as e:
-            agent_card.set_status(f"[red]✗ Failed: {e}[/red]")
+            agent_card.set_status(f"[#f7768e]✗ Failed: {e}[/#f7768e]")
         finally:
             self.is_busy = False
             self._update_top_bar()
@@ -710,6 +1018,7 @@ class MaulnessTUIApp(App):
                 repo_name=self.repo_name,
                 title=goal[:80],
                 prompt=goal,
+                workspace_path=self.workspace_path,
                 pipeline_name=pipeline_name,
                 on_thought=on_thought,
                 on_message=on_message,
@@ -718,9 +1027,9 @@ class MaulnessTUIApp(App):
                 on_stage_start=on_stage_start,
                 verbose=False,
             )
-            p_card.finish(f"[green]✓ Pipeline Finished ({task.status.value})[/green]")
+            p_card.finish(f"[#a6e3a1]✓ Pipeline Finished ({task.status.value})[/#a6e3a1]")
         except Exception as e:
-            p_card.finish(f"[red]✗ Pipeline Failed: {e}[/red]")
+            p_card.finish(f"[#f7768e]✗ Pipeline Failed: {e}[/#f7768e]")
         finally:
             self.is_busy = False
             self._update_top_bar()

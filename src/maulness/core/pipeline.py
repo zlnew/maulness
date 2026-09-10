@@ -1,6 +1,7 @@
 import asyncio
 import subprocess
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 from rich.console import Console
 from rich.panel import Panel
@@ -40,6 +41,7 @@ class PipelineOrchestrator:
         repo_name: str,
         title: str,
         prompt: str,
+        workspace_path: Optional[Path] = None,
         pipeline_name: str = "standard",
         pipeline_def: Optional[PipelineDefinition] = None,
         discord_thread_id: Optional[int] = None,
@@ -54,7 +56,7 @@ class PipelineOrchestrator:
     ) -> TaskRecord:
         """Execute a declarative pipeline across defined stages."""
         await self.storage.initialize()
-        workspace_path = config.resolve_repo_path(repo_name)
+        target_workspace = Path(workspace_path).resolve() if workspace_path else config.resolve_repo_path(repo_name)
         task_id = f"task_{uuid.uuid4().hex[:10]}"
 
         # Load pipeline definition
@@ -65,7 +67,7 @@ class PipelineOrchestrator:
             task_id=task_id,
             title=title,
             repo_name=repo_name,
-            workspace_path=str(workspace_path),
+            workspace_path=str(target_workspace),
             mode=TaskMode.MULTI,
             discord_thread_id=discord_thread_id,
         )
@@ -79,7 +81,7 @@ class PipelineOrchestrator:
         # Context store shared and mutated across stages
         context: dict[str, Any] = {
             "repo_name": repo_name,
-            "workspace_path": str(workspace_path),
+            "workspace_path": str(target_workspace),
             "title": title,
             "prompt": prompt,
             "git_diff": "",
@@ -128,7 +130,7 @@ class PipelineOrchestrator:
             if stage.requires_diff:
                 diff_res = subprocess.run(
                     ["git", "diff", "HEAD"],
-                    cwd=str(workspace_path),
+                    cwd=str(target_workspace),
                     capture_output=True,
                     text=True,
                 )
@@ -144,7 +146,7 @@ class PipelineOrchestrator:
                 stage_output = await provider.run(
                     session_id=f"{task_id}_{stage.name}",
                     prompt=stage_prompt,
-                    workspace_path=workspace_path,
+                    workspace_path=target_workspace,
                     on_thought=on_thought,
                     on_message=on_message,
                     on_approval=on_approval if stage.requires_approval else None,

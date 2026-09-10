@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from pathlib import Path
 from typing import Callable, Coroutine, Optional
 
 from rich.console import Console
@@ -37,6 +38,7 @@ class TaskRunner:
         self,
         repo_name: str,
         prompt: str,
+        workspace_path: Optional[Path] = None,
         profile_name: str = "builder",
         on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine]] = None,
         on_message: Optional[Callable[[AgentMessageEvent], Coroutine]] = None,
@@ -47,7 +49,7 @@ class TaskRunner:
         """Execute a task in Direct Mode with the selected profile."""
         await self.storage.initialize()
 
-        workspace_path = config.resolve_repo_path(repo_name)
+        target_workspace = Path(workspace_path).resolve() if workspace_path else config.resolve_repo_path(repo_name)
         task_id = f"task_{uuid.uuid4().hex[:10]}"
         profile = self.profile_manager.get_profile(profile_name)
 
@@ -56,7 +58,7 @@ class TaskRunner:
             task_id=task_id,
             title=prompt[:80],
             repo_name=repo_name,
-            workspace_path=str(workspace_path),
+            workspace_path=str(target_workspace),
             mode=TaskMode.DIRECT,
         )
 
@@ -65,7 +67,7 @@ class TaskRunner:
                 f"[bold cyan][*] Task {task_id} initialized for [green]{repo_name}[/green] "
                 f"using profile [magenta]{profile.name}[/magenta] ([dim]{profile.provider}[/dim])[/bold cyan]"
             )
-            console.print(f"[dim]Workspace: {workspace_path}[/dim]\n")
+            console.print(f"[dim]Workspace: {target_workspace}[/dim]\n")
 
         # Set task to BUILDING
         await self.storage.update_task_status(task_id, TaskStatus.BUILDING)
@@ -109,7 +111,7 @@ class TaskRunner:
             await provider.run(
                 session_id=task_id,
                 prompt=prompt,
-                workspace_path=workspace_path,
+                workspace_path=target_workspace,
                 on_thought=default_thought_handler,
                 on_message=default_message_handler,
                 on_tool_call=on_tool_call,

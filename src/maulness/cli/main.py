@@ -205,6 +205,7 @@ def run_plain_chat(initial_profile: str = "builder"):
                         repo_name=repo_name,
                         title=goal[:80],
                         prompt=goal,
+                        workspace_path=workspace_path,
                         pipeline_name=p_name,
                         auto_proceed=False,
                     )
@@ -216,6 +217,7 @@ def run_plain_chat(initial_profile: str = "builder"):
                 runner.run_direct(
                     repo_name=repo_name,
                     prompt=raw_prompt,
+                    workspace_path=workspace_path,
                     profile_name=current_profile,
                 )
             )

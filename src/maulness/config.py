@@ -58,16 +58,25 @@ class Config:
             # Fallback to current folder name and target
             return target.name, target
 
-    def resolve_repo_path(self, repo_name: str) -> Path:
-        """Resolve a repository name to an absolute workspace directory path."""
-        target = self.repo_dir / repo_name
-        if not target.exists():
-            # Check if it's already an absolute or relative path
-            candidate = Path(repo_name).resolve()
-            if candidate.exists():
-                return candidate
-            raise FileNotFoundError(f"Repository '{repo_name}' not found in {self.repo_dir}")
-        return target
+    def resolve_repo_path(self, target: str | Path) -> Path:
+        """Resolve a repository name or path to an absolute workspace directory path."""
+        # 1. If it's already an existing directory (absolute or relative)
+        candidate = Path(str(target)).resolve()
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+
+        # 2. Check inside repo_dir (e.g. repo/expense-tracker, repo/maulness)
+        repo_candidate = (self.repo_dir / str(target)).resolve()
+        if repo_candidate.exists() and repo_candidate.is_dir():
+            return repo_candidate
+
+        # 3. Check inside workspace_root (e.g. personal)
+        ws_candidate = (self.workspace_root / str(target)).resolve()
+        if ws_candidate.exists() and ws_candidate.is_dir():
+            return ws_candidate
+
+        # 4. Safe fallback to current working directory
+        return Path.cwd().resolve()
 
 
 config = Config()
