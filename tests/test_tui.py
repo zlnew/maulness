@@ -225,6 +225,23 @@ async def test_tui_new_slash_commands():
         assert len(app.prompt_queue) == 1
         assert app.prompt_queue[0] == "test queued prompt"
 
+        # 5. Test /new command resets session
+        app.active_acp_session_id = "test_acp_session"
+        inp.value = "/new"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.active_acp_session_id is None
+        cards = list(app.query(SystemCard))
+        assert any("New Session" in str(c.card_title) for c in cards)
+
+        # 6. Verify unified command taxonomy
+        cmd_keys = [c[0] for c in app.get_dynamic_commands()]
+        assert "/new" in cmd_keys
+        assert "/stop" in cmd_keys
+        assert "/diff" not in cmd_keys
+        assert "/cancel" not in cmd_keys
+        assert "/clear" not in cmd_keys
+
 
 @pytest.mark.asyncio
 async def test_profile_workspace_configuration():

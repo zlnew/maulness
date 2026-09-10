@@ -16,16 +16,21 @@ async def test_bot_slash_commands_registered(tmp_path: Path):
 
     registered_cmds = {cmd.name for cmd in bot.tree.get_commands()}
     expected_cmds = {
-        "status", "profiles", "ask", "run", "task", "abort", "stop",
-        "thread", "new", "reset", "clear", "context", "model",
-        "reasoning", "help", "memory", "yolo"
+        "new", "stop", "interrupt", "queue", "context", "compact",
+        "pipeline", "profile", "yolo", "worktree", "usage", "help", "thread"
     }
-    for cmd in expected_cmds:
-        assert cmd in registered_cmds, f"Slash command /{cmd} missing from registered commands"
+    assert registered_cmds == expected_cmds, f"Slash command mismatch: {registered_cmds ^ expected_cmds}"
+
+    removed_cmds = {
+        "status", "profiles", "ask", "run", "task", "abort",
+        "reset", "clear", "model", "reasoning", "memory"
+    }
+    for cmd in removed_cmds:
+        assert cmd not in registered_cmds, f"Removed command /{cmd} should not be registered"
 
 
 @pytest.mark.asyncio
-async def test_bot_abort_handler(tmp_path: Path):
+async def test_bot_stop_handler(tmp_path: Path):
     from maulness.core.models import TaskMode, TaskStatus
 
     storage = StorageManager(db_path=tmp_path / "bot_test.db")
@@ -36,8 +41,8 @@ async def test_bot_abort_handler(tmp_path: Path):
 
     # Seed an active task
     await storage.create_task(
-        task_id="task_to_abort",
-        title="Test Abort",
+        task_id="task_to_stop",
+        title="Test Stop",
         repo_name="horizonx",
         workspace_path="/tmp",
         mode=TaskMode.DIRECT,
@@ -46,10 +51,10 @@ async def test_bot_abort_handler(tmp_path: Path):
     # Mock an asyncio task in active_tasks
     mock_async_task = MagicMock()
     mock_async_task.done.return_value = False
-    bot.active_tasks["task_to_abort"] = mock_async_task
+    bot.active_tasks["task_to_stop"] = mock_async_task
 
-    # Call abort logic through command callback
-    abort_cmd = next(c for c in bot.tree.get_commands() if c.name == "abort")
+    # Call stop logic through command callback
+    stop_cmd = next(c for c in bot.tree.get_commands() if c.name == "stop")
 
     mock_interaction = AsyncMock()
     mock_interaction.user.id = 12345
@@ -57,10 +62,10 @@ async def test_bot_abort_handler(tmp_path: Path):
     mock_interaction.channel = MagicMock()
     bot.owner_id = 12345
 
-    await abort_cmd.callback(mock_interaction, task_id="task_to_abort")
+    await stop_cmd.callback(mock_interaction, task_id="task_to_stop")
 
     mock_async_task.cancel.assert_called_once()
-    updated_task = await storage.get_task("task_to_abort")
+    updated_task = await storage.get_task("task_to_stop")
     assert updated_task.status == TaskStatus.FAILED
 
 
@@ -143,7 +148,7 @@ async def test_bot_new_and_reset_commands(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_bot_context_and_model_commands(tmp_path: Path):
+async def test_bot_context_and_profile_commands(tmp_path: Path):
     storage = StorageManager(db_path=tmp_path / "bot_test.db")
     await storage.initialize()
 
@@ -163,15 +168,58 @@ async def test_bot_context_and_model_commands(tmp_path: Path):
     embed = mock_interaction.response.send_message.call_args[1]["embed"]
     assert "Active Session Context" in embed.title
 
-    # Test /model command
-    model_cmd = next(c for c in bot.tree.get_commands() if c.name == "model")
-    mock_interaction_model = AsyncMock()
-    mock_interaction_model.user.id = 12345
-    mock_interaction_model.channel_id = 555
+    # Test /profile command
+    profile_cmd = next(c for c in bot.tree.get_commands() if c.name == "profile")
+    mock_interaction_prof = AsyncMock()
+    mock_interaction_prof.user.id = 12345
+    mock_interaction_prof.channel_id = 555
 
-    # Switch model
-    await model_cmd.callback(mock_interaction_model, name="deepseek/deepseek-chat")
-    assert bot.bound_profile.model == "deepseek/deepseek-chat"
+    # Switch profile for channel
+    await profile_cmd.callback(mock_interaction_prof, name="builder")
+    assert bot.channel_profile_overrides[555].name == "builder"
+    assert 555 not in bot.channel_conversations
+
+
+@pytest.mark.asyncio
+async def test_bot_yolo_worktree_usage_compact_commands(tmp_path: Path):
+    storage = StorageManager(db_path=tmp_path / "bot_test.db")
+    await storage.initialize()
+
+    bot = MaulnessBot(storage=storage, profile_name="default")
+    await bot._register_slash_commands()
+    bot.owner_id = 12345
+
+    # 1. Test /yolo toggle
+    yolo_cmd = next(c for c in bot.tree.get_commands() if c.name == "yolo")
+    mock_int = AsyncMock()
+    mock_int.user.id = 12345
+    mock_int.channel_id = 100
+    await yolo_cmd.callback(mock_int, enabled=None)
+    assert bot.channel_yolo[100] is True
+    await yolo_cmd.callback(mock_int, enabled=False)
+    assert bot.channel_yolo[100] is False
+
+    # 2. Test /worktree toggle
+    worktree_cmd = next(c for c in bot.tree.get_commands() if c.name == "worktree")
+    await worktree_cmd.callback(mock_int, enabled=True)
+    assert bot.channel_worktree[100] is True
+
+    # 3. Test /usage
+    usage_cmd = next(c for c in bot.tree.get_commands() if c.name == "usage")
+    bot.total_prompts = 5
+    bot.total_chars_out = 4000
+    await usage_cmd.callback(mock_int)
+    mock_int.response.send_message.assert_called()
+    embed = mock_int.response.send_message.call_args[1]["embed"]
+    assert "Session Metrics & Usage" in embed.title
+
+    # 4. Test /compact
+    compact_cmd = next(c for c in bot.tree.get_commands() if c.name == "compact")
+    bot.channel_conversations[100] = "uuid-to-compact"
+    await compact_cmd.callback(mock_int)
+    assert 100 not in bot.channel_conversations
+    latest_mem = await storage.get_latest_session_memory(f"discord_100_{int(bot.session_start_time)}")
+    # Memory persisted
 
 
 @pytest.mark.asyncio

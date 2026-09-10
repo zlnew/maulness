@@ -83,7 +83,7 @@ class CommandPaletteModal(ModalScreen[Optional[str]]):
     def compose(self) -> ComposeResult:
         with Container(classes="palette-dialog"):
             yield Label("[bold magenta]󰍉 Command Palette[/bold magenta] [dim](Type to filter, ↑/↓ to navigate, Enter/Tab to select, Esc to close)[/dim]", classes="palette-title")
-            yield Input(value=self.initial_query, placeholder="Filter commands (/pipeline, /profile, /diff, !<cmd>)...", id="palette-filter")
+            yield Input(value=self.initial_query, placeholder="Filter commands (/new, /pipeline, /profile, !<cmd>)...", id="palette-filter")
             ol = OptionList(id="palette-options")
             yield ol
 
@@ -357,18 +357,20 @@ class HelpModal(ModalScreen[None]):
   - `Ctrl+C` : Immediately cancel running task
 
 ### Dynamic Slash Commands
-- `/cancel` or `/stop` : Stop/cancel currently running task
+- `/new` : Start fresh session, reset context window, and clear transcript
+- `/stop` : Stop currently running task
 - `/interrupt <prompt>` : Cancel current task and steer agent with new prompt
 - `/queue <prompt>` : Queue a prompt to auto-execute after current task finishes
-- `/usage` : Display session token metrics, duration, and cost estimation
 - `/context` : Display current workspace, git status, active profile, and engine
 - `/compact` : Compress conversation history into SQLite long-term memory
 - `/pipeline <name> <goal>` : Execute declarative pipeline (`standard`, `quick`, `plan_only`, `audit`)
 - `/profile <name>` : Switch active profile (`default`, `builder`, `planner`, `reviewer`)
-- `/diff` : Scrollable git diff inspector
+- `/yolo` : Toggle YOLO mode: bypass human approval on mutating actions
+- `/worktree` : Toggle isolated Git worktree execution
+- `/usage` : Display session token metrics, duration, and cost estimation
+- `/help` : Show keyboard shortcuts and command reference
+- `/exit` : Quit Maulness interactive session
 - `!<command>` : Execute local workspace shell command (e.g. `!git status`, `!pytest`)
-- `/clear` : Clear chat transcript
-- `/exit` : Quit
 """
         with Container(classes="diff-dialog"):
             with VerticalScroll():
@@ -816,8 +818,8 @@ class MaulnessTUIApp(App):
 
         # 1. Flow Control & Task Orchestration
         commands.extend([
-            ("/cancel", "Cancel currently running task"),
-            ("/stop", "Stop currently running task (alias of /cancel)"),
+            ("/new", "Start fresh session, reset context window, and clear transcript"),
+            ("/stop", "Stop currently running task"),
             ("/interrupt ", "Interrupt current task and steer with new prompt (<prompt>)"),
             ("/queue ", "Queue a prompt to run after current task finishes (<prompt>)"),
             ("/usage", "Display token metrics and estimated cost for this session"),
@@ -843,9 +845,7 @@ class MaulnessTUIApp(App):
         commands.extend([
             ("/yolo", "Toggle YOLO mode: bypass human approval on mutating actions"),
             ("/worktree", "Toggle isolated Git worktree execution"),
-            ("/diff", "Inspect uncommitted git changes in current workspace"),
             ("!<command>", "Shell: Execute command in current workspace (e.g. !git status)"),
-            ("/clear", "Clear chat history and transcript view"),
             ("/help", "Show keyboard shortcuts and command reference"),
             ("/exit", "Exit Maulness interactive session"),
         ])
@@ -999,15 +999,15 @@ class MaulnessTUIApp(App):
 
         # Zero-argument immediate action commands (only when Enter pressed)
         if execute_zero_arg and selected_cmd in (
-            "/diff",
-            "/clear",
-            "/help",
-            "/exit",
-            "/cancel",
+            "/new",
             "/stop",
-            "/usage",
             "/context",
             "/compact",
+            "/yolo",
+            "/worktree",
+            "/usage",
+            "/help",
+            "/exit",
         ):
             self._hide_autocomplete()
             chat_input.value = selected_cmd
@@ -1166,8 +1166,24 @@ class MaulnessTUIApp(App):
         chat_input.value = ""
         self._hide_autocomplete()
 
-        # Cancellation commands
-        if raw_text in ("/stop", "/cancel", "stop", "cancel"):
+        # New session command: reset context and clear transcript
+        if raw_text in ("/new", "new"):
+            if self.is_busy:
+                self.cancel_active_task()
+            self.action_clear_chat()
+            chat_view = self.query_one("#chat-view", VerticalScroll)
+            await chat_view.mount(
+                SystemCard(
+                    "✨ New Session",
+                    f"Reset active conversation context for repo **{self.repo_name}**.\n"
+                    f"Operating profile: **{self.current_profile}**.",
+                )
+            )
+            chat_view.scroll_end(animate=False)
+            return
+
+        # Stop command: cancel currently running task
+        if raw_text in ("/stop", "stop"):
             chat_view = self.query_one("#chat-view", VerticalScroll)
             if self.is_busy:
                 self.cancel_active_task()
@@ -1318,7 +1334,7 @@ class MaulnessTUIApp(App):
                 SystemCard(
                     "Busy",
                     "Agent is currently busy processing a task.\n"
-                    "• Use [bold red]/cancel[/bold red] or [bold red]Ctrl+C[/bold red] to stop.\n"
+                    "• Use [bold red]/stop[/bold red] or [bold red]Ctrl+C[/bold red] to stop.\n"
                     "• Use [bold magenta]/interrupt <prompt>[/bold magenta] to stop and steer immediately.\n"
                     "• Use [bold cyan]/queue <prompt>[/bold cyan] to queue your prompt to run next.",
                     is_error=True,
@@ -1330,10 +1346,6 @@ class MaulnessTUIApp(App):
         # Direct Slash Commands
         if raw_text in ("/exit", "/quit", "exit", "quit"):
             self.exit()
-            return
-
-        if raw_text == "/clear":
-            self.action_clear_chat()
             return
 
         if raw_text == "/yolo":
@@ -1354,10 +1366,6 @@ class MaulnessTUIApp(App):
             self._update_top_bar()
             self._update_statusline()
             chat_view.scroll_end(animate=False)
-            return
-
-        if raw_text == "/diff":
-            self.action_view_diff()
             return
 
         if raw_text in ("/help", "help"):
