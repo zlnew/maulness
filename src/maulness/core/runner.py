@@ -18,6 +18,7 @@ from maulness.core.models import (
 )
 from maulness.core.profiles import ProfileManager
 from maulness.core.providers.factory import get_provider_for_profile
+from maulness.core.worktree import WorktreeManager
 from maulness.storage.db import StorageManager
 
 console = Console()
@@ -30,9 +31,11 @@ class TaskRunner:
         self,
         storage: Optional[StorageManager] = None,
         profile_manager: Optional[ProfileManager] = None,
+        worktree_manager: Optional[WorktreeManager] = None,
     ):
         self.storage = storage or StorageManager(db_path=config.db_path)
         self.profile_manager = profile_manager or ProfileManager()
+        self.worktree_manager = worktree_manager or WorktreeManager()
 
     async def run_direct(
         self,
@@ -42,6 +45,7 @@ class TaskRunner:
         profile_name: str = "builder",
         session_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
+        use_worktree: bool = False,
         on_init: Optional[Callable[[str], Coroutine]] = None,
         on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine]] = None,
         on_message: Optional[Callable[[AgentMessageEvent], Coroutine]] = None,
@@ -133,17 +137,29 @@ class TaskRunner:
 
         try:
             provider = get_provider_for_profile(profile)
-            await provider.run(
-                session_id=task_id,
-                prompt=prompt,
-                workspace_path=target_workspace,
-                conversation_id=effective_conv_id,
-                on_init=internal_init_handler,
-                on_thought=default_thought_handler,
-                on_message=default_message_handler,
-                on_tool_call=on_tool_call,
-                on_approval=terminal_approval_handler,
-            )
+
+            async def _execute_on(ws: Path):
+                await provider.run(
+                    session_id=task_id,
+                    prompt=prompt,
+                    workspace_path=ws,
+                    conversation_id=effective_conv_id,
+                    on_init=internal_init_handler,
+                    on_thought=default_thought_handler,
+                    on_message=default_message_handler,
+                    on_tool_call=on_tool_call,
+                    on_approval=terminal_approval_handler,
+                )
+
+            if use_worktree:
+                with self.worktree_manager.isolated_worktree(
+                    target_workspace, branch_prefix=f"task-{task_id[:6]}"
+                ) as wt_path:
+                    if verbose:
+                        console.print(f"[dim]Isolated Git Worktree: {wt_path}[/dim]")
+                    await _execute_on(wt_path)
+            else:
+                await _execute_on(target_workspace)
 
             await self.storage.update_task_status(task_id, TaskStatus.DONE)
             if verbose:

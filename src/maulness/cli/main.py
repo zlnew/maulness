@@ -28,12 +28,16 @@ task_app = typer.Typer(help="Inspect tasks and execution history")
 session_app = typer.Typer(help="Inspect active and past agent sessions")
 profile_app = typer.Typer(help="Inspect agent execution profiles")
 discord_app = typer.Typer(help="Manage Discord bot gateways")
+soul_app = typer.Typer(help="Inspect and edit SOUL.md personal doctrines")
+db_app = typer.Typer(help="Database maintenance and migration commands")
 
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(task_app, name="task")
 app.add_typer(session_app, name="session")
 app.add_typer(profile_app, name="profile")
 app.add_typer(discord_app, name="discord")
+app.add_typer(soul_app, name="soul")
+app.add_typer(db_app, name="db")
 
 console = Console()
 
@@ -111,6 +115,34 @@ def status():
     )
 
     console.print(table)
+
+
+@app.command()
+def run(
+    prompt: str = typer.Argument(..., help="Instruction or task to perform"),
+    repo: Optional[str] = typer.Option(
+        None, "-r", "--repo", help="Target repository (defaults to current directory)"
+    ),
+    profile: str = typer.Option("builder", "-p", "--profile", help="Execution profile"),
+    worktree: bool = typer.Option(
+        False, "-w", "--worktree", help="Execute inside an isolated git worktree"
+    ),
+):
+    """Execute a direct task on a repository with the specified profile."""
+    runner = TaskRunner()
+    current_repo, current_workspace = config.get_current_workspace()
+    effective_repo = repo or current_repo
+    target_workspace = config.resolve_repo_path(repo) if repo else current_workspace
+
+    asyncio.run(
+        runner.run_direct(
+            repo_name=effective_repo,
+            prompt=prompt,
+            workspace_path=target_workspace,
+            profile_name=profile,
+            use_worktree=worktree,
+        )
+    )
 
 
 def run_plain_chat(initial_profile: str = "default"):
@@ -343,6 +375,38 @@ def task_show(task_id: str = typer.Argument(..., help="Task ID to inspect")):
     )
 
 
+@task_app.command("abort")
+def task_abort(task_id: str = typer.Argument(..., help="Task ID to abort")):
+    """Immediately aborts an active task and closes associated sessions."""
+    from maulness.core.models import TaskStatus
+
+    storage = StorageManager(db_path=config.db_path)
+
+    async def _abort():
+        await storage.initialize()
+        task = await storage.get_task(task_id)
+        if not task:
+            console.print(f"[red][x] Task '{task_id}' not found.[/red]")
+            return
+        await storage.update_task_status(task_id, TaskStatus.FAILED)
+        sessions = await storage.list_sessions(limit=50)
+        closed_count = 0
+        for s in sessions:
+            if s.task_id == task_id and s.status == "active":
+                await storage.update_session_status(s.id, "closed")
+                if s.pid:
+                    try:
+                        os.kill(s.pid, 9)
+                    except ProcessLookupError:
+                        pass
+                closed_count += 1
+        console.print(
+            f"[green]✓ Aborted task '{task_id}' (closed {closed_count} sessions).[/green]"
+        )
+
+    asyncio.run(_abort())
+
+
 # ==========================================
 # Session Management (list & show)
 # ==========================================
@@ -516,6 +580,113 @@ def discord_run(
     """Run Discord gateway adapter in the foreground."""
     from maulness.daemon.service import main as service_main
     asyncio.run(service_main(profile_filter=profile))
+
+
+# ==========================================
+# Soul Doctrine Management (show, edit)
+# ==========================================
+@soul_app.command("show")
+def soul_show(
+    profile: Optional[str] = typer.Option(
+        None, "-p", "--profile", help="Profile name (defaults to global doctrine)"
+    ),
+):
+    """Print SOUL.md personal doctrine."""
+    pm = ProfileManager()
+    if profile:
+        prof = pm.get_profile(profile)
+        if prof.soul_content:
+            console.print(
+                Panel(
+                    prof.soul_content,
+                    title=f"SOUL.md ({prof.name})",
+                    border_style="magenta",
+                )
+            )
+        else:
+            console.print(f"[dim]No profile-specific SOUL.md found for '{profile}'.[/dim]")
+    else:
+        root_soul = config.config_dir / "SOUL.md"
+        if root_soul.exists():
+            console.print(
+                Panel(
+                    root_soul.read_text(encoding="utf-8"),
+                    title="Maulness Global SOUL.md",
+                    border_style="cyan",
+                )
+            )
+        else:
+            tpl_soul = (
+                Path(__file__).resolve().parent.parent.parent.parent
+                / "templates"
+                / "SOUL.md"
+            )
+            if tpl_soul.exists():
+                console.print(
+                    Panel(
+                        tpl_soul.read_text(encoding="utf-8"),
+                        title="Template SOUL.md",
+                        border_style="cyan",
+                    )
+                )
+            else:
+                console.print("[dim]No SOUL.md found.[/dim]")
+
+
+@soul_app.command("edit")
+def soul_edit(
+    profile: Optional[str] = typer.Option(
+        None, "-p", "--profile", help="Profile name (defaults to global doctrine)"
+    ),
+):
+    """Open SOUL.md in $EDITOR."""
+    editor = os.getenv("EDITOR", "nano")
+    if profile:
+        target = config.config_dir / "profiles" / profile / "SOUL.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            target.write_text(f"# {profile.title()} Persona Doctrine\n")
+    else:
+        target = config.config_dir / "SOUL.md"
+        if not target.exists():
+            tpl_soul = (
+                Path(__file__).resolve().parent.parent.parent.parent
+                / "templates"
+                / "SOUL.md"
+            )
+            if tpl_soul.exists():
+                target.write_text(tpl_soul.read_text(encoding="utf-8"))
+            else:
+                target.write_text("# Maul Personal Agent Doctrine\n")
+
+    subprocess.run([editor, str(target)])
+
+
+# ==========================================
+# Database Maintenance (migrate, reset)
+# ==========================================
+@db_app.command("migrate")
+def db_migrate():
+    """Apply SQLite DDL schemas to ensure database integrity."""
+    storage = StorageManager(db_path=config.db_path)
+    asyncio.run(storage.initialize())
+    console.print(f"[green]✓ Applied database DDL schemas at {config.db_path}[/green]")
+
+
+@db_app.command("reset")
+def db_reset():
+    """Reset orphan active sessions and mark pending/in-flight tasks as failed."""
+    storage = StorageManager(db_path=config.db_path)
+
+    async def _reset():
+        await storage.initialize()
+        res = await storage.reset_stale_sessions()
+        console.print(
+            f"[green]✓ Stale database state reset:[/green] "
+            f"closed {res['sessions_closed']} sessions, marked {res['tasks_failed']} tasks failed."
+        )
+
+    asyncio.run(_reset())
 
 
 def main():

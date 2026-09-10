@@ -57,6 +57,19 @@ class MaulnessBot(commands.Bot):
         # Scoped credentials from profile .env or config fallback
         self.owner_id = self._resolve_owner_id()
         self.guild_id = self._resolve_guild_id()
+        self.forum_channel_id = self._resolve_forum_channel_id()
+
+        # Active tasks tracking for /abort
+        self.active_tasks: dict[str, asyncio.Task] = {}
+        self.channel_tasks: dict[int, str] = {}
+
+    def _resolve_forum_channel_id(self) -> Optional[int]:
+        if "DISCORD_FORUM_CHANNEL_ID" in self.bound_profile.env_vars:
+            try:
+                return int(self.bound_profile.env_vars["DISCORD_FORUM_CHANNEL_ID"])
+            except ValueError:
+                pass
+        return config.discord_forum_channel_id
 
     def _resolve_owner_id(self) -> Optional[int]:
         if "OWNER_DISCORD_ID" in self.bound_profile.env_vars:
@@ -193,12 +206,50 @@ class MaulnessBot(commands.Bot):
             finally:
                 await debouncer.close()
 
+        REPO_CHOICES = [
+            app_commands.Choice(name="expense-tracker", value="expense-tracker"),
+            app_commands.Choice(name="horizonx", value="horizonx"),
+            app_commands.Choice(name="peek", value="peek"),
+            app_commands.Choice(name="aprizqyhub.my.id", value="aprizqyhub.my.id"),
+            app_commands.Choice(name="neo-portfolio", value="neo-portfolio"),
+            app_commands.Choice(name="maulness", value="maulness"),
+        ]
+
+        @self.tree.command(name="abort", description="Terminate running ACP session or task immediately")
+        @app_commands.describe(task_id="Optional specific task ID to abort")
+        async def abort_cmd(interaction: discord.Interaction, task_id: Optional[str] = None):
+            if self.owner_id and interaction.user.id != self.owner_id:
+                await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
+                return
+
+            target_id = task_id or self.channel_tasks.get(interaction.channel_id)
+            if not target_id or target_id not in self.active_tasks:
+                await interaction.response.send_message(
+                    "⚠️ No active task found running in this channel.", ephemeral=True
+                )
+                return
+
+            async_task = self.active_tasks.get(target_id)
+            if async_task and not async_task.done():
+                async_task.cancel()
+                await self.storage.update_task_status(target_id, TaskStatus.FAILED)
+                if isinstance(interaction.channel, discord.Thread):
+                    await self._update_forum_tags(interaction.channel, "Failed")
+                await interaction.response.send_message(
+                    f"🛑 **Task `{target_id}` aborted immediately by user.**"
+                )
+            else:
+                await interaction.response.send_message(
+                    f"ℹ️ Task `{target_id}` is already finished.", ephemeral=True
+                )
+
         @self.tree.command(name="run", description="Execute a direct task on a repository")
         @app_commands.describe(
             repo="Target repository name (e.g. expense-tracker, horizonx, peek)",
             prompt="The instruction or task to perform",
             profile="Profile to use (builder, planner, default, reviewer)",
         )
+        @app_commands.choices(repo=REPO_CHOICES)
         async def run_cmd(
             interaction: discord.Interaction,
             repo: str,
@@ -211,19 +262,45 @@ class MaulnessBot(commands.Bot):
 
             effective_profile = profile or self.profile_name
             await interaction.response.defer()
-            status_msg = await interaction.followup.send(
+
+            # Check if we should dispatch to forum channel
+            exec_channel = interaction.channel
+            if (
+                self.forum_channel_id
+                and not isinstance(interaction.channel, discord.Thread)
+                and interaction.channel_id != self.forum_channel_id
+            ):
+                forum = self.get_channel(self.forum_channel_id)
+                if isinstance(forum, discord.ForumChannel):
+                    applied_tags = []
+                    avail = {t.name.lower(): t for t in forum.available_tags}
+                    for tag_key in ("direct", "building", repo.lower()):
+                        if tag_key in avail:
+                            applied_tags.append(avail[tag_key])
+                    thread_with_msg = await forum.create_thread(
+                        name=f"[{repo}] {prompt[:70]}",
+                        content=f"🚀 **Direct Task Launched**\n**Repo:** `{repo}` | **Profile:** `{effective_profile}`\n> {prompt[:200]}",
+                        applied_tags=applied_tags,
+                    )
+                    exec_channel = thread_with_msg.thread
+                    await interaction.followup.send(
+                        f"📋 Created task thread in workbench: {exec_channel.mention}"
+                    )
+
+            status_msg = await exec_channel.send(
                 f"⏳ **Initializing task on `{repo}` using profile `{effective_profile}`...**\n> {prompt[:100]}"
             )
 
-            # Update tag if in a forum thread
-            if isinstance(interaction.channel, discord.Thread):
-                await self._update_forum_tags(interaction.channel, "Building")
+            if isinstance(exec_channel, discord.Thread):
+                await self._update_forum_tags(exec_channel, "Building")
 
             all_text = []
 
             async def flush_chunk(text: str, is_final: bool):
                 try:
-                    await status_msg.edit(content=f"**[{repo}] ({effective_profile}) Running...**\n\n{text[:1900]}")
+                    await status_msg.edit(
+                        content=f"**[{repo}] ({effective_profile}) Running...**\n\n{text[:1900]}"
+                    )
                 except Exception as e:
                     logger.debug("Failed to edit Discord message: %s", e)
 
@@ -240,7 +317,7 @@ class MaulnessBot(commands.Bot):
                 loop = asyncio.get_running_loop()
                 fut = loop.create_future()
                 view = ApprovalView(future=fut)
-                await interaction.channel.send(
+                await exec_channel.send(
                     f"⚠️ **Approval Required (HITL)**\n"
                     f"**Tool:** `{event.tool_name}`\n"
                     f"**Args:** ```json\n{event.args}\n```",
@@ -251,31 +328,47 @@ class MaulnessBot(commands.Bot):
                 except asyncio.TimeoutError:
                     return False
 
-            task_record = await self.runner.run_direct(
-                repo_name=repo,
-                prompt=prompt,
-                profile_name=effective_profile,
-                on_thought=on_thought,
-                on_message=on_message,
-                on_approval=on_approval,
-            )
-            await debouncer.close()
+            async def _run_task_coro():
+                task_id = None
+                try:
+                    task_record = await self.runner.run_direct(
+                        repo_name=repo,
+                        prompt=prompt,
+                        profile_name=effective_profile,
+                        on_thought=on_thought,
+                        on_message=on_message,
+                        on_approval=on_approval,
+                    )
+                    task_id = task_record.id
+                    await debouncer.close()
 
-            # Handle file attachment spillover if output was very large
-            full_output = "".join(all_text)
-            files = []
-            if len(full_output) > 2000:
-                fp = io.BytesIO(full_output.encode("utf-8"))
-                files.append(discord.File(fp=fp, filename=f"{task_record.id}_output.txt"))
+                    full_output = "".join(all_text)
+                    files = []
+                    if len(full_output) > 2000:
+                        fp = io.BytesIO(full_output.encode("utf-8"))
+                        files.append(discord.File(fp=fp, filename=f"{task_record.id}_output.txt"))
 
-            if isinstance(interaction.channel, discord.Thread):
-                status_tag = "Done" if task_record.status == TaskStatus.DONE else "Failed"
-                await self._update_forum_tags(interaction.channel, status_tag)
+                    if isinstance(exec_channel, discord.Thread):
+                        status_tag = "Done" if task_record.status == TaskStatus.DONE else "Failed"
+                        await self._update_forum_tags(exec_channel, status_tag)
 
-            await interaction.channel.send(
-                f"✅ **Task `{task_record.id}` Finished ({task_record.status.value})**",
-                files=files,
-            )
+                    await exec_channel.send(
+                        f"✅ **Task `{task_record.id}` Finished ({task_record.status.value})**",
+                        files=files,
+                    )
+                except asyncio.CancelledError:
+                    logger.info("Task %s cancelled via /abort", task_id or repo)
+                    await exec_channel.send(f"🛑 **Task was aborted by user.**")
+                finally:
+                    if task_id and task_id in self.active_tasks:
+                        del self.active_tasks[task_id]
+                    if exec_channel.id in self.channel_tasks:
+                        del self.channel_tasks[exec_channel.id]
+
+            bg_task = asyncio.create_task(_run_task_coro())
+            # Track task by channel
+            self.channel_tasks[exec_channel.id] = f"run_{exec_channel.id}"
+            self.active_tasks[f"run_{exec_channel.id}"] = bg_task
 
         @self.tree.command(name="task", description="Create and run a Multi-Route Kanban task (Planner ➔ Builder ➔ Reviewer)")
         @app_commands.describe(
@@ -283,17 +376,42 @@ class MaulnessBot(commands.Bot):
             title="Task headline",
             prompt="Detailed task requirements",
         )
+        @app_commands.choices(repo=REPO_CHOICES)
         async def task_cmd(interaction: discord.Interaction, repo: str, title: str, prompt: str):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
                 return
 
             await interaction.response.defer()
-            await interaction.followup.send(f"🚀 **Launching Pipeline for `{title}` on `{repo}`...**")
 
-            thread_id = interaction.channel_id if isinstance(interaction.channel, discord.Thread) else None
-            if isinstance(interaction.channel, discord.Thread):
-                await self._update_forum_tags(interaction.channel, "Planning")
+            exec_channel = interaction.channel
+            if (
+                self.forum_channel_id
+                and not isinstance(interaction.channel, discord.Thread)
+                and interaction.channel_id != self.forum_channel_id
+            ):
+                forum = self.get_channel(self.forum_channel_id)
+                if isinstance(forum, discord.ForumChannel):
+                    applied_tags = []
+                    avail = {t.name.lower(): t for t in forum.available_tags}
+                    for tag_key in ("pipeline", "planning", repo.lower()):
+                        if tag_key in avail:
+                            applied_tags.append(avail[tag_key])
+                    thread_with_msg = await forum.create_thread(
+                        name=f"[{repo}] {title[:70]}",
+                        content=f"🚀 **Pipeline Kanban Task**\n**Goal:** {title}\n> {prompt[:200]}",
+                        applied_tags=applied_tags,
+                    )
+                    exec_channel = thread_with_msg.thread
+                    await interaction.followup.send(
+                        f"📋 Created pipeline thread in workbench: {exec_channel.mention}"
+                    )
+
+            status_msg = await exec_channel.send(f"🚀 **Launching Pipeline for `{title}` on `{repo}`...**")
+
+            thread_id = exec_channel.id if isinstance(exec_channel, discord.Thread) else None
+            if isinstance(exec_channel, discord.Thread):
+                await self._update_forum_tags(exec_channel, "Planning")
 
             async def on_thought(event: AgentThoughtEvent):
                 pass
@@ -305,7 +423,7 @@ class MaulnessBot(commands.Bot):
                 loop = asyncio.get_running_loop()
                 fut = loop.create_future()
                 view = ApprovalView(future=fut)
-                await interaction.channel.send(
+                await exec_channel.send(
                     f"⚠️ **Approval Required**\n**Tool:** `{event.tool_name}`\n```json\n{event.args}\n```",
                     view=view,
                 )
@@ -314,21 +432,37 @@ class MaulnessBot(commands.Bot):
                 except asyncio.TimeoutError:
                     return False
 
-            task_record = await self.pipeline.run_pipeline(
-                repo_name=repo,
-                title=title,
-                prompt=prompt,
-                discord_thread_id=thread_id,
-                on_thought=on_thought,
-                on_message=on_message,
-                on_approval=on_approval,
-                auto_proceed=True,  # In Discord, auto-proceed through stages while holding tool approvals
-            )
+            async def _run_pipeline_coro():
+                task_id = None
+                try:
+                    task_record = await self.pipeline.run_pipeline(
+                        repo_name=repo,
+                        title=title,
+                        prompt=prompt,
+                        discord_thread_id=thread_id,
+                        on_thought=on_thought,
+                        on_message=on_message,
+                        on_approval=on_approval,
+                        auto_proceed=True,
+                    )
+                    task_id = task_record.id
 
-            if isinstance(interaction.channel, discord.Thread):
-                status_tag = "Done" if task_record.status == TaskStatus.DONE else "Failed"
-                await self._update_forum_tags(interaction.channel, status_tag)
+                    if isinstance(exec_channel, discord.Thread):
+                        status_tag = "Done" if task_record.status == TaskStatus.DONE else "Failed"
+                        await self._update_forum_tags(exec_channel, status_tag)
 
-            await interaction.channel.send(
-                f"🎉 **Pipeline Completed for `{title}`!**\nStatus: `{task_record.status.value}`"
-            )
+                    await exec_channel.send(
+                        f"🎉 **Pipeline Completed for `{title}`!**\nStatus: `{task_record.status.value}`"
+                    )
+                except asyncio.CancelledError:
+                    logger.info("Pipeline %s cancelled via /abort", task_id or title)
+                    await exec_channel.send(f"🛑 **Pipeline was aborted by user.**")
+                finally:
+                    if task_id and task_id in self.active_tasks:
+                        del self.active_tasks[task_id]
+                    if exec_channel.id in self.channel_tasks:
+                        del self.channel_tasks[exec_channel.id]
+
+            bg_task = asyncio.create_task(_run_pipeline_coro())
+            self.channel_tasks[exec_channel.id] = f"task_{exec_channel.id}"
+            self.active_tasks[f"task_{exec_channel.id}"] = bg_task

@@ -1,10 +1,13 @@
+import json
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import aiosqlite
 
 from maulness.core.models import (
+    ApprovalRecord,
     ApprovalStatus,
     SessionRecord,
     TaskMode,
@@ -22,12 +25,19 @@ class StorageManager:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or DEFAULT_DB_PATH
 
+    @asynccontextmanager
+    async def _connect(self):
+        """Yield an aiosqlite connection with foreign keys enabled."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA foreign_keys = ON;")
+            yield db
+
     async def initialize(self):
         """Ensure parent directories exist and execute SQLite DDL schema."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.executescript(schema_sql)
             await db.commit()
 
@@ -41,7 +51,7 @@ class StorageManager:
         discord_thread_id: Optional[int] = None,
     ) -> TaskRecord:
         """Create a new task record in the database."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 """
                 INSERT INTO tasks (id, discord_thread_id, title, repo_name, workspace_path, mode, status)
@@ -71,16 +81,23 @@ class StorageManager:
 
     async def update_task_status(self, task_id: str, status: TaskStatus):
         """Update a task's state machine status."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 "UPDATE tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (status.value, task_id),
             )
             await db.commit()
 
+    async def delete_task(self, task_id: str) -> bool:
+        """Delete a task. Cascades to associated sessions, approvals, and events."""
+        async with self._connect() as db:
+            cursor = await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            await db.commit()
+            return cursor.rowcount > 0
+
     async def get_task(self, task_id: str) -> Optional[TaskRecord]:
         """Fetch a task record by ID."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
             row = await cursor.fetchone()
@@ -99,7 +116,7 @@ class StorageManager:
 
     async def list_tasks(self, limit: int = 20) -> list[TaskRecord]:
         """List the most recent tasks."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)
@@ -130,7 +147,7 @@ class StorageManager:
         """Create a new agent session record."""
         from maulness.core.models import SessionRecord
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 """
                 INSERT INTO agent_sessions (id, task_id, profile, engine, acp_session_id, pid, status)
@@ -152,7 +169,7 @@ class StorageManager:
 
     async def update_session_status(self, session_id: str, status: str = "closed"):
         """Update session status (active, closed, failed)."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 "UPDATE agent_sessions SET status = ? WHERE id = ?",
                 (status, session_id),
@@ -161,7 +178,7 @@ class StorageManager:
 
     async def update_session_acp_id(self, session_id: str, acp_session_id: str):
         """Update backend ACP/Antigravity conversation ID for a session."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 "UPDATE agent_sessions SET acp_session_id = ? WHERE id = ?",
                 (acp_session_id, session_id),
@@ -172,7 +189,7 @@ class StorageManager:
         """Fetch session by ID."""
         from maulness.core.models import SessionRecord
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM agent_sessions WHERE id = ?", (session_id,))
             row = await cursor.fetchone()
@@ -193,7 +210,7 @@ class StorageManager:
         """List active and recent sessions."""
         from maulness.core.models import SessionRecord
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT * FROM agent_sessions ORDER BY created_at DESC LIMIT ?", (limit,)
@@ -212,6 +229,104 @@ class StorageManager:
                 for row in rows
             ]
 
+    # ==========================================
+    # HITL Approvals CRUD
+    # ==========================================
+    async def create_approval(
+        self,
+        approval_id: str,
+        task_id: str,
+        rpc_request_id: int,
+        tool_name: str,
+        tool_args: Any,
+        discord_message_id: Optional[int] = None,
+    ) -> ApprovalRecord:
+        """Create a new pending approval record."""
+        args_str = tool_args if isinstance(tool_args, str) else json.dumps(tool_args)
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO approvals (id, task_id, rpc_request_id, tool_name, tool_args, status, discord_message_id)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (approval_id, task_id, rpc_request_id, tool_name, args_str, discord_message_id),
+            )
+            await db.commit()
+
+        return ApprovalRecord(
+            id=approval_id,
+            task_id=task_id,
+            rpc_request_id=rpc_request_id,
+            tool_name=tool_name,
+            tool_args=args_str,
+            status=ApprovalStatus.PENDING,
+            discord_message_id=discord_message_id,
+        )
+
+    async def update_approval_status(
+        self, approval_id: str, status: ApprovalStatus
+    ) -> bool:
+        """Update approval status (approved, rejected, timeout)."""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                UPDATE approvals
+                SET status = ?, resolved_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (status.value, approval_id),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def get_approval(self, approval_id: str) -> Optional[ApprovalRecord]:
+        """Fetch approval record by ID."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,))
+            row = await cursor.fetchone()
+            if not row:
+                return None
+
+            return ApprovalRecord(
+                id=row["id"],
+                task_id=row["task_id"],
+                rpc_request_id=row["rpc_request_id"],
+                tool_name=row["tool_name"],
+                tool_args=row["tool_args"],
+                status=ApprovalStatus(row["status"]),
+                discord_message_id=row["discord_message_id"],
+            )
+
+    async def list_approvals(
+        self, task_id: Optional[str] = None, limit: int = 20
+    ) -> list[ApprovalRecord]:
+        """List approval requests."""
+        query = "SELECT * FROM approvals"
+        params: list[Any] = []
+        if task_id:
+            query += " WHERE task_id = ?"
+            params.append(task_id)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(query, tuple(params))
+            rows = await cursor.fetchall()
+            return [
+                ApprovalRecord(
+                    id=row["id"],
+                    task_id=row["task_id"],
+                    rpc_request_id=row["rpc_request_id"],
+                    tool_name=row["tool_name"],
+                    tool_args=row["tool_args"],
+                    status=ApprovalStatus(row["status"]),
+                    discord_message_id=row["discord_message_id"],
+                )
+                for row in rows
+            ]
+
     async def save_session_memory(
         self,
         session_id: str,
@@ -219,7 +334,7 @@ class StorageManager:
         token_count: int = 0,
     ) -> int:
         """Save a compacted session memory summary to SQLite."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(
                 """
                 INSERT INTO session_memories (session_id, summary, token_count)
@@ -232,7 +347,7 @@ class StorageManager:
 
     async def get_latest_session_memory(self, session_id: str) -> Optional[str]:
         """Retrieve the most recent compacted memory summary for a session."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -244,4 +359,23 @@ class StorageManager:
             )
             row = await cursor.fetchone()
             return row["summary"] if row else None
+
+    async def reset_stale_sessions(self) -> dict[str, int]:
+        """Reset orphan active sessions and mark in-flight tasks as failed/closed."""
+        async with self._connect() as db:
+            c1 = await db.execute(
+                "UPDATE agent_sessions SET status = 'closed' WHERE status = 'active'"
+            )
+            c2 = await db.execute(
+                """
+                UPDATE tasks
+                SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+                WHERE status IN ('planning', 'building', 'review')
+                """
+            )
+            await db.commit()
+            return {
+                "sessions_closed": c1.rowcount,
+                "tasks_failed": c2.rowcount,
+            }
 

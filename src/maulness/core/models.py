@@ -77,3 +77,16 @@ class SessionRecord:
     status: str = "active"
     created_at: Optional[datetime] = None
 
+
+@dataclass
+class ApprovalRecord:
+    id: str
+    task_id: str
+    rpc_request_id: int
+    tool_name: str
+    tool_args: str
+    status: ApprovalStatus = ApprovalStatus.PENDING
+    discord_message_id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    resolved_at: Optional[datetime] = None
+
