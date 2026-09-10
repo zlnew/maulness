@@ -106,3 +106,10 @@ async def test_bot_should_handle_message_routing(tmp_path: Path):
     msg4.content = "random chat"
     assert bot._should_handle_message(msg4) is False
 
+    # 5. Satellite profile (e.g. life) should ignore mentions outside its home/forum channels
+    bot_life = MaulnessBot(storage=storage, profile_name="life")
+    bot_life.home_channel_id = 5555
+    bot_life._connection.user = mock_user
+    assert bot_life._should_handle_message(msg3) is False
+
+

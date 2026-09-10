@@ -103,21 +103,19 @@ class MaulnessBot(commands.Bot):
 
         # Deduplicate sync per application/token to prevent Discord HTTP 429 rate limit
         token_key = self.bound_profile.env_vars.get("DISCORD_BOT_TOKEN", "")[:24]
-        if token_key and token_key in _synced_tokens:
-            logger.info("[%s] Slash commands already synced for shared token", self.profile_name)
-            return
+        if token_key:
+            if token_key in _synced_tokens:
+                logger.info("[%s] Slash commands already synced for shared token", self.profile_name)
+                return
+            _synced_tokens.add(token_key)
 
         if self.guild_id:
             guild = discord.Object(id=self.guild_id)
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
-            if token_key:
-                _synced_tokens.add(token_key)
             logger.info("[%s] Synced slash commands to guild %s", self.profile_name, self.guild_id)
         else:
             await self.tree.sync()
-            if token_key:
-                _synced_tokens.add(token_key)
             logger.info("[%s] Synced global slash commands", self.profile_name)
 
     async def on_ready(self):
