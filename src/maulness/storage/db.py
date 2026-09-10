@@ -203,3 +203,36 @@ class StorageManager:
                 for row in rows
             ]
 
+    async def save_session_memory(
+        self,
+        session_id: str,
+        summary: str,
+        token_count: int = 0,
+    ) -> int:
+        """Save a compacted session memory summary to SQLite."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO session_memories (session_id, summary, token_count)
+                VALUES (?, ?, ?)
+                """,
+                (session_id, summary, token_count),
+            )
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_latest_session_memory(self, session_id: str) -> Optional[str]:
+        """Retrieve the most recent compacted memory summary for a session."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT summary FROM session_memories
+                WHERE session_id = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (session_id,),
+            )
+            row = await cursor.fetchone()
+            return row["summary"] if row else None
+

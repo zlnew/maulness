@@ -49,15 +49,17 @@ class TaskRunner:
         """Execute a task in Direct Mode with the selected profile."""
         await self.storage.initialize()
 
-        target_workspace = Path(workspace_path).resolve() if workspace_path else config.resolve_repo_path(repo_name)
-        task_id = f"task_{uuid.uuid4().hex[:10]}"
         profile = self.profile_manager.get_profile(profile_name)
+        fallback_workspace = Path(workspace_path).resolve() if workspace_path else config.resolve_repo_path(repo_name)
+        target_workspace = self.profile_manager.resolve_workspace_for_profile(profile, fallback_workspace)
+        effective_repo = target_workspace.name if target_workspace != fallback_workspace else repo_name
+        task_id = f"task_{uuid.uuid4().hex[:10]}"
 
         # Record task in database
         task = await self.storage.create_task(
             task_id=task_id,
             title=prompt[:80],
-            repo_name=repo_name,
+            repo_name=effective_repo,
             workspace_path=str(target_workspace),
             mode=TaskMode.DIRECT,
         )

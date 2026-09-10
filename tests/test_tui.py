@@ -39,32 +39,36 @@ async def test_tui_neovim_modes_and_scrolling():
 
 
 @pytest.mark.asyncio
-async def test_tui_command_palette():
-    app = MaulnessTUIApp(initial_profile="builder")
-    async with app.run_test() as pilot:
-        await pilot.press("escape")
-        await pilot.pause()
-        assert app.mode == "normal"
+async def test_tui_lsp_autocomplete():
+    from textual.widgets import OptionList
 
-        # Press '/' to open command palette
+    app = MaulnessTUIApp(initial_profile="default")
+    async with app.run_test() as pilot:
+        assert app.mode == "insert"
+        popup = app.query_one("#autocomplete-popup", OptionList)
+        assert not popup.has_class("visible")
+
+        # Type '/' in insert mode to trigger LSP autocomplete popup
         await pilot.press("slash")
         await pilot.pause()
-        assert isinstance(app.screen, CommandPaletteModal)
+        assert popup.has_class("visible")
+        assert popup.option_count > 0
 
-        # Filter for diff
-        await pilot.press("d", "i", "f", "f")
+        # Type 'c' -> input is now '/c', popup filters
+        await pilot.press("c")
         await pilot.pause()
-        # Hit Enter to select /diff
-        await pilot.press("enter")
+        assert popup.has_class("visible")
+
+        # Navigate down and complete with tab
+        await pilot.press("down")
+        await pilot.pause()
+        await pilot.press("tab")
         await pilot.pause()
 
-        # Should have opened DiffModal
-        assert isinstance(app.screen, DiffModal)
-
-        # Close diff modal with Esc
-        await pilot.press("escape")
-        await pilot.pause()
-        assert not isinstance(app.screen, DiffModal)
+        # Input should have completed a /c command and popup hidden
+        inp = app.query_one("#chat-input")
+        assert inp.value.startswith("/c")
+        assert not popup.has_class("visible")
 
 
 @pytest.mark.asyncio
@@ -159,16 +163,83 @@ stages:
 
 
 @pytest.mark.asyncio
-async def test_tui_typing_slash_opens_palette():
+async def test_tui_normal_mode_slash_triggers_autocomplete():
+    from textual.widgets import OptionList
+
     app = MaulnessTUIApp()
     async with app.run_test() as pilot:
-        # In insert mode, typing '/' triggers the command palette
-        await pilot.press("slash")
-        await pilot.pause()
-        assert isinstance(app.screen, CommandPaletteModal)
         await pilot.press("escape")
         await pilot.pause()
-        assert not isinstance(app.screen, CommandPaletteModal)
+        assert app.mode == "normal"
+
+        # Press '/' in normal mode
+        await pilot.press("slash")
+        await pilot.pause()
+
+        # Should enter insert mode and open floating LSP autocomplete popup
+        assert app.mode == "insert"
+        popup = app.query_one("#autocomplete-popup", OptionList)
+        assert popup.has_class("visible")
+        assert popup.option_count > 0
+
+        # Press escape to dismiss popup
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not popup.has_class("visible")
+
+
+@pytest.mark.asyncio
+async def test_tui_new_slash_commands():
+    from maulness.cli.tui import SystemCard
+
+    app = MaulnessTUIApp()
+    async with app.run_test() as pilot:
+        inp = app.query_one("#chat-input")
+
+        # 1. Test /usage command
+        inp.value = "/usage"
+        await pilot.press("enter")
+        await pilot.pause()
+        cards = list(app.query(SystemCard))
+        assert any("Session Metrics & Usage" in str(c.card_title) for c in cards)
+
+        # 2. Test /context command
+        inp.value = "/context"
+        await pilot.press("enter")
+        await pilot.pause()
+        cards = list(app.query(SystemCard))
+        assert any("Runtime & Workspace Context" in str(c.card_title) for c in cards)
+
+        # 3. Test /compact command
+        inp.value = "/compact"
+        await pilot.press("enter")
+        await pilot.pause()
+        cards = list(app.query(SystemCard))
+        assert any("Context Compacted" in str(c.card_title) for c in cards)
+
+        # 4. Test /queue command
+        app.is_busy = True
+        inp.value = "/queue test queued prompt"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert len(app.prompt_queue) == 1
+        assert app.prompt_queue[0] == "test queued prompt"
+
+
+@pytest.mark.asyncio
+async def test_profile_workspace_configuration():
+    from maulness.core.profiles import Profile, ProfileManager
+
+    pm = ProfileManager()
+    # Profile with inherit workspace
+    p_inherit = Profile(name="p_inherit", workspace="inherit")
+    resolved_inherit = pm.resolve_workspace_for_profile(p_inherit, Path("/home/zlnew/www/personal"))
+    assert resolved_inherit == Path("/home/zlnew/www/personal")
+
+    # Profile with specific workspace repo
+    p_custom = Profile(name="p_custom", workspace="repo/expense-tracker")
+    resolved_custom = pm.resolve_workspace_for_profile(p_custom, Path("/home/zlnew/www/personal"))
+    assert resolved_custom.name == "expense-tracker"
 
 
 @pytest.mark.asyncio
@@ -179,10 +250,69 @@ async def test_tui_task_cancellation():
         app._update_statusline()
         statusline = app.query_one("#vim-statusline")
         assert "BUSY" in str(statusline.render())
-        assert "CANCEL" in str(statusline.render())
+        assert "STOP" in str(statusline.render())
 
         # Press Ctrl+C while busy to cancel
         await pilot.press("ctrl+c")
         await pilot.pause()
         assert app.is_busy is False
         assert "NORMAL" in str(statusline.render()) or "INSERT" in str(statusline.render())
+
+
+@pytest.mark.asyncio
+async def test_tui_prompt_queue_and_interrupt(monkeypatch):
+    executed_prompts = []
+
+    class MockProvider:
+        async def run(self, prompt, **kwargs):
+            executed_prompts.append(prompt)
+            on_msg = kwargs.get("on_message")
+            if on_msg:
+                from maulness.core.models import AgentMessageEvent
+                await on_msg(AgentMessageEvent(delta=f"Result for: {prompt}", session_id="test"))
+            return f"Result for: {prompt}"
+
+    from maulness.core import runner as runner_module
+    monkeypatch.setattr(runner_module, "get_provider_for_profile", lambda p: MockProvider())
+
+    app = MaulnessTUIApp(initial_profile="default")
+    async with app.run_test() as pilot:
+        inp = app.query_one("#chat-input")
+
+        # 1. Test queue auto-dispatch
+        app.prompt_queue.append("queued follow-up")
+        inp.value = "first prompt"
+        await pilot.press("enter")
+        # Wait for first prompt to run and auto-drain queued prompt
+        await pilot.pause(0.5)
+
+        assert "first prompt" in executed_prompts
+        assert "queued follow-up" in executed_prompts
+        assert len(app.prompt_queue) == 0
+
+        # 2. Test /interrupt command
+        inp.value = "/interrupt steering prompt"
+        await pilot.press("enter")
+        await pilot.pause(0.5)
+        assert "steering prompt" in executed_prompts
+
+
+@pytest.mark.asyncio
+async def test_compact_sqlite_persistence(tmp_path: Path):
+    from maulness.storage.db import StorageManager
+
+    db_path = tmp_path / "test_maulness.db"
+    storage = StorageManager(db_path=db_path)
+    await storage.initialize()
+
+    # Verify saving and retrieving session memory
+    row_id = await storage.save_session_memory(
+        session_id="test_session_123",
+        summary="Key decisions: Built TUI autocomplete, resolved per-profile workspace.",
+        token_count=150,
+    )
+    assert row_id is not None
+
+    latest = await storage.get_latest_session_memory("test_session_123")
+    assert latest is not None
+    assert "Built TUI autocomplete" in latest

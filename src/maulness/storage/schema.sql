@@ -44,3 +44,13 @@ CREATE TABLE IF NOT EXISTS task_events (
     payload TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Session Memories (Compacted summaries)
+CREATE TABLE IF NOT EXISTS session_memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    token_count INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+

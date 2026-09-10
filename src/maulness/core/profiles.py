@@ -22,6 +22,7 @@ class Profile(BaseModel):
     command: Optional[str] = None  # ACP command (e.g. "agy --acp")
     inject_soul: bool = True
     system_prompt: str = ""
+    workspace: Optional[str] = None  # Per-profile workspace directory or repo name
 
     def get_api_key(self) -> Optional[str]:
         """Fetch API key from the environment variable specified in the profile."""
@@ -79,10 +80,17 @@ class ProfileManager:
         return Profile(
             name=name,
             description="Ephemeral default fallback profile",
-            provider="acp" if name == "builder" else "gemini",
+            provider="acp" if name in ("default", "builder") else "gemini",
             model="gemini-2.5-flash",
             api_key_env="GEMINI_API_KEY",
+            command="agy" if name in ("default", "builder") else None,
         )
+
+    def resolve_workspace_for_profile(self, profile: Profile, fallback_workspace: Path) -> Path:
+        """Resolve effective workspace path for a profile."""
+        if profile.workspace and profile.workspace.strip().lower() != "inherit":
+            return config.resolve_repo_path(profile.workspace.strip())
+        return fallback_workspace
 
     def _load_file(self, path: Path) -> Optional[Profile]:
         try:

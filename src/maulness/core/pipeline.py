@@ -140,13 +140,14 @@ class PipelineOrchestrator:
             stage_prompt = self.pipeline_manager.render_stage_prompt(stage, context)
 
             profile = self.profile_manager.get_profile(stage.profile)
+            stage_workspace = self.profile_manager.resolve_workspace_for_profile(profile, target_workspace)
             provider = get_provider_for_profile(profile)
 
             try:
                 stage_output = await provider.run(
                     session_id=f"{task_id}_{stage.name}",
                     prompt=stage_prompt,
-                    workspace_path=target_workspace,
+                    workspace_path=stage_workspace,
                     on_thought=on_thought,
                     on_message=on_message,
                     on_approval=on_approval if stage.requires_approval else None,

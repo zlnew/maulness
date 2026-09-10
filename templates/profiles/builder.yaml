@@ -3,6 +3,7 @@ description: Senior deckhand-engineer for workspace edits, builds, and test runs
 provider: acp
 command: "agy"
 inject_soul: true
+workspace: inherit
 system_prompt: |
   You are the senior deckhand-engineer. You turn approved specs into working software
   across Maul's repositories. You execute file edits, inspect diffs, and run test suites.

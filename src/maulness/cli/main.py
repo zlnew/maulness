@@ -106,7 +106,7 @@ def status():
     console.print(table)
 
 
-def run_plain_chat(initial_profile: str = "builder"):
+def run_plain_chat(initial_profile: str = "default"):
     """Plain REPL interactive fallback without the full-screen TUI."""
     repo_name, workspace_path = config.get_current_workspace()
     current_profile = initial_profile
@@ -230,10 +230,10 @@ def run_plain_chat(initial_profile: str = "builder"):
 @app.command()
 def chat(
     profile: str = typer.Option(
-        "builder",
+        "default",
         "-p",
         "--profile",
-        help="Initial profile to chat with (builder, planner, default, reviewer)",
+        help="Initial profile to chat with (default, builder, planner, reviewer)",
     ),
     plain: bool = typer.Option(
         False,

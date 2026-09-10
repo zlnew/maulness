@@ -29,6 +29,19 @@ class GeminiProvider(BaseProvider):
     ) -> str:
         api_key = self.profile.get_api_key() or config.gemini_api_key
         if not api_key:
+            import shutil
+            if shutil.which(config.agy_cmd[0]):
+                from maulness.core.providers.acp_provider import AcpProvider
+                fallback_provider = AcpProvider(self.profile)
+                return await fallback_provider.run(
+                    session_id=session_id,
+                    prompt=prompt,
+                    workspace_path=workspace_path,
+                    on_thought=on_thought,
+                    on_message=on_message,
+                    on_tool_call=on_tool_call,
+                    on_approval=on_approval,
+                )
             raise ValueError(
                 f"Missing API key for profile '{self.profile.name}'. "
                 f"Set {self.profile.api_key_env or 'GEMINI_API_KEY'} in ~/.config/maulness/env"

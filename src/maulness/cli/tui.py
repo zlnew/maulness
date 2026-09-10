@@ -5,7 +5,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from rich.markdown import Markdown as RichMarkdown
 from rich.syntax import Syntax
@@ -28,6 +28,7 @@ from maulness.core.pipeline import PipelineOrchestrator
 from maulness.core.pipelines import PipelineManager, PipelineStage
 from maulness.core.profiles import ProfileManager
 from maulness.core.runner import TaskRunner
+from maulness.storage.db import StorageManager
 
 logger = logging.getLogger("maulness.cli.tui")
 
@@ -336,28 +337,34 @@ class HelpModal(ModalScreen[None]):
 ### Neovim Modal Navigation
 - **NORMAL Mode** (Green status badge):
   - `i` or `a` : Enter **INSERT** mode (focus input bar)
-  - `/` : Open **Command Palette** (centered Telescope-style slash picker)
+  - `/` : Trigger LSP Autocomplete popup docked above input
   - `j` / `k` : Scroll chat view down / up
   - `d` / `u` : Half-page scroll down / up (`Ctrl+D` / `Ctrl+U`)
   - `G` : Scroll to bottom of chat
   - `gg` : Scroll to top of chat
   - `: ` or `!` : Enter INSERT mode pre-filled with `! ` (shell command)
   - `p` : Open Profile Switcher modal
-  - `?` : Open this Help reference
+  - `?` or `F1` : Open this Help reference
   - `q` : Quit Maulness
 
 - **INSERT Mode** (Blue status badge):
   - Type prompt naturally (executed by active profile)
-  - `/` : Opens centered Autocomplete Command Palette immediately
-  - `Escape` : Exit to **NORMAL** mode (or stop/cancel active task)
-  - `Tab` or `Ctrl+K` : Open Command Palette
+  - `/` : Opens LSP Autocomplete popup docked above input
+  - `Tab` / `Down` / `Up` : Navigate autocomplete suggestions
+  - `Escape` : Dismiss autocomplete popup, or return to **NORMAL** mode
   - `Enter` : Submit prompt / execute command
-  - `Ctrl+C` : Immediately cancel and stop running task
+  - `Ctrl+C` : Immediately cancel running task
 
-### Dynamic Slash Commands (Loaded from YAML)
-- `/pipeline <name> <goal>` : Execute declarative pipeline (`standard`, `quick`, `plan_only`, `audit`, or custom)
-- `/profile <name>` : Switch active profile (`builder`, `planner`, `reviewer`, `default`, or custom)
-- `/diff` : Centered full-screen scrollable git diff inspector
+### Dynamic Slash Commands
+- `/cancel` or `/stop` : Stop/cancel currently running task
+- `/interrupt <prompt>` : Cancel current task and steer agent with new prompt
+- `/queue <prompt>` : Queue a prompt to auto-execute after current task finishes
+- `/usage` : Display session token metrics, duration, and cost estimation
+- `/context` : Display current workspace, git status, active profile, and engine
+- `/compact` : Compress conversation history into SQLite long-term memory
+- `/pipeline <name> <goal>` : Execute declarative pipeline (`standard`, `quick`, `plan_only`, `audit`)
+- `/profile <name>` : Switch active profile (`default`, `builder`, `planner`, `reviewer`)
+- `/diff` : Scrollable git diff inspector
 - `!<command>` : Execute local workspace shell command (e.g. `!git status`, `!pytest`)
 - `/clear` : Clear chat transcript
 - `/exit` : Quit
@@ -408,34 +415,83 @@ class SystemCard(Static):
 
 
 class AgentCard(Static):
-    """Card displaying streaming thought, tool calls, and assistant response."""
+    """Card displaying compact thought ticker, tool badges, and clean assistant response."""
 
     def __init__(self, profile_name: str):
         super().__init__(classes="agent-card")
         self.profile_name = profile_name
         self.thought_text: list[str] = []
         self.message_text: list[str] = []
-        self.status_label = Label("[dim #737aa2]󰑮 Thinking...[/dim #737aa2]")
+        self.thought_start_time = time.time()
+        self.thought_duration: Optional[float] = None
+        self.has_started_message = False
+
         self.thought_static = Static("", classes="thought-box")
+        self.tools_static = Static("", classes="tools-box")
         self.message_static = Static("", classes="card-body")
+        self.status_label = Label("[dim #737aa2]󰑮 Initializing...[/dim #737aa2]")
+
+        self._last_render_time = 0.0
 
     def compose(self) -> ComposeResult:
         yield Label(f"[bold #bb9af7]Maulness[/bold #bb9af7] [dim #565f89]({self.profile_name})[/dim #565f89]", classes="card-header")
         yield self.thought_static
+        yield self.tools_static
         yield self.message_static
         yield self.status_label
 
     def append_thought(self, delta: str) -> None:
         self.thought_text.append(delta)
-        text = "".join(self.thought_text)
-        self.thought_static.update(f"[dim italic #737aa2]💭 {text[-200:].strip()}[/dim italic #737aa2]")
+        if not self.has_started_message:
+            elapsed = time.time() - self.thought_start_time
+            full_thought = "".join(self.thought_text).strip()
+            lines = [line.strip() for line in full_thought.splitlines() if line.strip()]
+            snippet = lines[-1][:75] if lines else "Thinking..."
+            self.thought_static.update(f"[dim italic #7aa2f7]💭 Thinking ({elapsed:.1f}s):[/dim italic #7aa2f7] [dim #a9b1d6]{snippet}[/dim #a9b1d6]")
+            self.status_label.update("[dim #7aa2f7]󰑮 Thinking...[/dim #7aa2f7]")
 
-    def append_message(self, delta: str) -> None:
+    def record_tool_call(self, tool_name: str, args: Any = None) -> None:
+        summary = ""
+        if isinstance(args, dict):
+            if "CommandLine" in args:
+                summary = f": {args['CommandLine'][:40]}"
+            elif "path" in args:
+                summary = f": {args['path']}"
+            elif "TargetFile" in args:
+                summary = f": {args['TargetFile']}"
+            elif "AbsolutePath" in args:
+                summary = f": {args['AbsolutePath']}"
+        self.tools_static.update(f"[bold #e0af68]⚡ Tool:[/bold #e0af68] [dim #a9b1d6]{tool_name}{summary}[/dim #a9b1d6]")
+
+    def append_message(self, delta: str, force_render: bool = False) -> None:
+        if not self.has_started_message:
+            self.has_started_message = True
+            self.thought_duration = time.time() - self.thought_start_time
+            if self.thought_text:
+                self.thought_static.update(f"[dim #565f89]💭 Thought for {self.thought_duration:.1f}s[/dim #565f89]")
+            else:
+                self.thought_static.update("")
+            self.status_label.update("[dim #737aa2]󰑮 Streaming response...[/dim #737aa2]")
+
         self.message_text.append(delta)
+        now = time.time()
+        if force_render or (now - self._last_render_time >= 0.05):
+            self._render_message()
+            self._last_render_time = now
+
+    def _render_message(self) -> None:
         text = "".join(self.message_text)
-        self.message_static.update(RichMarkdown(text))
+        if text:
+            self.message_static.update(RichMarkdown(text))
+
+    def flush_final(self) -> None:
+        if not self.has_started_message and self.thought_text:
+            duration = time.time() - self.thought_start_time
+            self.thought_static.update(f"[dim #565f89]💭 Thought for {duration:.1f}s[/dim #565f89]")
+        self._render_message()
 
     def set_status(self, status: str) -> None:
+        self.flush_final()
         self.status_label.update(status)
 
 
@@ -541,12 +597,35 @@ class MaulnessTUIApp(App):
         border-left: thick #414868;
     }
 
+    .tools-box {
+        color: #e0af68;
+        background: #16161e;
+        padding: 0 1;
+        margin-bottom: 1;
+        border-left: thick #e0af68;
+    }
+
     #bottom-container {
         dock: bottom;
-        height: 6;
+        height: auto;
+        max-height: 18;
         background: #16161e;
         border-top: solid #24283b;
         padding: 0 1;
+    }
+
+    #autocomplete-popup {
+        display: none;
+        max-height: 8;
+        height: auto;
+        background: #1f2335;
+        border: tall #7aa2f7;
+        margin-bottom: 0;
+        scrollbar-size-vertical: 1;
+    }
+
+    #autocomplete-popup.visible {
+        display: block;
     }
 
     #vim-statusline {
@@ -557,7 +636,7 @@ class MaulnessTUIApp(App):
     }
 
     #input-row {
-        height: 4;
+        height: 3;
         background: #1f2335;
         border: tall #414868;
         padding: 0 1;
@@ -654,7 +733,7 @@ class MaulnessTUIApp(App):
         Binding("f1", "show_help", "Help"),
     ]
 
-    def __init__(self, initial_profile: str = "builder"):
+    def __init__(self, initial_profile: str = "default"):
         super().__init__()
         self.repo_name, self.workspace_path = config.get_current_workspace()
         self.current_profile = initial_profile
@@ -669,6 +748,12 @@ class MaulnessTUIApp(App):
         self.mode = "insert"  # "normal" or "insert"
         self._last_g_time = 0.0
         self.active_worker = None
+
+        # Session metrics & Prompt Queue
+        self.prompt_queue: list[str] = []
+        self.session_start_time = time.time()
+        self.total_prompts = 0
+        self.total_chars_out = 0
 
     def compose(self) -> ComposeResult:
         branch = get_git_branch(self.workspace_path)
@@ -685,13 +770,14 @@ class MaulnessTUIApp(App):
             yield Static(
                 f"[dim #737aa2]Welcome back, Maul. Scoped to [bold #a6e3a1]{self.workspace_path}[/bold #a6e3a1].\n"
                 f"• Natural language executes with [bold #cba6f7]{self.current_profile}[/bold #cba6f7].\n"
-                f"• Press [bold #7aa2f7]/[/bold #7aa2f7] or [bold #7aa2f7]Tab[/bold #7aa2f7] for centered Command Palette.\n"
+                f"• Type [bold #7aa2f7]/[/bold #7aa2f7] for Neovim LSP-style floating autocomplete popup.\n"
                 f"• Press [bold #7aa2f7]Esc[/bold #7aa2f7] for NORMAL mode ([#a6e3a1]j/k[/#a6e3a1] scroll, [#a6e3a1]i[/#a6e3a1] insert, [#a6e3a1]?[/#a6e3a1] help).\n"
                 f"• Press [bold #f7768e]Ctrl+C[/bold #f7768e] or [bold #f7768e]Esc[/bold #f7768e] to CANCEL running tasks at any time.[/dim #737aa2]",
                 classes="system-card",
             )
 
         with Container(id="bottom-container"):
+            yield OptionList(id="autocomplete-popup")
             yield Static("", id="vim-statusline")
             with Horizontal(id="input-row", classes="focused-insert"):
                 yield Input(
@@ -708,7 +794,18 @@ class MaulnessTUIApp(App):
         """Dynamically build list of available slash commands from discovered YAML pipelines & profiles."""
         commands: list[tuple[str, str]] = []
 
-        # 1. Pipelines from PipelineManager (custom user YAMLs + templates)
+        # 1. Flow Control & Task Orchestration
+        commands.extend([
+            ("/cancel", "Cancel currently running task"),
+            ("/stop", "Stop currently running task (alias of /cancel)"),
+            ("/interrupt ", "Interrupt current task and steer with new prompt (<prompt>)"),
+            ("/queue ", "Queue a prompt to run after current task finishes (<prompt>)"),
+            ("/usage", "Display token metrics and estimated cost for this session"),
+            ("/context", "Display current workspace, git branch, and agent status"),
+            ("/compact", "Compact conversation history into SQLite memory"),
+        ])
+
+        # 2. Pipelines from PipelineManager (custom user YAMLs + templates)
         for pipe in self.pipeline_manager.list_pipelines():
             stages_summary = " ➔ ".join(s.name for s in pipe.stages)
             desc = pipe.description or f"Pipeline {pipe.name}"
@@ -716,16 +813,16 @@ class MaulnessTUIApp(App):
                 desc = f"{desc} ({stages_summary})"
             commands.append((f"/pipeline {pipe.name} ", desc))
 
-        # 2. Profiles from ProfileManager (custom user YAMLs + templates)
+        # 3. Profiles from ProfileManager (custom user YAMLs + templates)
         for prof in self.profile_manager.list_profiles():
             desc = prof.description or f"Profile {prof.name}"
-            commands.append((f"/profile {prof.name}", f"Switch active profile to {prof.name} ({prof.provider}) — {desc[:45]}"))
+            ws_hint = f" [ws: {prof.workspace}]" if prof.workspace and prof.workspace != "inherit" else ""
+            commands.append((f"/profile {prof.name}", f"Switch active profile to {prof.name} ({prof.provider}){ws_hint} — {desc[:40]}"))
 
-        # 3. Global actions and shell helpers
+        # 4. Global actions and shell helpers
         commands.extend([
             ("/diff", "Inspect uncommitted git changes in current workspace"),
-            ("!git status", "Shell: Check working tree and git status"),
-            ("!pytest", "Shell: Run pytest test suite"),
+            ("!<command>", "Shell: Execute command in current workspace (e.g. !git status)"),
             ("/clear", "Clear chat history and transcript view"),
             ("/help", "Show keyboard shortcuts and command reference"),
             ("/exit", "Exit Maulness interactive session"),
@@ -780,8 +877,162 @@ class MaulnessTUIApp(App):
         self._update_top_bar()
         self._update_statusline()
 
+    def _update_autocomplete(self, text: str) -> None:
+        """Update floating LSP autocomplete popup docked directly above the input."""
+        popup = self.query_one("#autocomplete-popup", OptionList)
+        if not text.startswith("/"):
+            self._hide_autocomplete()
+            return
+
+        parts = text.split(" ", 1)
+
+        # 1. Sub-command completion for /pipeline <name>
+        if text.startswith("/pipeline "):
+            arg = parts[1].lower().strip() if len(parts) > 1 else ""
+            pipes = self.pipeline_manager.list_pipelines()
+            matching_pipes = [p for p in pipes if not arg or p.name.lower().startswith(arg)]
+            if matching_pipes:
+                popup.clear_options()
+                for p in matching_pipes:
+                    popup.add_option(Option(f"[bold #7aa2f7]/pipeline {p.name}[/bold #7aa2f7] [dim #737aa2]— {p.description}[/dim #737aa2]", id=f"/pipeline {p.name} "))
+                popup.highlighted = 0
+                popup.add_class("visible")
+                return
+            self._hide_autocomplete()
+            return
+
+        # 2. Sub-command completion for /profile <name>
+        if text.startswith("/profile "):
+            arg = parts[1].lower().strip() if len(parts) > 1 else ""
+            profs = self.profile_manager.list_profiles()
+            matching_profs = [p for p in profs if not arg or p.name.lower().startswith(arg)]
+            if matching_profs:
+                popup.clear_options()
+                for p in matching_profs:
+                    popup.add_option(Option(f"[bold #7aa2f7]/profile {p.name}[/bold #7aa2f7] [dim #737aa2]— {p.description[:40]}[/dim #737aa2]", id=f"/profile {p.name}"))
+                popup.highlighted = 0
+                popup.add_class("visible")
+                return
+            self._hide_autocomplete()
+            return
+
+        # 3. If text already has a space and isn't sub-command completions, hide popup
+        if " " in text:
+            self._hide_autocomplete()
+            return
+
+        query = text.lower().strip()
+        all_commands = self.get_dynamic_commands()
+        matching = []
+
+        for cmd, desc in all_commands:
+            cmd_clean = cmd.strip()
+            if query == "/" or cmd_clean.lower().startswith(query) or query.lstrip("/") in cmd_clean.lower():
+                matching.append((cmd, desc))
+
+        if not matching:
+            self._hide_autocomplete()
+            return
+
+        popup.clear_options()
+        for cmd, desc in matching:
+            markup = f"[bold #7aa2f7]{cmd.strip()}[/bold #7aa2f7] [dim #737aa2]— {desc}[/dim #737aa2]"
+            popup.add_option(Option(markup, id=cmd))
+
+        popup.highlighted = 0
+        popup.add_class("visible")
+
+    def _hide_autocomplete(self) -> None:
+        popup = self.query_one("#autocomplete-popup", OptionList)
+        popup.remove_class("visible")
+        popup.clear_options()
+
+    def _apply_autocomplete(self, execute_zero_arg: bool = False) -> bool:
+        """Apply current highlighted autocomplete suggestion into chat input."""
+        popup = self.query_one("#autocomplete-popup", OptionList)
+        if not popup.has_class("visible") or popup.highlighted is None or popup.option_count == 0:
+            return False
+
+        opt = popup.get_option_at_index(popup.highlighted)
+        selected_cmd = str(opt.id)
+        chat_input = self.query_one("#chat-input", Input)
+
+        if selected_cmd.startswith("/profile "):
+            p_name = selected_cmd[len("/profile ") :].strip()
+            self.current_profile = p_name
+            self._update_top_bar()
+            chat_input.placeholder = f"Ask {self.current_profile} or type / for commands, !<cmd>..."
+            chat_input.value = ""
+            self._hide_autocomplete()
+            return True
+
+        # Zero-argument immediate action commands (only when Enter pressed)
+        if execute_zero_arg and selected_cmd in (
+            "/diff",
+            "/clear",
+            "/help",
+            "/exit",
+            "/cancel",
+            "/stop",
+            "/usage",
+            "/context",
+            "/compact",
+        ):
+            self._hide_autocomplete()
+            chat_input.value = selected_cmd
+            self.post_message(Input.Submitted(chat_input, selected_cmd))
+            return True
+
+        # Complete text into chat input
+        cmd_text = selected_cmd if selected_cmd.endswith(" ") else selected_cmd + " "
+        chat_input.value = cmd_text
+        chat_input.cursor_position = len(cmd_text)
+        self._hide_autocomplete()
+        chat_input.focus()
+        return True
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "autocomplete-popup":
+            self._apply_autocomplete(execute_zero_arg=False)
+
     def on_key(self, event: events.Key) -> None:
-        # Stop / Cancel Running Task when busy
+        popup = self.query_one("#autocomplete-popup", OptionList)
+
+        # 1. Autocomplete Popup Navigation (LSP floating style)
+        if popup.has_class("visible"):
+            if event.key in ("down", "ctrl+n"):
+                event.prevent_default()
+                event.stop()
+                if popup.option_count > 0:
+                    if popup.highlighted is None:
+                        popup.highlighted = 0
+                    elif popup.highlighted < popup.option_count - 1:
+                        popup.highlighted += 1
+                return
+            elif event.key in ("up", "ctrl+p"):
+                event.prevent_default()
+                event.stop()
+                if popup.option_count > 0:
+                    if popup.highlighted is not None and popup.highlighted > 0:
+                        popup.highlighted -= 1
+                return
+            elif event.key == "tab":
+                event.prevent_default()
+                event.stop()
+                self._apply_autocomplete(execute_zero_arg=False)
+                return
+            elif event.key == "enter":
+                event.prevent_default()
+                event.stop()
+                self._apply_autocomplete(execute_zero_arg=True)
+                return
+            elif event.key == "escape":
+                event.prevent_default()
+                event.stop()
+                self._hide_autocomplete()
+                return
+
+        # 2. Stop / Cancel Running Task when busy
         if self.is_busy:
             if event.key in ("ctrl+c", "escape"):
                 event.prevent_default()
@@ -791,7 +1042,7 @@ class MaulnessTUIApp(App):
 
         chat_view = self.query_one("#chat-view", VerticalScroll)
 
-        # NORMAL MODE KEY HANDLING
+        # 3. NORMAL MODE KEY HANDLING
         if self.mode == "normal":
             if event.key in ("j", "down"):
                 chat_view.scroll_down()
@@ -810,10 +1061,14 @@ class MaulnessTUIApp(App):
                     self._last_g_time = 0.0
                 else:
                     self._last_g_time = now
-            elif event.key in ("i", "a", "enter"):
+            elif event.key in ("i", "a"):
                 self.set_mode("insert")
             elif event.key == "slash":
-                self.open_command_palette()
+                chat_input = self.query_one("#chat-input", Input)
+                chat_input.value = "/"
+                self.set_mode("insert")
+                chat_input.cursor_position = 1
+                self._update_autocomplete("/")
             elif event.key in ("colon", "exclamation_mark"):
                 chat_input = self.query_one("#chat-input", Input)
                 chat_input.value = "! "
@@ -826,62 +1081,21 @@ class MaulnessTUIApp(App):
                 self.exit()
             return
 
-        # INSERT MODE KEY HANDLING
+        # 4. INSERT MODE KEY HANDLING
         if self.mode == "insert":
             if event.key == "escape":
-                self.set_mode("normal")
+                if popup.has_class("visible"):
+                    self._hide_autocomplete()
+                else:
+                    self.set_mode("normal")
             elif event.key in ("tab", "ctrl+k"):
                 chat_input = self.query_one("#chat-input", Input)
                 val = chat_input.value
-                self.open_command_palette(val if val.startswith("/") else "")
+                self._update_autocomplete(val if val.startswith("/") else "/")
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        # If user typed leading slash as the very first character, pop open command palette
-        if event.value == "/":
-            self.open_command_palette(initial_query="")
-
-    def open_command_palette(self, initial_query: str = "") -> None:
-        commands = self.get_dynamic_commands()
-
-        def _on_command_selected(selected: Optional[str]) -> None:
-            if not selected:
-                self.set_mode("insert")
-                return
-
-            # Direct action commands
-            if selected == "/diff":
-                self.action_view_diff()
-                self.set_mode("normal")
-                return
-            if selected == "/clear":
-                self.action_clear_chat()
-                self.set_mode("normal")
-                return
-            if selected == "/help":
-                self.action_show_help()
-                self.set_mode("normal")
-                return
-            if selected == "/exit":
-                self.exit()
-                return
-
-            # Profile switch from command
-            if selected.startswith("/profile "):
-                p_name = selected[len("/profile ") :].strip()
-                self.current_profile = p_name
-                self._update_top_bar()
-                chat_input = self.query_one("#chat-input", Input)
-                chat_input.value = ""
-                self.set_mode("insert")
-                return
-
-            # Fill input and switch to insert mode
-            chat_input = self.query_one("#chat-input", Input)
-            chat_input.value = selected
-            self.set_mode("insert")
-            chat_input.cursor_position = len(selected)
-
-        self.push_screen(CommandPaletteModal(commands, initial_query), callback=_on_command_selected)
+        if self.mode == "insert":
+            self._update_autocomplete(event.value)
 
     def action_quit_app(self) -> None:
         self.exit()
@@ -916,15 +1130,161 @@ class MaulnessTUIApp(App):
 
         chat_input = self.query_one("#chat-input", Input)
         chat_input.value = ""
+        self._hide_autocomplete()
 
         # Cancellation commands
-        if raw_text in ("/stop", "/cancel", "stop", "cancel") and self.is_busy:
-            self.cancel_active_task()
+        if raw_text in ("/stop", "/cancel", "stop", "cancel"):
+            chat_view = self.query_one("#chat-view", VerticalScroll)
+            if self.is_busy:
+                self.cancel_active_task()
+                await chat_view.mount(SystemCard("Stopped", "⏹ Active task cancelled upon user request."))
+            else:
+                await chat_view.mount(SystemCard("Info", "No task is currently running."))
+            chat_view.scroll_end(animate=False)
             return
 
+        # Interrupt command: stop active task and steer with new prompt
+        if raw_text.startswith("/interrupt"):
+            parts = raw_text.split(" ", 1)
+            steer_prompt = parts[1].strip() if len(parts) > 1 else ""
+            if not steer_prompt:
+                chat_view = self.query_one("#chat-view", VerticalScroll)
+                await chat_view.mount(SystemCard("Error", "Usage: /interrupt <prompt>", is_error=True))
+                chat_view.scroll_end(animate=False)
+                return
+
+            chat_view = self.query_one("#chat-view", VerticalScroll)
+            if self.is_busy:
+                self.cancel_active_task()
+                await chat_view.mount(SystemCard("Interrupt", f"⚡ Interrupted previous task to steer: {steer_prompt}"))
+                chat_view.scroll_end(animate=False)
+
+            self.active_worker = self.run_worker(self._execute_direct(steer_prompt), exclusive=True)
+            return
+
+        # Queue command: queue prompt to run when current task finishes
+        if raw_text.startswith("/queue"):
+            parts = raw_text.split(" ", 1)
+            queued_prompt = parts[1].strip() if len(parts) > 1 else ""
+            if not queued_prompt:
+                chat_view = self.query_one("#chat-view", VerticalScroll)
+                await chat_view.mount(SystemCard("Error", "Usage: /queue <prompt>", is_error=True))
+                chat_view.scroll_end(animate=False)
+                return
+
+            if self.is_busy:
+                self.prompt_queue.append(queued_prompt)
+                chat_view = self.query_one("#chat-view", VerticalScroll)
+                await chat_view.mount(
+                    SystemCard(
+                        f"Prompt Queued (#{len(self.prompt_queue)})",
+                        f"Queued for execution once current task finishes:\n{queued_prompt}",
+                    )
+                )
+                chat_view.scroll_end(animate=False)
+                return
+
+            self.active_worker = self.run_worker(self._execute_direct(queued_prompt), exclusive=True)
+            return
+
+        # Usage command: display session token metrics and cost
+        if raw_text == "/usage":
+            uptime = time.time() - self.session_start_time
+            m = int(uptime // 60)
+            s = int(uptime % 60)
+            est_tokens = self.total_chars_out // 4
+            prof = self.profile_manager.get_profile(self.current_profile)
+            usage_content = (
+                f"• Prompts Executed: [bold #a6e3a1]{self.total_prompts}[/bold #a6e3a1]\n"
+                f"• Queued Prompts: [bold #bb9af7]{len(self.prompt_queue)}[/bold #bb9af7]\n"
+                f"• Output Characters: [bold #7aa2f7]{self.total_chars_out:,}[/bold #7aa2f7]\n"
+                f"• Estimated Output Tokens: [bold #89dceb]~{est_tokens:,}[/bold #89dceb]\n"
+                f"• Active Profile: [bold #cba6f7]{self.current_profile}[/bold #cba6f7] ({prof.provider})\n"
+                f"• Session Uptime: [bold #e0af68]{m}m {s}s[/bold #e0af68]\n"
+                f"• Estimated Cost: [bold #a6e3a1]$0.00[/bold #a6e3a1] (Local Antigravity ACP / Free Tier)"
+            )
+            chat_view = self.query_one("#chat-view", VerticalScroll)
+            await chat_view.mount(SystemCard("Session Metrics & Usage", usage_content))
+            chat_view.scroll_end(animate=False)
+            return
+
+        # Context command: display active workspace, git, and agent context
+        if raw_text == "/context":
+            branch = get_git_branch(self.workspace_path)
+            diff_proc = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(self.workspace_path),
+                capture_output=True,
+                text=True,
+            )
+            dirty_count = len([l for l in diff_proc.stdout.splitlines() if l.strip()])
+            dirty_str = f"[#f7768e]{dirty_count} uncommitted changes[/#f7768e]" if dirty_count > 0 else "[#a6e3a1]clean[/#a6e3a1]"
+
+            prof = self.profile_manager.get_profile(self.current_profile)
+            target = prof.model or prof.command or "default"
+            ws_cfg = prof.workspace or "inherit"
+
+            context_content = (
+                f"• Active Workspace: [bold #a6e3a1]{self.workspace_path}[/bold #a6e3a1] (repo: [bold]{self.repo_name}[/bold])\n"
+                f"• Git Branch: [bold #89dceb]{branch}[/bold #89dceb] ({dirty_str})\n"
+                f"• Active Profile: [bold #cba6f7]{self.current_profile}[/bold #cba6f7] ({prof.provider})\n"
+                f"• Target Engine: [bold #7aa2f7]{target}[/bold #7aa2f7]\n"
+                f"• Profile Workspace: [dim]{ws_cfg}[/dim]\n"
+                f"• Soul Doctrine: [bold #a6e3a1]Enabled[/bold #a6e3a1] (~/.config/maulness/SOUL.md)\n"
+                f"• Storage DB: [dim]{config.db_path}[/dim]\n"
+                f"• Daemon Status: {get_daemon_status()}\n"
+                f"• Prompt Queue: {len(self.prompt_queue)} pending"
+            )
+            chat_view = self.query_one("#chat-view", VerticalScroll)
+            await chat_view.mount(SystemCard("Runtime & Workspace Context", context_content))
+            chat_view.scroll_end(animate=False)
+            return
+
+        # Compact command: compress session history into SQLite
+        if raw_text == "/compact":
+            storage = StorageManager(db_path=config.db_path)
+            await storage.initialize()
+            session_id = f"session_{int(time.time())}"
+            summary = (
+                f"Compacted Session Summary ({self.repo_name} - {time.strftime('%Y-%m-%d %H:%M:%S')})\n"
+                f"Workspace: {self.workspace_path}\n"
+                f"Active Profile: {self.current_profile}\n"
+                f"Prompts Completed: {self.total_prompts}\n"
+                f"Output Characters: {self.total_chars_out}\n"
+                f"Key State: Scoped to {self.repo_name}. Working transcript compressed into persistent memory."
+            )
+            await storage.save_session_memory(
+                session_id=session_id,
+                summary=summary,
+                token_count=self.total_chars_out // 4,
+            )
+            chat_view = self.query_one("#chat-view", VerticalScroll)
+            chat_view.remove_children()
+            await chat_view.mount(
+                SystemCard(
+                    "📦 Context Compacted",
+                    f"Saved summary to SQLite ([bold #bb9af7]session_memories[/bold #bb9af7]).\n"
+                    f"Session transcript compressed into memory. Active context reset for lean token usage.\n"
+                    f"Persisted in: [dim]{config.db_path}[/dim]",
+                )
+            )
+            self.total_chars_out = 0
+            chat_view.scroll_end(animate=False)
+            return
+
+        # Busy check for non-control prompts
         if self.is_busy:
             chat_view = self.query_one("#chat-view", VerticalScroll)
-            await chat_view.mount(SystemCard("Busy", "Agent is currently processing a task. Press Ctrl+C or Esc to cancel.", is_error=True))
+            await chat_view.mount(
+                SystemCard(
+                    "Busy",
+                    "Agent is currently busy processing a task.\n"
+                    "• Use [bold #f7768e]/cancel[/bold #f7768e] or [bold #f7768e]Ctrl+C[/bold #f7768e] to stop.\n"
+                    "• Use [bold #bb9af7]/interrupt <prompt>[/bold #bb9af7] to stop and steer immediately.\n"
+                    "• Use [bold #7aa2f7]/queue <prompt>[/bold #7aa2f7] to queue your prompt to run next.",
+                    is_error=True,
+                )
+            )
             chat_view.scroll_end(animate=False)
             return
 
@@ -995,6 +1355,7 @@ class MaulnessTUIApp(App):
 
     async def _execute_direct(self, prompt: str) -> None:
         self.is_busy = True
+        self.total_prompts += 1
         self._update_top_bar()
         self._update_statusline()
         chat_view = self.query_one("#chat-view", VerticalScroll)
@@ -1012,7 +1373,12 @@ class MaulnessTUIApp(App):
             chat_view.scroll_end(animate=False)
 
         async def on_message(event: AgentMessageEvent):
+            self.total_chars_out += len(event.delta)
             agent_card.append_message(event.delta)
+            chat_view.scroll_end(animate=False)
+
+        async def on_tool_call(event: AgentToolCallEvent):
+            agent_card.record_tool_call(event.tool_name, event.args)
             chat_view.scroll_end(animate=False)
 
         async def on_approval(event: ApprovalRequestEvent) -> bool:
@@ -1026,6 +1392,7 @@ class MaulnessTUIApp(App):
                 profile_name=self.current_profile,
                 on_thought=on_thought,
                 on_message=on_message,
+                on_tool_call=on_tool_call,
                 on_approval=on_approval,
                 verbose=False,
             )
@@ -1040,8 +1407,15 @@ class MaulnessTUIApp(App):
             self._update_statusline()
             chat_view.scroll_end(animate=False)
 
+            # Auto-dispatch next prompt from prompt_queue if available
+            if self.prompt_queue:
+                next_prompt = self.prompt_queue.pop(0)
+                logger.info(f"Auto-dispatching queued prompt: {next_prompt[:40]}")
+                self.active_worker = self.run_worker(self._execute_direct(next_prompt), exclusive=True)
+
     async def _execute_pipeline(self, pipeline_name: str, goal: str) -> None:
         self.is_busy = True
+        self.total_prompts += 1
         self._update_top_bar()
         self._update_statusline()
         chat_view = self.query_one("#chat-view", VerticalScroll)
@@ -1063,6 +1437,7 @@ class MaulnessTUIApp(App):
             pass
 
         async def on_message(event: AgentMessageEvent):
+            self.total_chars_out += len(event.delta)
             p_card.append_output(event.delta)
             chat_view.scroll_end(animate=False)
 
@@ -1093,3 +1468,9 @@ class MaulnessTUIApp(App):
             self._update_top_bar()
             self._update_statusline()
             chat_view.scroll_end(animate=False)
+
+            # Auto-dispatch next prompt from prompt_queue if available
+            if self.prompt_queue:
+                next_prompt = self.prompt_queue.pop(0)
+                logger.info(f"Auto-dispatching queued prompt: {next_prompt[:40]}")
+                self.active_worker = self.run_worker(self._execute_direct(next_prompt), exclusive=True)
