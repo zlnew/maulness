@@ -31,30 +31,36 @@ class GeminiProvider(BaseProvider):
         on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
         on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
     ) -> str:
-        api_key = self.profile.get_api_key() or config.gemini_api_key or os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            import shutil
-            # Only fall back to ACP if this profile actually has command configured
-            if self.profile.command and shutil.which(self.profile.command.split()[0]):
-                from maulness.core.providers.acp_provider import AcpProvider
-                fallback_provider = AcpProvider(self.profile)
-                return await fallback_provider.run(
-                    session_id=session_id,
-                    prompt=prompt,
-                    workspace_path=workspace_path,
-                    conversation_id=conversation_id,
-                    on_init=on_init,
-                    on_thought=on_thought,
-                    on_message=on_message,
-                    on_tool_call=on_tool_call,
-                    on_approval=on_approval,
+        if self.profile.vertex:
+            project = self.profile.project or os.getenv("GOOGLE_CLOUD_PROJECT")
+            location = self.profile.location or os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+            client = genai.Client(vertexai=True, project=project, location=location)
+        else:
+            api_key = self.profile.get_api_key() or config.gemini_api_key or os.getenv("GOOGLE_API_KEY")
+            if not api_key:
+                import shutil
+                # Only fall back to ACP if this profile actually has command configured
+                if self.profile.command and shutil.which(self.profile.command.split()[0]):
+                    from maulness.core.providers.acp_provider import AcpProvider
+                    fallback_provider = AcpProvider(self.profile)
+                    return await fallback_provider.run(
+                        session_id=session_id,
+                        prompt=prompt,
+                        workspace_path=workspace_path,
+                        conversation_id=conversation_id,
+                        on_init=on_init,
+                        on_thought=on_thought,
+                        on_message=on_message,
+                        on_tool_call=on_tool_call,
+                        on_approval=on_approval,
+                    )
+                raise ValueError(
+                    f"Missing API key for profile '{self.profile.name}'. "
+                    f"Set {self.profile.api_key_env or 'GEMINI_API_KEY or GOOGLE_API_KEY'} in ~/.config/maulness/env or profile .env"
                 )
-            raise ValueError(
-                f"Missing API key for profile '{self.profile.name}'. "
-                f"Set {self.profile.api_key_env or 'GEMINI_API_KEY or GOOGLE_API_KEY'} in ~/.config/maulness/env or profile .env"
-            )
 
-        client = genai.Client(api_key=api_key)
+            client = genai.Client(api_key=api_key)
+
         model_name = self.profile.model or "gemini-3.6-flash"
 
         _EFFORT_BUDGET = {"low": 1024, "medium": 8192, "high": 24576}
