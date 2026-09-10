@@ -162,6 +162,8 @@ class AcpProvider(BaseProvider):
                 if proc.stderr:
                     stderr_text = (await proc.stderr.read()).decode("utf-8", errors="replace").strip()
                 logger.warning("agy exited with code %s: %s", proc.returncode, stderr_text)
+                if not accumulated:
+                    raise RuntimeError(f"agy execution failed (code {proc.returncode}): {stderr_text or 'No output'}")
 
         except asyncio.CancelledError:
             proc.terminate()

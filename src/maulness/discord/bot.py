@@ -58,10 +58,19 @@ class MaulnessBot(commands.Bot):
         self.owner_id = self._resolve_owner_id()
         self.guild_id = self._resolve_guild_id()
         self.forum_channel_id = self._resolve_forum_channel_id()
+        self.home_channel_id = self._resolve_home_channel_id()
 
         # Active tasks tracking for /abort
         self.active_tasks: dict[str, asyncio.Task] = {}
         self.channel_tasks: dict[int, str] = {}
+
+    def _resolve_home_channel_id(self) -> Optional[int]:
+        if "DISCORD_HOME_CHANNEL" in self.bound_profile.env_vars:
+            try:
+                return int(self.bound_profile.env_vars["DISCORD_HOME_CHANNEL"])
+            except ValueError:
+                pass
+        return self._resolve_forum_channel_id()
 
     def _resolve_forum_channel_id(self) -> Optional[int]:
         if "DISCORD_FORUM_CHANNEL_ID" in self.bound_profile.env_vars:
@@ -107,12 +116,147 @@ class MaulnessBot(commands.Bot):
             self.user.id,
         )
 
+    def _should_handle_message(self, message: discord.Message) -> bool:
+        """Determine whether this specific profile bot instance should claim and handle this message."""
+        is_mentioned = False
+        if self.user:
+            is_mentioned = (
+                self.user in message.mentions
+                or f"<@{self.user.id}>" in message.content
+                or f"<@!{self.user.id}>" in message.content
+            )
+
+        channel_id = message.channel.id
+        parent_id = getattr(message.channel, "parent_id", None)
+
+        target_channels = set()
+        if self.home_channel_id:
+            target_channels.add(self.home_channel_id)
+        if self.forum_channel_id:
+            target_channels.add(self.forum_channel_id)
+
+        is_home_channel = (channel_id in target_channels or (parent_id is not None and parent_id in target_channels))
+        is_dm = isinstance(message.channel, discord.DMChannel)
+
+        if is_home_channel:
+            return True
+
+        if is_mentioned:
+            # When life and research share the same user ID, tie-break by designated channel
+            if self.profile_name == "research" and not is_home_channel:
+                return False
+            return True
+
+        if is_dm:
+            return True
+
+        return False
+
+    async def _execute_chat_prompt(
+        self,
+        channel: discord.abc.Messageable,
+        prompt: str,
+        author_mention: str,
+        session_key: str,
+    ):
+        """Execute a conversational chat prompt in Discord and stream the response."""
+        status_msg = await channel.send(f"💭 **{self.profile_name}** is thinking...\n> {prompt[:100]}")
+
+        async def flush_chunk(text: str, is_final: bool):
+            try:
+                display_text = text if len(text) <= 1950 else text[:1950] + "…"
+                await status_msg.edit(content=display_text)
+            except Exception as e:
+                logger.debug("Failed to edit Discord message: %s", e)
+
+        debouncer = MessageStreamDebouncer(flush_callback=flush_chunk)
+
+        async def on_thought(event: AgentThoughtEvent):
+            pass
+
+        async def on_message_chunk(event: AgentMessageEvent):
+            await debouncer.write(event.delta)
+
+        async def on_approval(event: ApprovalRequestEvent) -> bool:
+            loop = asyncio.get_running_loop()
+            fut = loop.create_future()
+            view = ApprovalView(future=fut)
+            await channel.send(
+                f"⚠️ **Approval Required (HITL)**\n"
+                f"**Tool:** `{event.tool_name}`\n"
+                f"**Args:** ```json\n{event.args}\n```",
+                view=view,
+            )
+            try:
+                return await asyncio.wait_for(fut, timeout=600.0)
+            except asyncio.TimeoutError:
+                return False
+
+        profile = self.bound_profile
+        provider = get_provider_for_profile(profile)
+        workspace = self.profile_manager.resolve_workspace_for_profile(profile, config.workspace_root)
+
+        try:
+            async with channel.typing():
+                res = await provider.run(
+                    session_id=session_key,
+                    prompt=prompt,
+                    workspace_path=workspace,
+                    conversation_id=session_key,
+                    on_thought=on_thought,
+                    on_message=on_message_chunk,
+                    on_approval=on_approval,
+                )
+                if res and not debouncer.buffer:
+                    await debouncer.write(res)
+        except Exception as e:
+            logger.exception("[%s] Error executing chat prompt: %s", self.profile_name, e)
+            try:
+                await channel.send(f"❌ **Error [{self.profile_name}]:** {e}")
+            except Exception:
+                pass
+        finally:
+            await debouncer.close()
+
     async def on_message(self, message: discord.Message):
+        # Ignore own messages and other bots
+        if message.author.bot or (self.user and message.author.id == self.user.id):
+            return
+
         # Strict single-user authorization gate
         if self.owner_id and message.author.id != self.owner_id:
-            return  # Drop silently
+            return
 
-        await self.process_commands(message)
+        # Check prefix commands if any
+        if message.content.startswith(self.command_prefix):
+            await self.process_commands(message)
+            return
+
+        # Check if message is directed to this bot
+        if not self._should_handle_message(message):
+            return
+
+        raw_prompt = message.content
+        if self.user:
+            raw_prompt = raw_prompt.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
+
+        if not raw_prompt:
+            return
+
+        logger.info(
+            "[%s] Handling Discord message in channel %s: %s",
+            self.profile_name,
+            message.channel.id,
+            raw_prompt[:80],
+        )
+
+        session_key = f"chat_{message.channel.id}"
+        await self._execute_chat_prompt(
+            channel=message.channel,
+            prompt=raw_prompt,
+            author_mention=message.author.mention,
+            session_key=session_key,
+        )
 
     async def _update_forum_tags(self, thread: discord.Thread, status_tag_name: str):
         """Update Discord Forum post tags dynamically based on task status."""
@@ -152,6 +296,54 @@ class MaulnessBot(commands.Bot):
             ) or "No active tasks."
             embed.add_field(name="Recent Activity", value=task_summary, inline=False)
             await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="thread", description="Create a new thread and start a session in it")
+        @app_commands.describe(
+            name="Thread name / topic",
+            message="Optional first message or instruction to run in the thread",
+        )
+        async def thread_cmd(
+            interaction: discord.Interaction,
+            name: str,
+            message: Optional[str] = None,
+        ):
+            if self.owner_id and interaction.user.id != self.owner_id:
+                await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
+                return
+
+            await interaction.response.defer()
+
+            channel = interaction.channel
+            created_thread = None
+
+            if isinstance(channel, discord.ForumChannel):
+                thread_with_msg = await channel.create_thread(
+                    name=name[:100],
+                    content=message or f"🧵 Thread started by {interaction.user.mention}",
+                )
+                created_thread = thread_with_msg.thread
+            elif isinstance(channel, discord.TextChannel):
+                created_thread = await channel.create_thread(
+                    name=name[:100],
+                    type=discord.ChannelType.public_thread,
+                )
+                if message:
+                    await created_thread.send(f"{interaction.user.mention}: {message}")
+            elif isinstance(channel, discord.Thread):
+                created_thread = channel
+            else:
+                await interaction.followup.send("⚠️ Cannot create a thread in this channel type.", ephemeral=True)
+                return
+
+            await interaction.followup.send(f"🧵 Created thread: {created_thread.mention}")
+
+            if message and created_thread:
+                await self._execute_chat_prompt(
+                    channel=created_thread,
+                    prompt=message,
+                    author_mention=interaction.user.mention,
+                    session_key=f"thread_{created_thread.id}",
+                )
 
         @self.tree.command(name="profiles", description="List all available execution profiles")
         async def profiles_cmd(interaction: discord.Interaction):
