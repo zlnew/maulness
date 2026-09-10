@@ -48,6 +48,7 @@ class Config:
         # Gateway Multiplexing (Hermes-style)
         self.gateway_multiplex_profiles: bool = False
         self.gateway_multiplex_profile_allowlist: list[str] = []
+        self.gateway_profile_routes: list[dict] = []
         self._load_yaml_config()
 
     def _load_yaml_config(self) -> None:
@@ -66,6 +67,9 @@ class Config:
                         allowlist = gw.get("multiplex_profile_allowlist", [])
                         if isinstance(allowlist, list):
                             self.gateway_multiplex_profile_allowlist = [str(x) for x in allowlist]
+                        routes = gw.get("profile_routes", [])
+                        if isinstance(routes, list):
+                            self.gateway_profile_routes = routes
                     elif "multiplex_profiles" in data:
                         self.gateway_multiplex_profiles = bool(data.get("multiplex_profiles", False))
             except Exception:

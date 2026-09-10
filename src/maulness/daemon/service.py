@@ -66,18 +66,24 @@ async def main(profile_filter: Optional[str] = None):
         ]
         logger.info("Multiplexing profiles: %s", [p.name for p in served_profiles])
 
+        # Group profiles by token to deduplicate client connections
+        token_groups: dict[str, list[Any]] = {}
         for p in served_profiles:
             token = p.env_vars.get("DISCORD_BOT_TOKEN")
             if not token and p.name == "default":
                 token = config.discord_bot_token
 
             if token:
-                logger.info("Spawning Discord bot adapter for profile '%s'...", p.name)
-                bot = MaulnessBot(storage=storage, profile=p)
-                bots.append(bot)
-                discord_tasks.append(asyncio.create_task(bot.start(token)))
+                token_groups.setdefault(token, []).append(p)
             else:
                 logger.debug("Profile '%s' has no DISCORD_BOT_TOKEN configured, skipping adapter.", p.name)
+
+        for token, group in token_groups.items():
+            profile_names = [p.name for p in group]
+            logger.info("Spawning Discord bot adapter for profile(s) %s...", profile_names)
+            bot = MaulnessBot(storage=storage, profiles=group)
+            bots.append(bot)
+            discord_tasks.append(asyncio.create_task(bot.start(token)))
 
         if not discord_tasks:
             logger.warning(
@@ -104,7 +110,8 @@ async def main(profile_filter: Optional[str] = None):
 
     for bot, task in zip(bots, discord_tasks):
         if not task.done():
-            logger.info("Closing Discord connection for profile [%s]...", bot.profile_name)
+            p_names = [p.name for p in bot.profiles] if hasattr(bot, "profiles") else [bot.profile_name]
+            logger.info("Closing Discord connection for profile(s) %s...", p_names)
             await bot.close()
             task.cancel()
             try:

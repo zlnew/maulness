@@ -34,6 +34,7 @@ class MaulnessBot(commands.Bot):
         storage: StorageManager,
         profile_name: Optional[str] = None,
         profile: Optional[Any] = None,
+        profiles: Optional[list[Any]] = None,
     ):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -42,14 +43,24 @@ class MaulnessBot(commands.Bot):
         self.storage = storage
         self.profile_manager = ProfileManager()
 
-        if profile:
+        if profiles:
+            self.profiles = list(profiles)
+            default_prof = next((p for p in profiles if p.name == "default"), profiles[0])
+            self.bound_profile = default_prof
+            self.profile_name = default_prof.name
+        elif profile:
+            self.profiles = [profile]
             self.bound_profile = profile
             self.profile_name = profile.name
         elif profile_name:
-            self.bound_profile = self.profile_manager.get_profile(profile_name)
+            prof = self.profile_manager.get_profile(profile_name)
+            self.profiles = [prof]
+            self.bound_profile = prof
             self.profile_name = profile_name
         else:
-            self.bound_profile = self.profile_manager.get_profile("default")
+            prof = self.profile_manager.get_profile("default")
+            self.profiles = [prof]
+            self.bound_profile = prof
             self.profile_name = "default"
 
         self.runner = TaskRunner(storage=storage, profile_manager=self.profile_manager)
@@ -119,15 +130,66 @@ class MaulnessBot(commands.Bot):
             logger.info("[%s] Synced global slash commands", self.profile_name)
 
     async def on_ready(self):
+        profile_names = [p.name for p in self.profiles]
         logger.info(
-            "Maulness Discord bot [%s] online as %s (ID: %s)",
-            self.profile_name,
+            "Maulness Discord bot %s online as %s (ID: %s)",
+            profile_names,
             self.user,
             self.user.id,
         )
 
-    def _should_handle_message(self, message: discord.Message) -> bool:
-        """Determine whether this specific profile bot instance should claim and handle this message."""
+    def resolve_profile_for_channel(self, channel_id: int, parent_id: Optional[int] = None) -> Optional[Any]:
+        """Find the matching profile from self.profiles for a given channel or thread."""
+        channel_ids = {channel_id}
+        if parent_id is not None:
+            channel_ids.add(parent_id)
+
+        # 1. Check configured gateway profile_routes
+        for route in getattr(config, "gateway_profile_routes", []):
+            chat_id = route.get("chat_id")
+            if chat_id:
+                try:
+                    if int(chat_id) in channel_ids:
+                        prof_name = route.get("profile")
+                        matched = next((p for p in self.profiles if p.name == prof_name), None)
+                        if matched:
+                            return matched
+                except (ValueError, TypeError):
+                    pass
+
+        # 2. Check each profile's DISCORD_HOME_CHANNEL or DISCORD_FORUM_CHANNEL_ID
+        for p in self.profiles:
+            home = p.env_vars.get("DISCORD_HOME_CHANNEL")
+            forum = p.env_vars.get("DISCORD_FORUM_CHANNEL_ID")
+            for ch in (home, forum):
+                if ch:
+                    try:
+                        if int(ch) in channel_ids:
+                            return p
+                    except (ValueError, TypeError):
+                        pass
+
+        # 3. Check instance fallback channel IDs
+        target_channels = set()
+        if self.home_channel_id:
+            target_channels.add(self.home_channel_id)
+        if self.forum_channel_id:
+            target_channels.add(self.forum_channel_id)
+        if channel_ids.intersection(target_channels):
+            return self.bound_profile
+
+        return None
+
+    def resolve_profile_for_message(self, message: discord.Message) -> Optional[Any]:
+        """Determine which profile should handle this message, or None if it should be ignored."""
+        channel_id = message.channel.id
+        parent_id = getattr(message.channel, "parent_id", None)
+        is_dm = isinstance(message.channel, discord.DMChannel)
+
+        matched = self.resolve_profile_for_channel(channel_id, parent_id)
+        if matched is not None:
+            return matched
+
         is_mentioned = False
         if self.user:
             is_mentioned = (
@@ -136,32 +198,17 @@ class MaulnessBot(commands.Bot):
                 or f"<@!{self.user.id}>" in message.content
             )
 
-        channel_id = message.channel.id
-        parent_id = getattr(message.channel, "parent_id", None)
+        if is_mentioned or is_dm:
+            # Standalone satellite profiles ignore mentions in unmapped channels
+            if len(self.profiles) == 1 and self.profile_name in ("life", "research"):
+                return None
+            return self.bound_profile
 
-        target_channels = set()
-        if self.home_channel_id:
-            target_channels.add(self.home_channel_id)
-        if self.forum_channel_id:
-            target_channels.add(self.forum_channel_id)
+        return None
 
-        is_home_channel = (channel_id in target_channels or (parent_id is not None and parent_id in target_channels))
-        is_dm = isinstance(message.channel, discord.DMChannel)
-
-        if is_home_channel:
-            return True
-
-        if is_mentioned:
-            # Satellite profiles sharing the Nova Agent token only respond within their designated home channels.
-            # 'default' (Tom) acts as the primary handler for all other channels and general mentions.
-            if self.profile_name in ("life", "research") and not is_home_channel:
-                return False
-            return True
-
-        if is_dm and self.profile_name == "default":
-            return True
-
-        return False
+    def _should_handle_message(self, message: discord.Message) -> bool:
+        """Determine whether this specific bot instance should claim and handle this message."""
+        return self.resolve_profile_for_message(message) is not None
 
     async def _execute_chat_prompt(
         self,
@@ -169,9 +216,11 @@ class MaulnessBot(commands.Bot):
         prompt: str,
         author_mention: str,
         session_key: str,
+        profile: Optional[Any] = None,
     ):
         """Execute a conversational chat prompt in Discord and stream the response."""
-        status_msg = await channel.send(f"💭 **{self.profile_name}** is thinking...\n> {prompt[:100]}")
+        target_profile = profile or self.bound_profile
+        status_msg = await channel.send(f"💭 **{target_profile.name}** is thinking...\n> {prompt[:100]}")
 
         async def flush_chunk(text: str, is_final: bool):
             if not text.strip():
@@ -205,9 +254,8 @@ class MaulnessBot(commands.Bot):
             except asyncio.TimeoutError:
                 return False
 
-        profile = self.bound_profile
-        provider = get_provider_for_profile(profile)
-        workspace = self.profile_manager.resolve_workspace_for_profile(profile, config.workspace_root)
+        provider = get_provider_for_profile(target_profile)
+        workspace = self.profile_manager.resolve_workspace_for_profile(target_profile, config.workspace_root)
 
         try:
             async with channel.typing():
@@ -223,9 +271,9 @@ class MaulnessBot(commands.Bot):
                 if res and not debouncer.full_text:
                     await debouncer.write(res)
         except Exception as e:
-            logger.exception("[%s] Error executing chat prompt: %s", self.profile_name, e)
+            logger.exception("[%s] Error executing chat prompt: %s", target_profile.name, e)
             try:
-                await channel.send(f"❌ **Error [{self.profile_name}]:** {e}")
+                await channel.send(f"❌ **Error [{target_profile.name}]:** {e}")
             except Exception:
                 pass
         finally:
@@ -245,8 +293,9 @@ class MaulnessBot(commands.Bot):
             await self.process_commands(message)
             return
 
-        # Check if message is directed to this bot
-        if not self._should_handle_message(message):
+        # Check if message is directed to this bot and resolve target profile
+        target_profile = self.resolve_profile_for_message(message)
+        if not target_profile:
             return
 
         raw_prompt = message.content
@@ -258,7 +307,7 @@ class MaulnessBot(commands.Bot):
 
         logger.info(
             "[%s] Handling Discord message in channel %s: %s",
-            self.profile_name,
+            target_profile.name,
             message.channel.id,
             raw_prompt[:80],
         )
@@ -269,6 +318,7 @@ class MaulnessBot(commands.Bot):
             prompt=raw_prompt,
             author_mention=message.author.mention,
             session_key=session_key,
+            profile=target_profile,
         )
 
     async def _update_forum_tags(self, thread: discord.Thread, status_tag_name: str):
@@ -301,7 +351,7 @@ class MaulnessBot(commands.Bot):
             tasks = await self.storage.list_tasks(limit=5)
             embed = discord.Embed(title="Maulness System Status", color=0xDC2626)
             embed.add_field(name="Gateway", value="Online (Connected)", inline=True)
-            embed.add_field(name="Bound Profile", value=f"`{self.profile_name}`", inline=True)
+            embed.add_field(name="Profiles", value=", ".join(f"`{p.name}`" for p in self.profiles), inline=True)
             embed.add_field(name="Recent Tasks", value=str(len(tasks)), inline=True)
 
             task_summary = "\n".join(
@@ -351,11 +401,15 @@ class MaulnessBot(commands.Bot):
             await interaction.followup.send(f"🧵 Created thread: {created_thread.mention}")
 
             if message and created_thread:
+                channel_id = created_thread.id
+                parent_id = getattr(created_thread, "parent_id", None)
+                target_profile = self.resolve_profile_for_channel(channel_id, parent_id) or self.bound_profile
                 await self._execute_chat_prompt(
                     channel=created_thread,
                     prompt=message,
                     author_mention=interaction.user.mention,
                     session_key=f"thread_{created_thread.id}",
+                    profile=target_profile,
                 )
 
         @self.tree.command(name="profiles", description="List all available execution profiles")
@@ -366,9 +420,10 @@ class MaulnessBot(commands.Bot):
 
             profiles = self.profile_manager.list_profiles()
             embed = discord.Embed(title="Available Agent Profiles", color=0x9333EA)
+            active_names = {p.name for p in self.profiles}
             for p in profiles:
                 target = p.model or p.command or "-"
-                is_bound = " [BOUND]" if p.name == self.profile_name else ""
+                is_bound = " [ACTIVE]" if p.name in active_names else ""
                 embed.add_field(
                     name=f"`{p.name}` ({p.provider}){is_bound}",
                     value=f"**Target:** `{target}`\n{p.description}",
@@ -383,8 +438,9 @@ class MaulnessBot(commands.Bot):
                 await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
                 return
 
+            target_profile = self.resolve_profile_for_channel(interaction.channel_id) or self.bound_profile
             await interaction.response.defer()
-            status_msg = await interaction.followup.send(f"💭 **Thinking [{self.profile_name}]...**\n> {query[:100]}")
+            status_msg = await interaction.followup.send(f"💭 **Thinking [{target_profile.name}]...**\n> {query[:100]}")
 
             async def flush_chunk(text: str, is_final: bool):
                 try:
@@ -397,8 +453,7 @@ class MaulnessBot(commands.Bot):
             async def on_message(event: AgentMessageEvent):
                 await debouncer.write(event.delta)
 
-            profile = self.bound_profile
-            provider = get_provider_for_profile(profile)
+            provider = get_provider_for_profile(target_profile)
 
             try:
                 await provider.run(
@@ -469,7 +524,8 @@ class MaulnessBot(commands.Bot):
                 await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
                 return
 
-            effective_profile = profile or self.profile_name
+            target_profile = self.resolve_profile_for_channel(interaction.channel_id) or self.bound_profile
+            effective_profile = profile or target_profile.name
             await interaction.response.defer()
 
             # Check if we should dispatch to forum channel

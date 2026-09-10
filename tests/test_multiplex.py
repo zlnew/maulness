@@ -42,3 +42,31 @@ def test_bot_profile_binding(tmp_path):
     assert bot.bound_profile.name == "office-bot"
     assert bot.owner_id == 123456789
     assert bot.guild_id == 987654321
+
+
+def test_bot_multi_profile_channel_routing(tmp_path):
+    storage = StorageManager(db_path=tmp_path / "test.db")
+    prof_default = Profile(
+        name="default",
+        provider="acp",
+        env_vars={"DISCORD_HOME_CHANNEL": "1001", "DISCORD_BOT_TOKEN": "tok1"},
+    )
+    prof_life = Profile(
+        name="life",
+        provider="acp",
+        env_vars={"DISCORD_HOME_CHANNEL": "2002", "DISCORD_BOT_TOKEN": "tok1"},
+    )
+    prof_research = Profile(
+        name="research",
+        provider="acp",
+        env_vars={"DISCORD_HOME_CHANNEL": "3003", "DISCORD_BOT_TOKEN": "tok1"},
+    )
+    bot = MaulnessBot(storage=storage, profiles=[prof_default, prof_life, prof_research])
+    assert bot.profile_name == "default"
+    assert len(bot.profiles) == 3
+
+    assert bot.resolve_profile_for_channel(1001).name == "default"
+    assert bot.resolve_profile_for_channel(2002).name == "life"
+    assert bot.resolve_profile_for_channel(3003).name == "research"
+    assert bot.resolve_profile_for_channel(9999) is None
+
