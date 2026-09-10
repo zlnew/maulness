@@ -39,7 +39,7 @@ class Config:
         self.gemini_api_key: Optional[str] = os.getenv("GEMINI_API_KEY")
 
         # Antigravity binary command
-        self.agy_cmd: list[str] = os.getenv("AGY_CMD", "agy --acp").split()
+        self.agy_cmd: list[str] = os.getenv("AGY_CMD", "agy").split()
 
     @property
     def has_discord(self) -> bool:

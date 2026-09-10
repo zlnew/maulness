@@ -104,7 +104,7 @@ class TaskRunner:
             if on_message:
                 await on_message(event)
             else:
-                console.print(event.delta, end="", flush=True)
+                console.print(event.delta, end="")
 
         try:
             provider = get_provider_for_profile(profile)

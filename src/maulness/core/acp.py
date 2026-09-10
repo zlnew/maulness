@@ -186,6 +186,15 @@ class AcpClient:
                 logger.error("Error reading from ACP stream: %s", e)
                 break
 
+        # Reject all pending requests if loop ended without receiving responses
+        for fut in self._pending_requests.values():
+            if not fut.done():
+                exit_code = self.process.returncode if self.process else "unknown"
+                fut.set_exception(
+                    ConnectionResetError(f"ACP stream closed unexpectedly (exit code {exit_code})")
+                )
+        self._pending_requests.clear()
+
     async def _handle_message(self, message: dict[str, Any]):
         """Route an incoming message as request response, notification, or approval request."""
         msg_id = message.get("id")

@@ -27,7 +27,7 @@ def test_get_builder_profile():
     builder = pm.get_profile("builder")
     assert builder.name == "builder"
     assert builder.provider == "acp"
-    assert "agy --acp" in (builder.command or "")
+    assert "agy" in (builder.command or "")
 
 
 def test_fallback_profile():

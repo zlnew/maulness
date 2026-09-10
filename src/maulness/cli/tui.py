@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import time
@@ -27,6 +28,8 @@ from maulness.core.pipeline import PipelineOrchestrator
 from maulness.core.pipelines import PipelineManager, PipelineStage
 from maulness.core.profiles import ProfileManager
 from maulness.core.runner import TaskRunner
+
+logger = logging.getLogger("maulness.cli.tui")
 
 
 def get_git_branch(workspace_path: Path) -> str:
@@ -60,42 +63,24 @@ def get_daemon_status() -> str:
     return "[#6c7086]○ standby[/#6c7086]"
 
 
-# Available slash commands for the interactive Command Palette
-AVAILABLE_COMMANDS = [
-    ("/pipeline standard ", "Standard 3-stage pipeline (Plan ➔ Confirm ➔ Build ➔ Review)"),
-    ("/pipeline quick ", "Fast 2-stage execution (Builder ➔ Reviewer)"),
-    ("/pipeline plan_only ", "Architecture spec drafting only (no file changes)"),
-    ("/pipeline audit", "Independent code review and security audit on current diff"),
-    ("/profile builder", "Switch to Senior Builder (Antigravity ACP)"),
-    ("/profile planner", "Switch to Shipwright Architect (Gemini Pro)"),
-    ("/profile reviewer", "Switch to Independent Diff Auditor (Gemini Flash)"),
-    ("/profile default", "Switch to Ambient Conversational Assistant"),
-    ("/diff", "Inspect uncommitted git changes in current workspace"),
-    ("!git status", "Shell: Check working tree and git status"),
-    ("!pytest", "Shell: Run pytest test suite"),
-    ("/clear", "Clear chat history and transcript view"),
-    ("/help", "Show keyboard shortcuts and command reference"),
-    ("/exit", "Exit Maulness interactive session"),
-]
-
-
 # ==============================================================================
-# Modal Dialogs
+# Modal Dialogs (All centered)
 # ==============================================================================
 class CommandPaletteModal(ModalScreen[Optional[str]]):
-    """Neovim Telescope-style Command Palette for slash commands & actions."""
+    """Centered Neovim Telescope-style Command Palette for slash commands & actions."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
     ]
 
-    def __init__(self, initial_query: str = ""):
+    def __init__(self, commands: list[tuple[str, str]], initial_query: str = ""):
         super().__init__()
+        self.commands = commands
         self.initial_query = initial_query.lstrip("/")
 
     def compose(self) -> ComposeResult:
         with Container(classes="palette-dialog"):
-            yield Label("[bold #bb9af7]󰍉 Command Palette[/bold #bb9af7] [dim #737aa2](Type to filter, ↑/↓ to move, Enter to select, Esc to close)[/dim #737aa2]", classes="palette-title")
+            yield Label("[bold #bb9af7]󰍉 Command Palette[/bold #bb9af7] [dim #737aa2](Type to filter, ↑/↓ to navigate, Enter/Tab to select, Esc to close)[/dim #737aa2]", classes="palette-title")
             yield Input(value=self.initial_query, placeholder="Filter commands (/pipeline, /profile, /diff, !<cmd>)...", id="palette-filter")
             ol = OptionList(id="palette-options")
             yield ol
@@ -110,7 +95,7 @@ class CommandPaletteModal(ModalScreen[Optional[str]]):
         q = query.lower().strip()
 
         scored = []
-        for cmd, desc in AVAILABLE_COMMANDS:
+        for cmd, desc in self.commands:
             cmd_clean = cmd.strip()
             if not q:
                 scored.append((0, cmd, desc))
@@ -123,7 +108,6 @@ class CommandPaletteModal(ModalScreen[Optional[str]]):
             elif q in desc.lower():
                 scored.append((10, cmd, desc))
 
-        # Sort descending by score
         scored.sort(key=lambda x: x[0], reverse=True)
         for _, cmd, desc in scored:
             prompt_markup = f"[bold #7aa2f7]{cmd}[/bold #7aa2f7] [dim #737aa2]— {desc}[/dim #737aa2]"
@@ -151,7 +135,7 @@ class CommandPaletteModal(ModalScreen[Optional[str]]):
             if ol.option_count > 0:
                 if ol.highlighted is not None and ol.highlighted > 0:
                     ol.highlighted -= 1
-        elif event.key == "enter":
+        elif event.key in ("enter", "tab"):
             event.prevent_default()
             event.stop()
             if ol.highlighted is not None and ol.option_count > 0:
@@ -172,7 +156,7 @@ class CommandPaletteModal(ModalScreen[Optional[str]]):
 
 
 class ApprovalModal(ModalScreen[bool]):
-    """HITL Tool Approval Modal Dialog."""
+    """Centered HITL Tool Approval Modal Dialog."""
 
     BINDINGS = [
         Binding("y", "allow", "Allow"),
@@ -209,7 +193,7 @@ class ApprovalModal(ModalScreen[bool]):
 
 
 class GateModal(ModalScreen[bool]):
-    """Pipeline Stage Confirmation Gate Modal."""
+    """Centered Pipeline Stage Confirmation Gate Modal."""
 
     BINDINGS = [
         Binding("y", "proceed", "Proceed"),
@@ -241,7 +225,7 @@ class GateModal(ModalScreen[bool]):
 
 
 class DiffModal(ModalScreen[None]):
-    """Neovim-styled scrollable git diff inspector."""
+    """Centered Neovim-styled scrollable git diff inspector."""
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
@@ -299,7 +283,7 @@ class DiffModal(ModalScreen[None]):
 
 
 class ProfileModal(ModalScreen[Optional[str]]):
-    """Profile selector modal."""
+    """Centered Profile selector modal."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
@@ -338,7 +322,7 @@ class ProfileModal(ModalScreen[Optional[str]]):
 
 
 class HelpModal(ModalScreen[None]):
-    """Help overlay modal."""
+    """Centered Help overlay modal."""
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
@@ -352,7 +336,7 @@ class HelpModal(ModalScreen[None]):
 ### Neovim Modal Navigation
 - **NORMAL Mode** (Green status badge):
   - `i` or `a` : Enter **INSERT** mode (focus input bar)
-  - `/` : Open **Command Palette** (Telescope-style slash picker)
+  - `/` : Open **Command Palette** (centered Telescope-style slash picker)
   - `j` / `k` : Scroll chat view down / up
   - `d` / `u` : Half-page scroll down / up (`Ctrl+D` / `Ctrl+U`)
   - `G` : Scroll to bottom of chat
@@ -363,18 +347,17 @@ class HelpModal(ModalScreen[None]):
   - `q` : Quit Maulness
 
 - **INSERT Mode** (Blue status badge):
-  - Type prompt naturally (runs directly with active profile)
-  - `Escape` : Exit to **NORMAL** mode
-  - `Tab` or `Ctrl+K` : Trigger Command Palette
+  - Type prompt naturally (executed by active profile)
+  - `/` : Opens centered Autocomplete Command Palette immediately
+  - `Escape` : Exit to **NORMAL** mode (or stop/cancel active task)
+  - `Tab` or `Ctrl+K` : Open Command Palette
   - `Enter` : Submit prompt / execute command
+  - `Ctrl+C` : Immediately cancel and stop running task
 
-### Slash Commands
-- `/pipeline standard <goal>` : 3-stage pipeline (Plan ➔ Confirm ➔ Build ➔ Review)
-- `/pipeline quick <goal>` : Fast 2-stage execution (Builder ➔ Reviewer)
-- `/pipeline plan_only <goal>` : Architecture spec drafting only
-- `/pipeline audit` : Review uncommitted git diff
-- `/profile <name>` : Switch active profile (`builder`, `planner`, `reviewer`, `default`)
-- `/diff` : Full-screen scrollable git diff inspector
+### Dynamic Slash Commands (Loaded from YAML)
+- `/pipeline <name> <goal>` : Execute declarative pipeline (`standard`, `quick`, `plan_only`, `audit`, or custom)
+- `/profile <name>` : Switch active profile (`builder`, `planner`, `reviewer`, `default`, or custom)
+- `/diff` : Centered full-screen scrollable git diff inspector
 - `!<command>` : Execute local workspace shell command (e.g. `!git status`, `!pytest`)
 - `/clear` : Clear chat transcript
 - `/exit` : Quit
@@ -502,6 +485,10 @@ class MaulnessTUIApp(App):
         color: #c0caf5;
     }
 
+    ModalScreen {
+        align: center middle;
+    }
+
     #top-bar {
         dock: top;
         height: 3;
@@ -591,7 +578,7 @@ class MaulnessTUIApp(App):
         border: none;
     }
 
-    /* Modals */
+    /* Modals (All Centered) */
     .palette-dialog {
         width: 75%;
         max-height: 22;
@@ -681,6 +668,7 @@ class MaulnessTUIApp(App):
         self.is_busy = False
         self.mode = "insert"  # "normal" or "insert"
         self._last_g_time = 0.0
+        self.active_worker = None
 
     def compose(self) -> ComposeResult:
         branch = get_git_branch(self.workspace_path)
@@ -697,8 +685,9 @@ class MaulnessTUIApp(App):
             yield Static(
                 f"[dim #737aa2]Welcome back, Maul. Scoped to [bold #a6e3a1]{self.workspace_path}[/bold #a6e3a1].\n"
                 f"• Natural language executes with [bold #cba6f7]{self.current_profile}[/bold #cba6f7].\n"
-                f"• Press [bold #7aa2f7]/[/bold #7aa2f7] or [bold #7aa2f7]Tab[/bold #7aa2f7] for Telescope Command Palette.\n"
-                f"• Press [bold #7aa2f7]Esc[/bold #7aa2f7] for NORMAL mode ([#a6e3a1]j/k[/#a6e3a1] scroll, [#a6e3a1]i[/#a6e3a1] insert, [#a6e3a1]?[/#a6e3a1] help).[/dim #737aa2]",
+                f"• Press [bold #7aa2f7]/[/bold #7aa2f7] or [bold #7aa2f7]Tab[/bold #7aa2f7] for centered Command Palette.\n"
+                f"• Press [bold #7aa2f7]Esc[/bold #7aa2f7] for NORMAL mode ([#a6e3a1]j/k[/#a6e3a1] scroll, [#a6e3a1]i[/#a6e3a1] insert, [#a6e3a1]?[/#a6e3a1] help).\n"
+                f"• Press [bold #f7768e]Ctrl+C[/bold #f7768e] or [bold #f7768e]Esc[/bold #f7768e] to CANCEL running tasks at any time.[/dim #737aa2]",
                 classes="system-card",
             )
 
@@ -706,7 +695,7 @@ class MaulnessTUIApp(App):
             yield Static("", id="vim-statusline")
             with Horizontal(id="input-row", classes="focused-insert"):
                 yield Input(
-                    placeholder=f"Ask {self.current_profile} or /pipeline, /profile, /diff, !<cmd>...",
+                    placeholder=f"Ask {self.current_profile} or type / for commands, !<cmd>...",
                     id="chat-input",
                 )
 
@@ -714,6 +703,34 @@ class MaulnessTUIApp(App):
         self.set_mode("insert")
         self._update_statusline()
         self._update_top_bar()
+
+    def get_dynamic_commands(self) -> list[tuple[str, str]]:
+        """Dynamically build list of available slash commands from discovered YAML pipelines & profiles."""
+        commands: list[tuple[str, str]] = []
+
+        # 1. Pipelines from PipelineManager (custom user YAMLs + templates)
+        for pipe in self.pipeline_manager.list_pipelines():
+            stages_summary = " ➔ ".join(s.name for s in pipe.stages)
+            desc = pipe.description or f"Pipeline {pipe.name}"
+            if stages_summary:
+                desc = f"{desc} ({stages_summary})"
+            commands.append((f"/pipeline {pipe.name} ", desc))
+
+        # 2. Profiles from ProfileManager (custom user YAMLs + templates)
+        for prof in self.profile_manager.list_profiles():
+            desc = prof.description or f"Profile {prof.name}"
+            commands.append((f"/profile {prof.name}", f"Switch active profile to {prof.name} ({prof.provider}) — {desc[:45]}"))
+
+        # 3. Global actions and shell helpers
+        commands.extend([
+            ("/diff", "Inspect uncommitted git changes in current workspace"),
+            ("!git status", "Shell: Check working tree and git status"),
+            ("!pytest", "Shell: Run pytest test suite"),
+            ("/clear", "Clear chat history and transcript view"),
+            ("/help", "Show keyboard shortcuts and command reference"),
+            ("/exit", "Exit Maulness interactive session"),
+        ])
+        return commands
 
     def set_mode(self, new_mode: str) -> None:
         self.mode = new_mode
@@ -731,9 +748,12 @@ class MaulnessTUIApp(App):
 
     def _update_statusline(self) -> None:
         statusline = self.query_one("#vim-statusline", Static)
-        if self.mode == "insert":
+        if self.is_busy:
+            mode_badge = "[bold #16161e on #f7768e] BUSY [/bold #16161e on #f7768e]"
+            hints = "[bold #f7768e]Ctrl+C / Esc: STOP / CANCEL TASK[/bold #f7768e]"
+        elif self.mode == "insert":
             mode_badge = "[bold #16161e on #7aa2f7] INSERT [/bold #16161e on #7aa2f7]"
-            hints = "[dim #737aa2]Esc: normal mode │ / or Tab: commands │ Enter: send[/dim #737aa2]"
+            hints = "[dim #737aa2]Esc: normal mode │ /: command palette │ Enter: send[/dim #737aa2]"
         else:
             mode_badge = "[bold #16161e on #a6e3a1] NORMAL [/bold #16161e on #a6e3a1]"
             hints = "[dim #737aa2]i: insert │ /: commands │ j/k: scroll │ d/u: page │ gg/G: top/bottom │ ?: help │ q: quit[/dim #737aa2]"
@@ -751,7 +771,24 @@ class MaulnessTUIApp(App):
             f"{daemon_str} │ {status_text}"
         )
 
+    def cancel_active_task(self) -> None:
+        """Cancel and stop the currently running direct or pipeline task."""
+        if self.active_worker and not self.active_worker.is_finished:
+            self.active_worker.cancel()
+            logger.info("Cancelled active worker task upon user request.")
+        self.is_busy = False
+        self._update_top_bar()
+        self._update_statusline()
+
     def on_key(self, event: events.Key) -> None:
+        # Stop / Cancel Running Task when busy
+        if self.is_busy:
+            if event.key in ("ctrl+c", "escape"):
+                event.prevent_default()
+                event.stop()
+                self.cancel_active_task()
+                return
+
         chat_view = self.query_one("#chat-view", VerticalScroll)
 
         # NORMAL MODE KEY HANDLING
@@ -798,7 +835,14 @@ class MaulnessTUIApp(App):
                 val = chat_input.value
                 self.open_command_palette(val if val.startswith("/") else "")
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        # If user typed leading slash as the very first character, pop open command palette
+        if event.value == "/":
+            self.open_command_palette(initial_query="")
+
     def open_command_palette(self, initial_query: str = "") -> None:
+        commands = self.get_dynamic_commands()
+
         def _on_command_selected(selected: Optional[str]) -> None:
             if not selected:
                 self.set_mode("insert")
@@ -826,6 +870,8 @@ class MaulnessTUIApp(App):
                 p_name = selected[len("/profile ") :].strip()
                 self.current_profile = p_name
                 self._update_top_bar()
+                chat_input = self.query_one("#chat-input", Input)
+                chat_input.value = ""
                 self.set_mode("insert")
                 return
 
@@ -835,7 +881,7 @@ class MaulnessTUIApp(App):
             self.set_mode("insert")
             chat_input.cursor_position = len(selected)
 
-        self.push_screen(CommandPaletteModal(initial_query), callback=_on_command_selected)
+        self.push_screen(CommandPaletteModal(commands, initial_query), callback=_on_command_selected)
 
     def action_quit_app(self) -> None:
         self.exit()
@@ -855,7 +901,7 @@ class MaulnessTUIApp(App):
                 self.current_profile = selected
                 self._update_top_bar()
                 chat_input = self.query_one("#chat-input", Input)
-                chat_input.placeholder = f"Ask {self.current_profile} or /pipeline, /profile, /diff, !<cmd>..."
+                chat_input.placeholder = f"Ask {self.current_profile} or type / for commands, !<cmd>..."
             self.set_mode("normal")
 
         self.push_screen(ProfileModal(profiles, self.current_profile), callback=_on_profile_selected)
@@ -871,9 +917,14 @@ class MaulnessTUIApp(App):
         chat_input = self.query_one("#chat-input", Input)
         chat_input.value = ""
 
+        # Cancellation commands
+        if raw_text in ("/stop", "/cancel", "stop", "cancel") and self.is_busy:
+            self.cancel_active_task()
+            return
+
         if self.is_busy:
             chat_view = self.query_one("#chat-view", VerticalScroll)
-            await chat_view.mount(SystemCard("Busy", "Agent is currently processing a task. Please wait.", is_error=True))
+            await chat_view.mount(SystemCard("Busy", "Agent is currently processing a task. Press Ctrl+C or Esc to cancel.", is_error=True))
             chat_view.scroll_end(animate=False)
             return
 
@@ -899,7 +950,7 @@ class MaulnessTUIApp(App):
             if len(parts) > 1 and parts[1].strip():
                 self.current_profile = parts[1].strip()
                 self._update_top_bar()
-                chat_input.placeholder = f"Ask {self.current_profile} or /pipeline, /profile, /diff, !<cmd>..."
+                chat_input.placeholder = f"Ask {self.current_profile} or type / for commands, !<cmd>..."
             else:
                 self.action_select_profile()
             return
@@ -936,15 +987,16 @@ class MaulnessTUIApp(App):
             else:
                 p_name, goal = "standard", pipeline_body
 
-            self.run_worker(self._execute_pipeline(p_name, goal), exclusive=True)
+            self.active_worker = self.run_worker(self._execute_pipeline(p_name, goal), exclusive=True)
             return
 
         # Default Natural Language Prompt -> Direct Execution with Active Profile
-        self.run_worker(self._execute_direct(raw_text), exclusive=True)
+        self.active_worker = self.run_worker(self._execute_direct(raw_text), exclusive=True)
 
     async def _execute_direct(self, prompt: str) -> None:
         self.is_busy = True
         self._update_top_bar()
+        self._update_statusline()
         chat_view = self.query_one("#chat-view", VerticalScroll)
 
         branch = get_git_branch(self.workspace_path)
@@ -978,16 +1030,20 @@ class MaulnessTUIApp(App):
                 verbose=False,
             )
             agent_card.set_status(f"[#a6e3a1]✓ Completed ({task.status.value})[/#a6e3a1]")
+        except asyncio.CancelledError:
+            agent_card.set_status("[bold #f7768e]⏹ Stopped by user[/bold #f7768e]")
         except Exception as e:
             agent_card.set_status(f"[#f7768e]✗ Failed: {e}[/#f7768e]")
         finally:
             self.is_busy = False
             self._update_top_bar()
+            self._update_statusline()
             chat_view.scroll_end(animate=False)
 
     async def _execute_pipeline(self, pipeline_name: str, goal: str) -> None:
         self.is_busy = True
         self._update_top_bar()
+        self._update_statusline()
         chat_view = self.query_one("#chat-view", VerticalScroll)
 
         branch = get_git_branch(self.workspace_path)
@@ -1028,9 +1084,12 @@ class MaulnessTUIApp(App):
                 verbose=False,
             )
             p_card.finish(f"[#a6e3a1]✓ Pipeline Finished ({task.status.value})[/#a6e3a1]")
+        except asyncio.CancelledError:
+            p_card.finish("[bold #f7768e]⏹ Pipeline stopped by user[/bold #f7768e]")
         except Exception as e:
             p_card.finish(f"[#f7768e]✗ Pipeline Failed: {e}[/#f7768e]")
         finally:
             self.is_busy = False
             self._update_top_bar()
+            self._update_statusline()
             chat_view.scroll_end(animate=False)

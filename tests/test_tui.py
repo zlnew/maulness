@@ -126,3 +126,63 @@ async def test_tui_chat_execution_from_home(tmp_path: Path, monkeypatch):
         agent_card = app.query_one(AgentCard)
         assert "Mock response content" in "".join(agent_card.message_text)
         assert "Completed" in str(agent_card.status_label.render())
+
+
+@pytest.mark.asyncio
+async def test_tui_dynamic_commands_discovery(tmp_path: Path):
+    from maulness.core.pipelines import PipelineManager
+    from maulness.core.profiles import ProfileManager
+
+    # Create a custom YAML pipeline
+    custom_pipe_yaml = """
+name: my_custom_review
+description: "My custom multi-stage review pipeline"
+stages:
+  - name: stage1
+    profile: planner
+    prompt: "Plan {title}"
+"""
+    (tmp_path / "my_custom_review.yaml").write_text(custom_pipe_yaml)
+
+    app = MaulnessTUIApp()
+    app.pipeline_manager = PipelineManager(pipelines_dir=tmp_path)
+    commands = app.get_dynamic_commands()
+    command_keys = [c[0] for c in commands]
+
+    # Verify custom pipeline appears automatically in commands
+    assert "/pipeline my_custom_review " in command_keys
+    # Verify standard pipelines appear
+    assert "/pipeline standard " in command_keys
+    # Verify profiles appear dynamically
+    assert "/profile builder" in command_keys
+    assert "/profile planner" in command_keys
+
+
+@pytest.mark.asyncio
+async def test_tui_typing_slash_opens_palette():
+    app = MaulnessTUIApp()
+    async with app.run_test() as pilot:
+        # In insert mode, typing '/' triggers the command palette
+        await pilot.press("slash")
+        await pilot.pause()
+        assert isinstance(app.screen, CommandPaletteModal)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, CommandPaletteModal)
+
+
+@pytest.mark.asyncio
+async def test_tui_task_cancellation():
+    app = MaulnessTUIApp()
+    async with app.run_test() as pilot:
+        app.is_busy = True
+        app._update_statusline()
+        statusline = app.query_one("#vim-statusline")
+        assert "BUSY" in str(statusline.render())
+        assert "CANCEL" in str(statusline.render())
+
+        # Press Ctrl+C while busy to cancel
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app.is_busy is False
+        assert "NORMAL" in str(statusline.render()) or "INSERT" in str(statusline.render())
