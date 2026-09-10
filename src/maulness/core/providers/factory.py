@@ -3,6 +3,7 @@ from maulness.core.providers.acp_provider import AcpProvider
 from maulness.core.providers.api_provider import UnifiedApiProvider
 from maulness.core.providers.base import BaseProvider
 from maulness.core.providers.gemini_provider import GeminiProvider
+from maulness.core.providers.sdk_provider import AntigravitySdkProvider
 
 
 def get_provider_for_profile(profile: Profile) -> BaseProvider:
@@ -11,6 +12,8 @@ def get_provider_for_profile(profile: Profile) -> BaseProvider:
 
     if provider_name == "acp":
         return AcpProvider(profile)
+    elif provider_name in ("antigravity_sdk", "sdk", "antigravity"):
+        return AntigravitySdkProvider(profile)
     elif provider_name == "gemini":
         return GeminiProvider(profile)
     elif provider_name in ("openai", "anthropic", "openrouter"):

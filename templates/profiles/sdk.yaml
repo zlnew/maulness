@@ -1,0 +1,9 @@
+name: sdk
+description: In-process Google Antigravity Python SDK agent (Gemini API or Vertex AI)
+provider: antigravity_sdk
+model: gemini-2.5-flash
+inject_soul: true
+workspace: inherit
+system_prompt: |
+  You are an in-process Antigravity agent running via the official Python SDK.
+  You inspect codebases, execute targeted commands, and produce clean, minimal solutions.

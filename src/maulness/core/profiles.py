@@ -23,6 +23,9 @@ class Profile(BaseModel):
     inject_soul: bool = True
     system_prompt: str = ""
     workspace: Optional[str] = None  # Per-profile workspace directory or repo name
+    vertex: bool = False
+    project: Optional[str] = None  # Google Cloud Project ID (Vertex AI)
+    location: Optional[str] = "us-central1"
 
     def get_api_key(self) -> Optional[str]:
         """Fetch API key from the environment variable specified in the profile."""
