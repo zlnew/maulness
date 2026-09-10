@@ -1,0 +1,15 @@
+name: plan_only
+description: "Architecture & planning only (Planner output, no edits)"
+stages:
+  - name: planning
+    profile: planner
+    status: planning
+    output_key: plan
+    prompt: |
+      You are the lead architect drafting an implementation plan for '{repo_name}'.
+      Goal: {title}
+
+      Requirements:
+      {prompt}
+
+      Produce a comprehensive implementation plan including affected files, architecture decisions, trade-offs, and testing strategies.

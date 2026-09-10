@@ -1,0 +1,30 @@
+name: quick
+description: "Fast 2-stage execution: Builder -> Reviewer (skips planning)"
+stages:
+  - name: building
+    profile: builder
+    status: building
+    output_key: build_summary
+    prompt: |
+      Goal: {title}
+
+      Task details:
+      {prompt}
+
+      Implement the requested changes in repository '{repo_name}', verify with local tests, and inspect diffs.
+    requires_approval: true
+
+  - name: review
+    profile: reviewer
+    status: review
+    output_key: review_audit
+    requires_diff: true
+    prompt: |
+      Review the changes made for quick task '{title}':
+
+      Git Diff:
+      ```diff
+      {git_diff}
+      ```
+
+      Provide an audit scorecard: PASS or REWORK with reasons.

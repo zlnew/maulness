@@ -1,0 +1,20 @@
+name: audit
+description: "Independent audit and review of current uncommitted changes or branch diff"
+stages:
+  - name: review
+    profile: reviewer
+    status: review
+    output_key: review_audit
+    requires_diff: true
+    prompt: |
+      You are conducting a strict independent security and quality code review for '{repo_name}'.
+      Task context: {title}
+      {prompt}
+
+      Git Diff:
+      ```diff
+      {git_diff}
+      ```
+
+      Evaluate for correctness, security vulnerabilities, edge cases, breaking changes, and adherence to project conventions.
+      Produce a final scorecard: PASS or REWORK with actionable findings.

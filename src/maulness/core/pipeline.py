@@ -1,7 +1,7 @@
 import asyncio
 import subprocess
 import uuid
-from typing import Callable, Coroutine, Optional
+from typing import Any, Callable, Coroutine, Optional
 from rich.console import Console
 from rich.panel import Panel
 
@@ -9,12 +9,12 @@ from maulness.config import config
 from maulness.core.models import (
     AgentMessageEvent,
     AgentThoughtEvent,
-    AgentToolCallEvent,
     ApprovalRequestEvent,
     TaskMode,
     TaskRecord,
     TaskStatus,
 )
+from maulness.core.pipelines import PipelineDefinition, PipelineManager, PipelineStage
 from maulness.core.profiles import ProfileManager
 from maulness.core.providers.factory import get_provider_for_profile
 from maulness.storage.db import StorageManager
@@ -23,33 +23,44 @@ console = Console()
 
 
 class PipelineOrchestrator:
-    """Coordinates Multi-Route Kanban lifecycle: Planner ➔ Builder ➔ Reviewer."""
+    """Coordinates declarative multi-stage Kanban pipelines driven by YAML definitions."""
 
     def __init__(
         self,
         storage: Optional[StorageManager] = None,
         profile_manager: Optional[ProfileManager] = None,
+        pipeline_manager: Optional[PipelineManager] = None,
     ):
         self.storage = storage or StorageManager(db_path=config.db_path)
         self.profile_manager = profile_manager or ProfileManager()
+        self.pipeline_manager = pipeline_manager or PipelineManager()
 
     async def run_pipeline(
         self,
         repo_name: str,
         title: str,
         prompt: str,
+        pipeline_name: str = "standard",
+        pipeline_def: Optional[PipelineDefinition] = None,
         discord_thread_id: Optional[int] = None,
         on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine]] = None,
         on_message: Optional[Callable[[AgentMessageEvent], Coroutine]] = None,
         on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine]] = None,
+        on_gate: Optional[Callable[[str], Coroutine[Any, Any, bool]]] = None,
+        on_stage_start: Optional[Callable[[PipelineStage, int, int], Coroutine]] = None,
+        on_stage_finish: Optional[Callable[[PipelineStage, str], Coroutine]] = None,
         auto_proceed: bool = False,
+        verbose: bool = True,
     ) -> TaskRecord:
-        """Execute the full 3-stage assembly line: Planner ➔ Builder ➔ Reviewer."""
+        """Execute a declarative pipeline across defined stages."""
         await self.storage.initialize()
         workspace_path = config.resolve_repo_path(repo_name)
         task_id = f"task_{uuid.uuid4().hex[:10]}"
 
-        # 1. Initialize Task
+        # Load pipeline definition
+        definition = pipeline_def or self.pipeline_manager.get_pipeline(pipeline_name)
+
+        # 1. Initialize Task Record
         task = await self.storage.create_task(
             task_id=task_id,
             title=title,
@@ -59,110 +70,108 @@ class PipelineOrchestrator:
             discord_thread_id=discord_thread_id,
         )
 
-        console.print(f"[bold magenta][*] Starting Pipeline Task {task_id} for [green]{repo_name}[/green][/bold magenta]")
-        console.print(f"[dim]Goal: {title}[/dim]\n")
-
-        # ==========================================
-        # STAGE 1: PLANNING
-        # ==========================================
-        console.print("[bold blue]── Stage 1: Planning (Shipwright Architect) ──[/bold blue]")
-        await self.storage.update_task_status(task_id, TaskStatus.PLANNING)
-
-        planner_profile = self.profile_manager.get_profile("planner")
-        planner_provider = get_provider_for_profile(planner_profile)
-
-        planning_prompt = (
-            f"You are drafting an implementation plan for repository '{repo_name}'.\n"
-            f"Goal: {title}\n\n"
-            f"Details & Requirements:\n{prompt}\n\n"
-            f"Please output a structured markdown plan covering proposed changes, "
-            f"files to modify/create, risk assessment, and verification steps."
-        )
-
-        plan_output = await planner_provider.run(
-            session_id=f"{task_id}_plan",
-            prompt=planning_prompt,
-            workspace_path=workspace_path,
-            on_thought=on_thought,
-            on_message=on_message,
-        )
-
-        console.print(Panel(plan_output, title="📋 Draft Implementation Plan", border_style="blue"))
-
-        # Plan Approval Gate
-        if not auto_proceed:
-            loop = asyncio.get_running_loop()
-            answer = await loop.run_in_executor(None, input, "\nProceed to Building stage with Antigravity ACP? [Y/n]: ")
-            if answer.strip().lower() in ("n", "no"):
-                console.print("[yellow][!] Pipeline paused by user at Planning stage.[/yellow]")
-                return task
-
-        # ==========================================
-        # STAGE 2: BUILDING (Antigravity ACP)
-        # ==========================================
-        console.print("\n[bold yellow]── Stage 2: Building (Antigravity Senior Deckhand) ──[/bold yellow]")
-        await self.storage.update_task_status(task_id, TaskStatus.BUILDING)
-
-        builder_profile = self.profile_manager.get_profile("builder")
-        builder_provider = get_provider_for_profile(builder_profile)
-
-        build_prompt = (
-            f"Goal: {title}\n\n"
-            f"Approved Plan:\n{plan_output}\n\n"
-            f"Execute the changes, inspect diffs, and run test suites to verify."
-        )
-
-        try:
-            await builder_provider.run(
-                session_id=f"{task_id}_build",
-                prompt=build_prompt,
-                workspace_path=workspace_path,
-                on_thought=on_thought,
-                on_message=on_message,
-                on_approval=on_approval,
+        if verbose:
+            console.print(
+                f"[bold magenta][*] Starting Pipeline '{definition.name}' (Task {task_id}) for [green]{repo_name}[/green][/bold magenta]"
             )
-            console.print("[green]✓ Building stage complete.[/green]")
-        except Exception as e:
-            console.print(f"[red][x] Building stage failed: {e}[/red]")
-            await self.storage.update_task_status(task_id, TaskStatus.FAILED)
-            return task
+            console.print(f"[dim]Goal: {title}[/dim]\n")
 
-        # ==========================================
-        # STAGE 3: REVIEW (Independent Diff Audit)
-        # ==========================================
-        console.print("\n[bold cyan]── Stage 3: Review (Independent Diff Auditor) ──[/bold cyan]")
-        await self.storage.update_task_status(task_id, TaskStatus.REVIEW)
+        # Context store shared and mutated across stages
+        context: dict[str, Any] = {
+            "repo_name": repo_name,
+            "workspace_path": str(workspace_path),
+            "title": title,
+            "prompt": prompt,
+            "git_diff": "",
+            "previous_output": "",
+        }
 
-        # Grab git diff
-        diff_res = subprocess.run(
-            ["git", "diff", "HEAD"],
-            cwd=str(workspace_path),
-            capture_output=True,
-            text=True,
-        )
-        git_diff = diff_res.stdout or "(No uncommitted diffs detected)"
+        total_stages = len(definition.stages)
 
-        reviewer_profile = self.profile_manager.get_profile("reviewer")
-        reviewer_provider = get_provider_for_profile(reviewer_profile)
+        for idx, stage in enumerate(definition.stages, start=1):
+            # Check gate before stage begins if specified
+            if stage.gate and not auto_proceed:
+                proceed = True
+                if on_gate:
+                    proceed = await on_gate(stage.gate.prompt)
+                else:
+                    loop = asyncio.get_running_loop()
+                    ans = await loop.run_in_executor(
+                        None, input, f"\n{stage.gate.prompt} [Y/n]: "
+                    )
+                    proceed = ans.strip().lower() not in ("n", "no")
 
-        review_prompt = (
-            f"Review the following changes made for task '{title}':\n\n"
-            f"Git Diff:\n```diff\n{git_diff[:4000]}\n```\n\n"
-            f"Provide an audit scorecard: PASS or REWORK with reasons."
-        )
+                if not proceed:
+                    if verbose:
+                        console.print(
+                            f"[yellow][!] Pipeline paused at stage '{stage.name}' by user.[/yellow]"
+                        )
+                    return task
 
-        review_output = await reviewer_provider.run(
-            session_id=f"{task_id}_review",
-            prompt=review_prompt,
-            workspace_path=workspace_path,
-            on_thought=on_thought,
-            on_message=on_message,
-        )
+            # Update DB status
+            status_enum = TaskStatus.BUILDING
+            try:
+                status_enum = TaskStatus(stage.status)
+            except ValueError:
+                pass
+            await self.storage.update_task_status(task_id, status_enum)
 
-        console.print(Panel(review_output, title="🔍 Review Audit Scorecard", border_style="cyan"))
+            if verbose:
+                console.print(
+                    f"\n[bold cyan]── Stage {idx}/{total_stages}: {stage.name.title()} ({stage.profile}) ──[/bold cyan]"
+                )
 
+            if on_stage_start:
+                await on_stage_start(stage, idx, total_stages)
+
+            # If stage requires git diff, refresh it now
+            if stage.requires_diff:
+                diff_res = subprocess.run(
+                    ["git", "diff", "HEAD"],
+                    cwd=str(workspace_path),
+                    capture_output=True,
+                    text=True,
+                )
+                context["git_diff"] = diff_res.stdout or "(No uncommitted diffs detected)"
+
+            # Render stage prompt
+            stage_prompt = self.pipeline_manager.render_stage_prompt(stage, context)
+
+            profile = self.profile_manager.get_profile(stage.profile)
+            provider = get_provider_for_profile(profile)
+
+            try:
+                stage_output = await provider.run(
+                    session_id=f"{task_id}_{stage.name}",
+                    prompt=stage_prompt,
+                    workspace_path=workspace_path,
+                    on_thought=on_thought,
+                    on_message=on_message,
+                    on_approval=on_approval if stage.requires_approval else None,
+                )
+            except Exception as e:
+                if verbose:
+                    console.print(f"[red][x] Stage '{stage.name}' failed: {e}[/red]")
+                await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                raise
+
+            # Store output in context
+            context["previous_output"] = stage_output
+            if stage.output_key:
+                context[stage.output_key] = stage_output
+
+            if on_stage_finish:
+                await on_stage_finish(stage, stage_output)
+
+            if verbose:
+                console.print(f"[green]✓ Stage '{stage.name}' complete.[/green]")
+
+        # All stages finished successfully
         await self.storage.update_task_status(task_id, TaskStatus.DONE)
-        console.print(f"\n[bold green][+] Pipeline Task {task_id} successfully completed![/bold green]")
+        if verbose:
+            console.print(
+                f"\n[bold green][+] Pipeline '{definition.name}' completed successfully![/bold green]"
+            )
 
         fetched = await self.storage.get_task(task_id)
         return fetched or task

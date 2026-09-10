@@ -8,7 +8,7 @@ from maulness.config import config
 from maulness.core.soul import get_soul_content
 
 USER_PROFILES_DIR = config.config_dir / "profiles"
-TEMPLATE_PROFILES_DIR = Path(__file__).parent.parent.parent / "templates" / "profiles"
+TEMPLATE_PROFILES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "templates" / "profiles"
 
 
 class Profile(BaseModel):

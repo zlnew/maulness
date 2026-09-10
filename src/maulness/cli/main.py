@@ -1,6 +1,7 @@
 import asyncio
 import os
 import subprocess
+import sys
 from pathlib import Path
 import typer
 import yaml
@@ -11,6 +12,7 @@ from rich.table import Table
 
 from maulness.config import config
 from maulness.core.pipeline import PipelineOrchestrator
+from maulness.core.pipelines import PipelineManager
 from maulness.core.profiles import ProfileManager
 from maulness.core.runner import TaskRunner
 from maulness.storage.db import StorageManager
@@ -104,34 +106,27 @@ def status():
     console.print(table)
 
 
-@app.command()
-def chat(
-    profile: str = typer.Option(
-        "builder",
-        "-p",
-        "--profile",
-        help="Initial profile to chat with (builder, planner, default, reviewer)",
-    ),
-):
-    """Start an interactive multi-turn REPL chat session scoped to the current directory."""
+def run_plain_chat(initial_profile: str = "builder"):
+    """Plain REPL interactive fallback without the full-screen TUI."""
     repo_name, workspace_path = config.get_current_workspace()
-    current_profile = profile
+    current_profile = initial_profile
     runner = TaskRunner()
-    orchestrator = PipelineOrchestrator()
+    pipeline_manager = PipelineManager()
+    orchestrator = PipelineOrchestrator(pipeline_manager=pipeline_manager)
 
     console.print(
         Panel(
-            f"[bold cyan]Maulness Interactive Workspace Chat[/bold cyan]\n"
+            f"[bold cyan]Maulness Interactive Workspace Chat (Plain REPL)[/bold cyan]\n"
             f"Repository: [green]{repo_name}[/green] ([dim]{workspace_path}[/dim])\n"
             f"Active Profile: [magenta]{current_profile}[/magenta]\n\n"
-            f"[bold yellow]Slash Commands:[/bold yellow]\n"
-            f"  [cyan]/code <prompt>[/cyan]     Run direct solo builder with Antigravity ACP\n"
-            f"  [cyan]/pipeline <goal>[/cyan]   Run 3-stage assembly line (Plan ➔ Build ➔ Review)\n"
-            f"  [cyan]/profile <name>[/cyan]    Switch profile on the fly (builder, planner, default)\n"
-            f"  [cyan]/diff[/cyan]              Inspect current uncommitted git changes\n"
-            f"  [cyan]/clear[/cyan]             Clear screen\n"
-            f"  [cyan]/exit[/cyan]              Exit session\n"
-            f"[dim]Tip: Plain text without slash commands chats directly with the active profile.[/dim]",
+            f"[bold yellow]Commands:[/bold yellow]\n"
+            f"  [cyan]/pipeline [name] <goal>[/cyan]  Run declarative pipeline (standard, quick, plan_only, audit)\n"
+            f"  [cyan]/profile <name>[/cyan]         Switch profile on the fly (builder, planner, default, reviewer)\n"
+            f"  [cyan]/diff[/cyan]                   Inspect current uncommitted git changes\n"
+            f"  [cyan]!<cmd>[/cyan]                  Run workspace shell command (e.g. !git status, !pytest)\n"
+            f"  [cyan]/clear[/cyan]                  Clear screen\n"
+            f"  [cyan]/exit[/cyan]                   Exit session\n\n"
+            f"[dim]Tip: Plain natural language input executes directly with the active profile ({current_profile}).[/dim]",
             border_style="cyan",
         )
     )
@@ -165,44 +160,58 @@ def chat(
                 console.print(Syntax(diff, "diff", theme="monokai"))
                 continue
 
-            if raw_prompt.startswith("/profile "):
-                new_profile = raw_prompt.split(" ", 1)[1].strip()
-                current_profile = new_profile
-                console.print(
-                    f"[green]Switched active profile to [magenta]{current_profile}[/magenta][/green]"
-                )
-                continue
-
-            # Direct Solo Execution slash commands (/code or /run or /do)
-            if raw_prompt.startswith(("/code ", "/run ", "/do ")):
-                cmd_parts = raw_prompt.split(" ", 1)
-                code_prompt = cmd_parts[1].strip()
-                console.print(f"[bold cyan][*] Running solo builder: [white]{code_prompt}[/white][/bold cyan]\n")
-                asyncio.run(
-                    runner.run_direct(
-                        repo_name=repo_name,
-                        prompt=code_prompt,
-                        profile_name="builder",
+            if raw_prompt.startswith("/profile"):
+                parts = raw_prompt.split(" ", 1)
+                if len(parts) > 1 and parts[1].strip():
+                    current_profile = parts[1].strip()
+                    console.print(
+                        f"[green]Switched active profile to [magenta]{current_profile}[/magenta][/green]"
                     )
-                )
+                else:
+                    pm = ProfileManager()
+                    profiles = pm.list_profiles()
+                    console.print(
+                        f"[magenta]Available profiles:[/magenta] {', '.join(p.name for p in profiles)}"
+                    )
                 continue
 
-            # Multi-Route Pipeline slash commands (/pipeline or /task or /plan)
-            if raw_prompt.startswith(("/pipeline ", "/task ", "/plan ")):
-                cmd_parts = raw_prompt.split(" ", 1)
-                pipeline_prompt = cmd_parts[1].strip()
-                console.print(f"[bold magenta][*] Launching pipeline: [white]{pipeline_prompt}[/white][/bold magenta]\n")
+            # Local shell escape: !<cmd>
+            if raw_prompt.startswith("!"):
+                cmd = raw_prompt[1:].strip()
+                res = subprocess.run(
+                    cmd,
+                    shell=True,
+                    cwd=str(workspace_path),
+                    capture_output=True,
+                    text=True,
+                )
+                output = res.stdout or res.stderr or "(No output)"
+                console.print(Panel(output, title=f"$ {cmd} (exit {res.returncode})", border_style="yellow"))
+                continue
+
+            # Declarative pipeline command: /pipeline [name] <goal>
+            if raw_prompt.startswith(("/pipeline ", "/task ")):
+                pipeline_body = raw_prompt.split(" ", 1)[1].strip()
+                parts = pipeline_body.split(" ", 1)
+                known_pipelines = {p.name for p in pipeline_manager.list_pipelines()}
+                if len(parts) == 2 and parts[0] in known_pipelines:
+                    p_name, goal = parts[0], parts[1].strip()
+                else:
+                    p_name, goal = "standard", pipeline_body
+
+                console.print(f"[bold magenta][*] Launching pipeline '{p_name}': [white]{goal}[/white][/bold magenta]\n")
                 asyncio.run(
                     orchestrator.run_pipeline(
                         repo_name=repo_name,
-                        title=pipeline_prompt[:80],
-                        prompt=pipeline_prompt,
+                        title=goal[:80],
+                        prompt=goal,
+                        pipeline_name=p_name,
                         auto_proceed=False,
                     )
                 )
                 continue
 
-            # Default: Conversational turn with the active profile
+            # Direct prompt turn with active profile (no /code prefix required)
             asyncio.run(
                 runner.run_direct(
                     repo_name=repo_name,
@@ -214,6 +223,31 @@ def chat(
         except (KeyboardInterrupt, EOFError):
             console.print("\n[yellow]Session terminated.[/yellow]")
             break
+
+
+@app.command()
+def chat(
+    profile: str = typer.Option(
+        "builder",
+        "-p",
+        "--profile",
+        help="Initial profile to chat with (builder, planner, default, reviewer)",
+    ),
+    plain: bool = typer.Option(
+        False,
+        "--plain",
+        "--no-tui",
+        help="Run in plain text REPL mode instead of the full terminal TUI",
+    ),
+):
+    """Start an interactive workspace chat session scoped to current directory."""
+    if not plain and sys.stdin.isatty():
+        from maulness.cli.tui import MaulnessTUIApp
+
+        app = MaulnessTUIApp(initial_profile=profile)
+        app.run()
+    else:
+        run_plain_chat(initial_profile=profile)
 
 
 # ==========================================

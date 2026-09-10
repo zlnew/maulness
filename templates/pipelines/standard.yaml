@@ -1,0 +1,46 @@
+name: standard
+description: "Standard 3-stage engineering pipeline: Planner -> Builder -> Reviewer"
+stages:
+  - name: planning
+    profile: planner
+    status: planning
+    output_key: plan
+    prompt: |
+      You are drafting an implementation plan for repository '{repo_name}'.
+      Goal: {title}
+
+      Requirements:
+      {prompt}
+
+      Output a structured markdown plan covering proposed changes, files to modify/create, risk assessment, and verification steps.
+    gate:
+      type: confirm
+      prompt: "Proceed to building stage with Antigravity ACP?"
+
+  - name: building
+    profile: builder
+    status: building
+    output_key: build_summary
+    prompt: |
+      Goal: {title}
+
+      Approved Plan:
+      {plan}
+
+      Execute the changes, inspect diffs, and run test suites to verify.
+    requires_approval: true
+
+  - name: review
+    profile: reviewer
+    status: review
+    output_key: review_audit
+    requires_diff: true
+    prompt: |
+      Review the following changes made for task '{title}':
+
+      Git Diff:
+      ```diff
+      {git_diff}
+      ```
+
+      Provide an audit scorecard: PASS or REWORK with reasons.

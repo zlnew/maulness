@@ -42,6 +42,7 @@ class TaskRunner:
         on_message: Optional[Callable[[AgentMessageEvent], Coroutine]] = None,
         on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine]] = None,
         on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine]] = None,
+        verbose: bool = True,
     ) -> TaskRecord:
         """Execute a task in Direct Mode with the selected profile."""
         await self.storage.initialize()
@@ -59,11 +60,12 @@ class TaskRunner:
             mode=TaskMode.DIRECT,
         )
 
-        console.print(
-            f"[bold cyan][*] Task {task_id} initialized for [green]{repo_name}[/green] "
-            f"using profile [magenta]{profile.name}[/magenta] ([dim]{profile.provider}[/dim])[/bold cyan]"
-        )
-        console.print(f"[dim]Workspace: {workspace_path}[/dim]\n")
+        if verbose:
+            console.print(
+                f"[bold cyan][*] Task {task_id} initialized for [green]{repo_name}[/green] "
+                f"using profile [magenta]{profile.name}[/magenta] ([dim]{profile.provider}[/dim])[/bold cyan]"
+            )
+            console.print(f"[dim]Workspace: {workspace_path}[/dim]\n")
 
         # Set task to BUILDING
         await self.storage.update_task_status(task_id, TaskStatus.BUILDING)
@@ -115,14 +117,19 @@ class TaskRunner:
             )
 
             await self.storage.update_task_status(task_id, TaskStatus.DONE)
-            console.print(f"\n[bold green][+] Task {task_id} completed successfully.[/bold green]")
+            if verbose:
+                console.print(f"\n[bold green][+] Task {task_id} completed successfully.[/bold green]")
 
         except FileNotFoundError as e:
-            console.print(f"[bold red][x] Execution error: {e}[/bold red]")
+            if verbose:
+                console.print(f"[bold red][x] Execution error: {e}[/bold red]")
             await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+            raise
         except Exception as e:
-            console.print(f"\n[bold red][x] Task failed: {e}[/bold red]")
+            if verbose:
+                console.print(f"\n[bold red][x] Task failed: {e}[/bold red]")
             await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+            raise
 
         fetched = await self.storage.get_task(task_id)
         return fetched or task
