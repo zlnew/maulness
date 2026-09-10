@@ -33,5 +33,5 @@ maulness run expense-tracker "Fix CSV export null date"
 ## Specification
 
 Full PRD, Tech Spec, and Protocol Wire Contracts are documented in the workspace knowledge base:
-- Decision Record: `_memory/decisions/2026-09-09-agent-harness-acp-discord.md`
-- Master Spec: `_memory/plans/2026-09-09-personal-agent-harness-spec.md`
+- Decision Record: `_memory/decisions/2026-09-09-maulness-agent-harness-acp-discord.md`
+- Master Spec: `_memory/plans/2026-09-09-maulness-agent-harness-spec.md`
