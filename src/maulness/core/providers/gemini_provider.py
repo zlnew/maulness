@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 from google import genai
@@ -53,7 +54,7 @@ class GeminiProvider(BaseProvider):
             )
 
         client = genai.Client(api_key=api_key)
-        model_name = self.profile.model or "gemini-2.5-flash"
+        model_name = self.profile.model or "gemini-3.6-flash"
 
         _EFFORT_BUDGET = {"low": 1024, "medium": 8192, "high": 24576}
 

@@ -321,7 +321,7 @@ class ProfileManager:
             identity=IdentityConfig(name=name, description="Ephemeral default fallback profile"),
             agent=AgentConfig(
                 provider="acp" if name in ("default", "builder") else "gemini",
-                model="gemini-2.5-flash",
+                model="gemini-3.6-flash",
                 command="agy" if name in ("default", "builder") else None,
             ),
         )

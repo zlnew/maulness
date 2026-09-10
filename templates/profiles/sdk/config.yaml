@@ -8,7 +8,7 @@ identity:
 
 agent:
   provider: antigravity_sdk
-  model: gemini-2.5-flash
+  model: gemini-3.6-flash
 
 execution:
   workspace: inherit
