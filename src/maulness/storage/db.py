@@ -379,3 +379,47 @@ class StorageManager:
                 "tasks_failed": c2.rowcount,
             }
 
+    async def get_channel_conversation(self, channel_id: int) -> Optional[str]:
+        """Fetch active conversation UUID for a channel."""
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT conversation_id FROM channel_conversations WHERE channel_id = ?",
+                (channel_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else None
+
+    async def set_channel_conversation(
+        self, channel_id: int, conversation_id: str, profile_name: Optional[str] = None
+    ):
+        """Save or update active conversation UUID for a channel."""
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO channel_conversations (channel_id, conversation_id, profile_name, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(channel_id) DO UPDATE SET
+                    conversation_id = excluded.conversation_id,
+                    profile_name = excluded.profile_name,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (channel_id, conversation_id, profile_name),
+            )
+            await db.commit()
+
+    async def clear_channel_conversation(self, channel_id: int):
+        """Clear active conversation UUID for a channel."""
+        async with self._connect() as db:
+            await db.execute(
+                "DELETE FROM channel_conversations WHERE channel_id = ?",
+                (channel_id,),
+            )
+            await db.commit()
+
+    async def list_channel_conversations(self) -> dict[int, str]:
+        """List all active channel conversation UUID mappings."""
+        async with self._connect() as db:
+            async with db.execute("SELECT channel_id, conversation_id FROM channel_conversations") as cursor:
+                rows = await cursor.fetchall()
+                return {row[0]: row[1] for row in rows}
+

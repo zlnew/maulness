@@ -54,3 +54,11 @@ CREATE TABLE IF NOT EXISTS session_memories (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Active Channel Conversations (multi-turn session persistence across restarts)
+CREATE TABLE IF NOT EXISTS channel_conversations (
+    channel_id INTEGER PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    profile_name TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+

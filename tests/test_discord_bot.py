@@ -15,13 +15,13 @@ async def test_bot_slash_commands_registered(tmp_path: Path):
     await bot._register_slash_commands()
 
     registered_cmds = {cmd.name for cmd in bot.tree.get_commands()}
-    assert "status" in registered_cmds
-    assert "profiles" in registered_cmds
-    assert "ask" in registered_cmds
-    assert "run" in registered_cmds
-    assert "task" in registered_cmds
-    assert "abort" in registered_cmds
-    assert "thread" in registered_cmds
+    expected_cmds = {
+        "status", "profiles", "ask", "run", "task", "abort", "stop",
+        "thread", "new", "reset", "clear", "context", "model",
+        "reasoning", "help", "memory", "yolo"
+    }
+    for cmd in expected_cmds:
+        assert cmd in registered_cmds, f"Slash command /{cmd} missing from registered commands"
 
 
 @pytest.mark.asyncio
@@ -111,5 +111,90 @@ async def test_bot_should_handle_message_routing(tmp_path: Path):
     bot_life.home_channel_id = 5555
     bot_life._connection.user = mock_user
     assert bot_life._should_handle_message(msg3) is False
+
+
+@pytest.mark.asyncio
+async def test_bot_new_and_reset_commands(tmp_path: Path):
+    storage = StorageManager(db_path=tmp_path / "bot_test.db")
+    await storage.initialize()
+
+    bot = MaulnessBot(storage=storage, profile_name="default")
+    await bot._register_slash_commands()
+
+    # Seed channel conversation in memory and DB
+    bot.channel_conversations[1234] = "conv-uuid-1234"
+    await storage.set_channel_conversation(1234, "conv-uuid-1234", "default")
+    assert await storage.get_channel_conversation(1234) == "conv-uuid-1234"
+
+    # Call /new command callback
+    new_cmd = next(c for c in bot.tree.get_commands() if c.name == "new")
+    mock_interaction = AsyncMock()
+    mock_interaction.user.id = 12345
+    mock_interaction.channel_id = 1234
+    bot.owner_id = 12345
+
+    await new_cmd.callback(mock_interaction)
+
+    assert 1234 not in bot.channel_conversations
+    assert await storage.get_channel_conversation(1234) is None
+    mock_interaction.response.send_message.assert_called_once()
+    embed = mock_interaction.response.send_message.call_args[1]["embed"]
+    assert "Session Reset" in embed.title
+
+
+@pytest.mark.asyncio
+async def test_bot_context_and_model_commands(tmp_path: Path):
+    storage = StorageManager(db_path=tmp_path / "bot_test.db")
+    await storage.initialize()
+
+    bot = MaulnessBot(storage=storage, profile_name="default")
+    await bot._register_slash_commands()
+
+    bot.channel_conversations[555] = "active-uuid-999"
+
+    context_cmd = next(c for c in bot.tree.get_commands() if c.name == "context")
+    mock_interaction = AsyncMock()
+    mock_interaction.user.id = 12345
+    mock_interaction.channel_id = 555
+    bot.owner_id = 12345
+
+    await context_cmd.callback(mock_interaction)
+    mock_interaction.response.send_message.assert_called_once()
+    embed = mock_interaction.response.send_message.call_args[1]["embed"]
+    assert "Active Session Context" in embed.title
+
+    # Test /model command
+    model_cmd = next(c for c in bot.tree.get_commands() if c.name == "model")
+    mock_interaction_model = AsyncMock()
+    mock_interaction_model.user.id = 12345
+    mock_interaction_model.channel_id = 555
+
+    # Switch model
+    await model_cmd.callback(mock_interaction_model, name="deepseek/deepseek-chat")
+    assert bot.bound_profile.model == "deepseek/deepseek-chat"
+
+
+@pytest.mark.asyncio
+async def test_bot_on_message_text_commands(tmp_path: Path):
+    storage = StorageManager(db_path=tmp_path / "bot_test.db")
+    await storage.initialize()
+
+    bot = MaulnessBot(storage=storage, profile_name="default")
+    bot.owner_id = 12345
+    bot.channel_conversations[777] = "conv-777"
+    await storage.set_channel_conversation(777, "conv-777", "default")
+
+    # Mock message for /new typed in text
+    msg = AsyncMock()
+    msg.author.bot = False
+    msg.author.id = 12345
+    msg.channel.id = 777
+    msg.content = "/new"
+
+    await bot.on_message(msg)
+
+    assert 777 not in bot.channel_conversations
+    assert await storage.get_channel_conversation(777) is None
+    msg.channel.send.assert_called_once()
 
 

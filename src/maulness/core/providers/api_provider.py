@@ -22,15 +22,22 @@ class UnifiedApiProvider(BaseProvider):
         "anthropic": "https://api.anthropic.com/v1/messages",
     }
 
+    @property
+    def last_conversation_id(self) -> Optional[str]:
+        return None
+
     async def run(
         self,
         session_id: str,
         prompt: str,
         workspace_path: Optional[Path] = None,
+        conversation_id: Optional[str] = None,
+        on_init: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None,
         on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
         on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
         on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
         on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
+        **kwargs: Any,
     ) -> str:
         api_key = self.profile.get_api_key()
         if not api_key:

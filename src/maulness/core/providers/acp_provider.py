@@ -63,6 +63,7 @@ class AcpProvider(BaseProvider):
             session_id=session_id,
             prompt=prompt,
             cwd=cwd,
+            conversation_id=conversation_id,
             on_thought=on_thought,
             on_message=on_message,
             on_tool_call=on_tool_call,
@@ -82,11 +83,23 @@ class AcpProvider(BaseProvider):
         on_tool_call=None,
         on_approval=None,
     ) -> str:
-        """Stream output from Antigravity agy CLI in native stream-json format."""
+        # If conversation_id is provided, resume existing conversation
+        effective_prompt = prompt
         cmd = [binary]
-        if conversation_id:
-            cmd.extend(["--conversation", conversation_id])
-        cmd.extend(["--output-format", "stream-json", "-p", prompt])
+        if conversation_id and not str(conversation_id).startswith("chat_"):
+            cmd.extend(["--conversation", str(conversation_id)])
+        else:
+            # If starting a fresh conversation, inject SOUL doctrine & system prompt
+            system_doctrine = self.profile.effective_system_prompt()
+            if system_doctrine and system_doctrine.strip():
+                effective_prompt = (
+                    f"[SYSTEM OPERATING DOCTRINE & IDENTITY]\n"
+                    f"{system_doctrine.strip()}\n"
+                    f"[/SYSTEM OPERATING DOCTRINE]\n\n"
+                    f"{prompt}"
+                )
+
+        cmd.extend(["--output-format", "stream-json", "-p", effective_prompt])
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -182,6 +195,7 @@ class AcpProvider(BaseProvider):
         session_id: str,
         prompt: str,
         cwd: str,
+        conversation_id: Optional[str] = None,
         on_thought=None,
         on_message=None,
         on_tool_call=None,
@@ -202,10 +216,21 @@ class AcpProvider(BaseProvider):
 
         client.on_message = internal_msg_handler
 
+        effective_prompt = prompt
+        if not conversation_id:
+            system_doctrine = self.profile.effective_system_prompt()
+            if system_doctrine and system_doctrine.strip():
+                effective_prompt = (
+                    f"[SYSTEM OPERATING DOCTRINE & IDENTITY]\n"
+                    f"{system_doctrine.strip()}\n"
+                    f"[/SYSTEM OPERATING DOCTRINE]\n\n"
+                    f"{prompt}"
+                )
+
         try:
             workspace_uri = Path(cwd).as_uri()
             await client.initialize(client_name="maulness", workspace_uri=workspace_uri)
-            await client.prompt(session_id=session_id, prompt_text=prompt)
+            await client.prompt(session_id=session_id, prompt_text=effective_prompt)
         finally:
             await client.stop()
 

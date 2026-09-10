@@ -22,6 +22,10 @@ class FallbackProviderChain(BaseProvider):
         self.primary = primary
         self.fallbacks = fallbacks
 
+    @property
+    def last_conversation_id(self) -> Optional[str]:
+        return getattr(self.primary, "last_conversation_id", None)
+
     async def run(
         self,
         session_id: str,
