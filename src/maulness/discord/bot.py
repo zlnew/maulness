@@ -142,12 +142,13 @@ class MaulnessBot(commands.Bot):
             return True
 
         if is_mentioned:
-            # When life and research share the same user ID, tie-break by designated channel
-            if self.profile_name == "research" and not is_home_channel:
+            # Satellite profiles sharing the Nova Agent token only respond within their designated home channels.
+            # 'default' (Tom) acts as the primary handler for all other channels and general mentions.
+            if self.profile_name in ("life", "research") and not is_home_channel:
                 return False
             return True
 
-        if is_dm:
+        if is_dm and self.profile_name == "default":
             return True
 
         return False
