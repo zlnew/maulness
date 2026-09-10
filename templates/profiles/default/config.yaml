@@ -1,9 +1,10 @@
 name: default
-description: Fast conversational triage and quick lookups
+description: "Tom — Master Shipwright and chief builder for default workspace operations"
 provider: acp
 command: "agy"
 model: null
 inject_soul: true
 workspace: inherit
-system_prompt: |
-  You are Maul's personal AI agent. Keep replies direct, concise, and technically grounded.
+fallbacks:
+  - provider: gemini
+    model: gemini-2.5-flash
