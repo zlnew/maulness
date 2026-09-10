@@ -1,11 +1,16 @@
+import logging
 import os
 from pathlib import Path
 from typing import Optional
+from dotenv import dotenv_values
 import yaml
 from pydantic import BaseModel, Field
 
 from maulness.config import config
+from maulness.core.skills import SkillManager
 from maulness.core.soul import get_soul_content
+
+logger = logging.getLogger("maulness.profiles")
 
 USER_PROFILES_DIR = config.config_dir / "profiles"
 TEMPLATE_PROFILES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "templates" / "profiles"
@@ -14,12 +19,12 @@ TEMPLATE_PROFILES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "
 class Profile(BaseModel):
     name: str
     description: str = ""
-    provider: str = "acp"  # acp, gemini, anthropic, openai, openrouter
+    provider: str = "acp"  # acp, antigravity_sdk, gemini, anthropic, openai, openrouter
     model: Optional[str] = None
     api_key_env: Optional[str] = None
     temperature: float = 0.7
     max_tokens: int = 4096
-    command: Optional[str] = None  # ACP command (e.g. "agy --acp")
+    command: Optional[str] = None  # ACP command (e.g. "agy")
     inject_soul: bool = True
     system_prompt: str = ""
     workspace: Optional[str] = None  # Per-profile workspace directory or repo name
@@ -27,49 +32,76 @@ class Profile(BaseModel):
     project: Optional[str] = None  # Google Cloud Project ID (Vertex AI)
     location: Optional[str] = "us-central1"
 
+    # Hermes Directory-based attributes
+    profile_dir: Optional[Path] = None
+    soul_content: Optional[str] = None
+    env_vars: dict[str, str] = Field(default_factory=dict)
+    skills_dir: Optional[Path] = None
+
     def get_api_key(self) -> Optional[str]:
-        """Fetch API key from the environment variable specified in the profile."""
-        if not self.api_key_env:
-            return None
-        return os.getenv(self.api_key_env)
+        """Fetch API key prioritizing profile-specific .env, then system environment."""
+        # 1. Check profile-specific .env
+        if self.api_key_env and self.api_key_env in self.env_vars:
+            return self.env_vars[self.api_key_env]
+        if "GEMINI_API_KEY" in self.env_vars and self.provider in ("gemini", "antigravity_sdk"):
+            return self.env_vars["GEMINI_API_KEY"]
+
+        # 2. Check system environment
+        if self.api_key_env:
+            key = os.getenv(self.api_key_env)
+            if key:
+                return key
+
+        if self.provider in ("gemini", "antigravity_sdk"):
+            return os.getenv("GEMINI_API_KEY")
+
+        return None
 
     def effective_system_prompt(self) -> str:
-        """Combine role-specific system prompt with personal SOUL.md doctrine."""
+        """Combine role-specific system prompt, profile SOUL.md, root SOUL.md, and skills summary."""
         parts = []
         if self.system_prompt.strip():
             parts.append(self.system_prompt.strip())
 
+        # Profile-specific SOUL doctrine (profiles/<name>/SOUL.md)
+        if self.soul_content and self.soul_content.strip():
+            parts.append("\n---\n## Profile Operating Doctrine (SOUL.md)\n" + self.soul_content.strip())
+
+        # Global personal doctrine (~/.config/maulness/SOUL.md)
         if self.inject_soul:
             soul = get_soul_content()
             if soul:
                 parts.append("\n---\n## Personal Operating Doctrine (SOUL.md)\n" + soul)
 
+        # Append effective skills index
+        skill_mgr = SkillManager()
+        skills = skill_mgr.list_skills(profile_skills_dir=self.skills_dir)
+        skills_summary = skill_mgr.format_skills_summary(skills)
+        if skills_summary:
+            parts.append(skills_summary)
+
         return "\n\n".join(parts)
 
 
 class ProfileManager:
-    """Manages discovery and instantiation of Maulness profiles."""
+    """Manages discovery and instantiation of Hermes-style directory profiles."""
 
     def __init__(self, profiles_dir: Optional[Path] = None):
         self.profiles_dir = profiles_dir or USER_PROFILES_DIR
 
     def list_profiles(self) -> list[Profile]:
-        """List all discovered profiles (user profiles take precedence over templates)."""
+        """List all discovered profiles (user directories take precedence over templates)."""
         profiles: dict[str, Profile] = {}
 
         # 1. Load built-in templates first
         if TEMPLATE_PROFILES_DIR.exists():
-            for file in sorted(TEMPLATE_PROFILES_DIR.glob("*.yaml")):
-                p = self._load_file(file)
-                if p:
-                    profiles[p.name] = p
+            for p in self._discover_in_dir(TEMPLATE_PROFILES_DIR):
+                profiles[p.name] = p
 
         # 2. Overlay user profiles in ~/.config/maulness/profiles
         if self.profiles_dir.exists():
-            for file in sorted(self.profiles_dir.glob("*.yaml")):
-                p = self._load_file(file)
-                if p:
-                    profiles[p.name] = p
+            for p in self._discover_in_dir(self.profiles_dir):
+                profiles[p.name] = p
 
         return list(profiles.values())
 
@@ -95,11 +127,68 @@ class ProfileManager:
             return config.resolve_repo_path(profile.workspace.strip())
         return fallback_workspace
 
-    def _load_file(self, path: Path) -> Optional[Profile]:
+    def _discover_in_dir(self, directory: Path) -> list[Profile]:
+        """Discover directory-based profiles and fallback standalone YAML files."""
+        discovered: list[Profile] = []
+        if not directory.exists() or not directory.is_dir():
+            return discovered
+
+        for entry in sorted(directory.iterdir()):
+            # Hermes Directory Mode: <name>/config.yaml
+            if entry.is_dir():
+                config_file = entry / "config.yaml"
+                if config_file.exists():
+                    p = self._load_directory_profile(entry, config_file)
+                    if p:
+                        discovered.append(p)
+
+            # Legacy single-file mode: <name>.yaml
+            elif entry.is_file() and entry.suffix in (".yaml", ".yml"):
+                p = self._load_file_profile(entry)
+                if p:
+                    discovered.append(p)
+
+        return discovered
+
+    def _load_directory_profile(self, profile_dir: Path, config_file: Path) -> Optional[Profile]:
+        try:
+            data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return None
+
+            if "name" not in data:
+                data["name"] = profile_dir.name
+
+            soul_content = None
+            soul_file = profile_dir / "SOUL.md"
+            if soul_file.exists():
+                soul_content = soul_file.read_text(encoding="utf-8").strip()
+
+            env_vars: dict[str, str] = {}
+            env_file = profile_dir / ".env"
+            if env_file.exists():
+                env_vars = {k: v for k, v in dotenv_values(env_file).items() if v is not None}
+
+            skills_dir = profile_dir / "skills"
+            if not skills_dir.exists():
+                skills_dir = None
+
+            return Profile(
+                **data,
+                profile_dir=profile_dir,
+                soul_content=soul_content,
+                env_vars=env_vars,
+                skills_dir=skills_dir,
+            )
+        except Exception as e:
+            logger.warning("Failed to load profile from %s: %s", profile_dir, e)
+            return None
+
+    def _load_file_profile(self, path: Path) -> Optional[Profile]:
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 return Profile(**data)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to load profile from %s: %s", path, e)
         return None

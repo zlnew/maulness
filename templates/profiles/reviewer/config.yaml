@@ -1,0 +1,11 @@
+name: reviewer
+description: Independent diff auditor, security inspection, and test validation
+provider: gemini
+model: gemini-2.5-pro
+api_key_env: GEMINI_API_KEY
+temperature: 0.2
+inject_soul: true
+workspace: inherit
+system_prompt: |
+  You are the independent reviewer. You inspect git diffs, audit code for security flaws,
+  and verify test coverage before sign-off.

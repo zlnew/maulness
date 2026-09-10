@@ -1,0 +1,10 @@
+name: default
+description: Fast conversational triage and quick lookups
+provider: acp
+command: "agy"
+model: null
+api_key_env: null
+inject_soul: true
+workspace: inherit
+system_prompt: |
+  You are Maul's personal AI agent. Keep replies direct, concise, and technically grounded.

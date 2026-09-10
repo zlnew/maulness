@@ -1,9 +1,0 @@
-name: default
-description: Fast ambient conversational assistant for quick lookups, triage, and Q&A
-provider: acp
-command: "agy"
-inject_soul: true
-workspace: inherit
-system_prompt: |
-  You are Maul's ambient conversational assistant. You answer questions directly,
-  help brainstorm solutions, and triage incoming tasks. Keep your replies concise.

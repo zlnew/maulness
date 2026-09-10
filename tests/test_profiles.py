@@ -35,3 +35,26 @@ def test_fallback_profile():
     unknown = pm.get_profile("nonexistent_role")
     assert unknown.name == "nonexistent_role"
     assert unknown.provider in ("gemini", "acp")
+
+
+def test_directory_profile_loading(tmp_path):
+    prof_dir = tmp_path / "custom"
+    prof_dir.mkdir()
+    (prof_dir / "config.yaml").write_text("name: custom\nprovider: gemini\nmodel: gemini-2.5-flash", encoding="utf-8")
+    (prof_dir / "SOUL.md").write_text("# Custom Doctrine\nBe extremely fast.", encoding="utf-8")
+    (prof_dir / ".env").write_text("GEMINI_API_KEY=test_custom_key_123\n", encoding="utf-8")
+
+    skills_dir = prof_dir / "skills" / "my-custom-skill"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "SKILL.md").write_text("---\nname: my-custom-skill\ndescription: Custom skill\n---\nRun custom.", encoding="utf-8")
+
+    pm = ProfileManager(profiles_dir=tmp_path)
+    profile = pm.get_profile("custom")
+
+    assert profile.name == "custom"
+    assert profile.provider == "gemini"
+    assert profile.soul_content is not None
+    assert "Be extremely fast." in profile.soul_content
+    assert profile.get_api_key() == "test_custom_key_123"
+    assert "Custom Doctrine" in profile.effective_system_prompt()
+    assert "my-custom-skill" in profile.effective_system_prompt()

@@ -425,14 +425,27 @@ def profile_list():
 
 @profile_app.command("show")
 def profile_show(name: str = typer.Argument(..., help="Profile name to inspect")):
-    """Display YAML specification for a profile."""
+    """Display specification, doctrine, and skills for a profile."""
     pm = ProfileManager()
     profile = pm.get_profile(name)
 
-    data = profile.model_dump()
+    data = profile.model_dump(mode="json", exclude={"env_vars", "soul_content"})
     yaml_str = yaml.dump(data, sort_keys=False)
     syntax = Syntax(yaml_str, "yaml", theme="monokai", line_numbers=True)
-    console.print(Panel(syntax, title=f"Profile — {profile.name}", border_style="magenta"))
+    console.print(Panel(syntax, title=f"Profile Configuration — {profile.name}", border_style="magenta"))
+
+    if profile.soul_content:
+        console.print(Panel(profile.soul_content, title="Role Operating Doctrine (SOUL.md)", border_style="cyan"))
+
+    from maulness.core.skills import SkillManager
+    skills = SkillManager().list_skills(profile_skills_dir=profile.skills_dir)
+    if skills:
+        skill_lines = []
+        for sname, s in skills.items():
+            is_local = profile.skills_dir and s.path.is_relative_to(profile.skills_dir)
+            tag = "[magenta](profile-extending)[/magenta]" if is_local else "[dim](root-default)[/dim]"
+            skill_lines.append(f"• [bold #a6e3a1]{sname}[/bold #a6e3a1] {tag}: {s.description}")
+        console.print(Panel("\n".join(skill_lines), title=f"Effective Skills ({len(skills)})", border_style="green"))
 
 
 # ==========================================

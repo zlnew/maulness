@@ -5,10 +5,13 @@ from dotenv import load_dotenv
 
 CONFIG_DIR = Path.home() / ".config" / "maulness"
 ENV_FILE = CONFIG_DIR / "env"
+DOTENV_FILE = CONFIG_DIR / ".env"
 LOCAL_ENV_FILE = Path.cwd() / ".env"
 
-# Load ~/.config/maulness/env first, then local .env if present
-if ENV_FILE.exists():
+# Load ~/.config/maulness/.env or ~/.config/maulness/env, then local .env
+if DOTENV_FILE.exists():
+    load_dotenv(DOTENV_FILE)
+elif ENV_FILE.exists():
     load_dotenv(ENV_FILE)
 elif LOCAL_ENV_FILE.exists():
     load_dotenv(LOCAL_ENV_FILE)
@@ -17,7 +20,8 @@ elif LOCAL_ENV_FILE.exists():
 class Config:
     def __init__(self):
         self.config_dir: Path = CONFIG_DIR
-        self.db_path: Path = CONFIG_DIR / "maulness.db"
+        self.db_path: Path = Path(os.getenv("MAULNESS_DB_PATH", str(CONFIG_DIR / "maulness.db")))
+        self.skills_dir: Path = CONFIG_DIR / "skills"
         self.workspace_root: Path = Path(os.getenv("WORKSPACE_ROOT", "/home/zlnew/www/personal"))
         self.repo_dir: Path = self.workspace_root / "repo"
 

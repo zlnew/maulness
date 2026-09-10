@@ -46,6 +46,10 @@ class AntigravitySdkProvider(BaseProvider):
         cwd = Path(workspace_path) if workspace_path else config.workspace_root
         api_key = self.profile.get_api_key() or config.gemini_api_key
 
+        from maulness.core.skills import SkillManager
+        skill_mgr = SkillManager()
+        skills_paths = skill_mgr.get_skills_paths(profile_skills_dir=self.profile.skills_dir)
+
         sdk_config = LocalAgentConfig(
             system_instructions=self.profile.effective_system_prompt(),
             workspaces=[str(cwd)],
@@ -56,6 +60,8 @@ class AntigravitySdkProvider(BaseProvider):
             project=self.profile.project or None,
             location=self.profile.location or "us-central1",
             conversation_id=conversation_id,
+            skills_paths=skills_paths or None,
+            env=self.profile.env_vars or None,
         )
 
         accumulated: list[str] = []
