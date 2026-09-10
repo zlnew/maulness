@@ -37,7 +37,7 @@ class UnifiedApiProvider(BaseProvider):
     def base_url(self) -> Optional[str]:
         if self.profile.base_url:
             return self.profile.base_url
-        endpoint = self.BASE_URLS.get(self.profile.provider.lower().strip())
+        endpoint = self.BASE_URLS.get(self.profile.provider.lower().strip().replace("-", "_"))
         if endpoint:
             for suffix in ("/chat/completions", "/messages"):
                 if endpoint.endswith(suffix):
@@ -62,11 +62,11 @@ class UnifiedApiProvider(BaseProvider):
         **kwargs: Any,
     ) -> str:
         api_key = self.profile.get_api_key()
-        provider_type = self.profile.provider.lower().strip()
+        provider_type = self.profile.provider.lower().strip().replace("-", "_")
 
         # Ollama usually does not require an API key
         if not api_key and provider_type != "ollama":
-            key_name = self.profile.api_key_env or f"{self.profile.provider.upper()}_API_KEY"
+            key_name = self.profile.api_key_env or f"{self.profile.provider.upper().replace('-', '_')}_API_KEY"
             raise ValueError(
                 f"Missing API key for profile '{self.profile.name}'. "
                 f"Set {key_name} in ~/.config/maulness/env or profile .env"

@@ -8,7 +8,7 @@ from maulness.core.providers.sdk_provider import AntigravitySdkProvider
 
 
 def _instantiate_single_provider(profile: Profile) -> BaseProvider:
-    provider_name = profile.provider.lower().strip()
+    provider_name = profile.provider.lower().strip().replace("-", "_")
 
     if provider_name == "acp":
         return AcpProvider(profile)

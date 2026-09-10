@@ -196,43 +196,40 @@ class Profile(BaseModel):
 
     def get_api_key(self) -> Optional[str]:
         """Fetch API key prioritizing profile-specific .env, then system environment."""
-        std_key_names = {
-            "gemini": "GEMINI_API_KEY",
-            "antigravity_sdk": "GEMINI_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "openai": "OPENAI_API_KEY",
-            "openrouter": "OPENROUTER_API_KEY",
-            "opencode": "OPENCODE_API_KEY",
-            "opencode_go": "OPENCODE_API_KEY",
-            "opencode_zen": "OPENCODE_API_KEY",
-            "deepseek": "DEEPSEEK_API_KEY",
+        prov = self.provider.lower().strip().replace("-", "_")
+        std_key_map: dict[str, list[str]] = {
+            "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            "antigravity_sdk": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            "anthropic": ["ANTHROPIC_API_KEY"],
+            "openai": ["OPENAI_API_KEY"],
+            "openrouter": ["OPENROUTER_API_KEY"],
+            "opencode": ["OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY"],
+            "opencode_go": ["OPENCODE_GO_API_KEY", "OPENCODE_API_KEY"],
+            "opencode_zen": ["OPENCODE_ZEN_API_KEY", "OPENCODE_API_KEY"],
+            "deepseek": ["DEEPSEEK_API_KEY"],
+            "ollama": ["OLLAMA_API_KEY"],
         }
-        prov = self.provider.lower().strip()
-        key_name = self.api_key_env or std_key_names.get(prov)
+        candidate_keys = []
+        if self.api_key_env:
+            candidate_keys.append(self.api_key_env)
+        candidate_keys.extend(std_key_map.get(prov, [f"{prov.upper()}_API_KEY"]))
 
         # 1. Check profile-specific .env
-        if key_name and key_name in self.env_vars:
-            return self.env_vars[key_name]
-        for candidate in (
-            "OPENCODE_API_KEY",
-            "DEEPSEEK_API_KEY",
-            "GEMINI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "OPENROUTER_API_KEY",
-        ):
-            if candidate in self.env_vars and prov in candidate.lower():
-                return self.env_vars[candidate]
+        for key in candidate_keys:
+            if key in self.env_vars and self.env_vars[key]:
+                return self.env_vars[key]
 
         # 2. Check system environment
-        if key_name:
-            val = os.getenv(key_name)
+        for key in candidate_keys:
+            val = os.getenv(key)
             if val:
                 return val
 
-        # 3. Generic fallback for OpenAI-compatible providers
+        # 3. Generic fallback
         if prov in ("openai_compatible", "opencode", "opencode_go", "opencode_zen"):
-            return os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY")
+            return self.env_vars.get("OPENCODE_API_KEY") or os.getenv("OPENCODE_API_KEY") or self.env_vars.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        if prov in ("gemini", "antigravity_sdk"):
+            return self.env_vars.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
         return None
 
@@ -332,6 +329,9 @@ class ProfileManager:
     def resolve_workspace_for_profile(self, profile: Profile, fallback_workspace: Path) -> Path:
         """Resolve effective workspace path for a profile."""
         if profile.workspace and profile.workspace.strip().lower() != "inherit":
+            rel_candidate = (fallback_workspace / profile.workspace.strip()).resolve()
+            if rel_candidate.exists() and rel_candidate.is_dir():
+                return rel_candidate
             return config.resolve_repo_path(profile.workspace.strip())
         return fallback_workspace
 

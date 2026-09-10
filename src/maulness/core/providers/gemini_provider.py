@@ -29,10 +29,11 @@ class GeminiProvider(BaseProvider):
         on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
         on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
     ) -> str:
-        api_key = self.profile.get_api_key() or config.gemini_api_key
+        api_key = self.profile.get_api_key() or config.gemini_api_key or os.getenv("GOOGLE_API_KEY")
         if not api_key:
             import shutil
-            if shutil.which(config.agy_cmd[0]):
+            # Only fall back to ACP if this profile actually has command configured
+            if self.profile.command and shutil.which(self.profile.command.split()[0]):
                 from maulness.core.providers.acp_provider import AcpProvider
                 fallback_provider = AcpProvider(self.profile)
                 return await fallback_provider.run(
@@ -48,7 +49,7 @@ class GeminiProvider(BaseProvider):
                 )
             raise ValueError(
                 f"Missing API key for profile '{self.profile.name}'. "
-                f"Set {self.profile.api_key_env or 'GEMINI_API_KEY'} in ~/.config/maulness/env"
+                f"Set {self.profile.api_key_env or 'GEMINI_API_KEY or GOOGLE_API_KEY'} in ~/.config/maulness/env or profile .env"
             )
 
         client = genai.Client(api_key=api_key)
