@@ -196,8 +196,8 @@ class ProfileManager:
             if not isinstance(data, dict):
                 return None
 
-            if "name" not in data:
-                data["name"] = profile_dir.name
+            # Directory name is the canonical profile identifier
+            data["name"] = profile_dir.name
 
             soul_content = None
             soul_file = profile_dir / "SOUL.md"

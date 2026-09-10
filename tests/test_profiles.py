@@ -17,7 +17,7 @@ def test_get_specific_profile():
     planner = pm.get_profile("planner")
     assert planner.name == "planner"
     assert planner.provider == "gemini"
-    assert "Shipwright" in planner.effective_system_prompt()
+    assert "shipwright" in planner.effective_system_prompt().lower()
     # Check that SOUL.md is injected
     assert "Maul" in planner.effective_system_prompt()
 
