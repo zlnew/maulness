@@ -266,14 +266,19 @@ class MaulnessBot(commands.Bot):
         """Execute a conversational chat prompt in Discord and stream the response."""
         self.total_prompts += 1
         target_profile = profile or self.bound_profile
-        status_msg = await channel.send(f"💭 **{target_profile.name}** is thinking...\n> {prompt[:100]}")
+        current_msg = await channel.send(f"💭 **{target_profile.name}** is thinking...\n> {prompt[:100]}")
+        active_msgs = [current_msg]
 
-        async def flush_chunk(text: str, is_final: bool):
+        async def flush_chunk(text: str, is_final: bool, is_overflow: bool = False):
+            nonlocal current_msg
             if not text.strip():
                 return
             try:
                 display_text = text if len(text) <= 1950 else text[:1950] + "…"
-                await status_msg.edit(content=display_text)
+                await current_msg.edit(content=display_text)
+                if is_overflow and not is_final:
+                    current_msg = await channel.send("…")
+                    active_msgs.append(current_msg)
             except Exception as e:
                 logger.debug("Failed to edit Discord message: %s", e)
 
@@ -1035,6 +1040,16 @@ class MaulnessBot(commands.Bot):
                     inline=False,
                 )
             await interaction.response.send_message(embed=embed)
+
+        @profile_cmd.autocomplete("name")
+        async def profile_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+            profiles = self.profile_manager.list_profiles()
+            choices = []
+            for p in profiles:
+                if not current or current.lower() in p.name.lower():
+                    label = f"{p.name} ({p.provider})"
+                    choices.append(app_commands.Choice(name=label[:100], value=p.name))
+            return choices[:25]
 
         REPO_CHOICES = [
             app_commands.Choice(name="expense-tracker", value="expense-tracker"),

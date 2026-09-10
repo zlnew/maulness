@@ -249,12 +249,12 @@ async def test_profile_workspace_configuration():
 
     pm = ProfileManager()
     # Profile with inherit workspace
-    p_inherit = Profile(name="p_inherit", workspace="inherit")
+    p_inherit = Profile(name="p_inherit", command="agy", workspace="inherit")
     resolved_inherit = pm.resolve_workspace_for_profile(p_inherit, Path("/home/zlnew/www/personal"))
     assert resolved_inherit == Path("/home/zlnew/www/personal")
 
     # Profile with specific workspace repo
-    p_custom = Profile(name="p_custom", workspace="repo/expense-tracker")
+    p_custom = Profile(name="p_custom", command="agy", workspace="repo/expense-tracker")
     resolved_custom = pm.resolve_workspace_for_profile(p_custom, Path("/home/zlnew/www/personal"))
     assert resolved_custom.name == "expense-tracker"
 

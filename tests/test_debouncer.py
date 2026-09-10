@@ -51,3 +51,52 @@ async def test_debouncer_chunks_large_text():
     await debouncer.close()
 
     assert len(flushed_chunks) >= 2
+
+
+def test_balance_code_blocks():
+    from maulness.core.debouncer import balance_code_blocks
+
+    # Balanced remains unchanged
+    text = "Here is some code:\n```python\nprint('hello')\n```\nDone."
+    closed, reopen = balance_code_blocks(text)
+    assert closed == text
+    assert reopen == ""
+
+    # Single unclosed block gets closed
+    unclosed = "Here is unclosed:\n```python\nprint('hello')"
+    closed, reopen = balance_code_blocks(unclosed)
+    assert closed.endswith("\n```")
+    assert closed.count("```") == 2
+    assert reopen == "```python\n"
+
+    # Multiple blocks with odd count
+    multi_unclosed = "```bash\necho 1\n```\nSome text\n```python\nx = 1"
+    closed, reopen = balance_code_blocks(multi_unclosed)
+    assert closed.endswith("\n```")
+    assert closed.count("```") == 4
+    assert reopen == "```python\n"
+
+
+@pytest.mark.asyncio
+async def test_debouncer_overflow_triggers_callback():
+    overflow_chunks = []
+    normal_flushes = []
+
+    async def flush_cb(text: str, is_final: bool, is_overflow: bool = False):
+        if is_overflow:
+            overflow_chunks.append(text)
+        else:
+            normal_flushes.append(text)
+
+    debouncer = MessageStreamDebouncer(
+        flush_callback=flush_cb,
+        interval_seconds=0.01,
+        max_chunk_size=50,
+    )
+
+    # Write enough text to cause an overflow
+    await debouncer.write("Chunk 1: " + "a" * 60 + "\n")
+    await asyncio.sleep(0.03)
+
+    assert len(overflow_chunks) >= 1
+    await debouncer.close()

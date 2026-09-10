@@ -16,11 +16,23 @@ def _instantiate_single_provider(profile: Profile) -> BaseProvider:
         return AntigravitySdkProvider(profile)
     elif provider_name == "gemini":
         return GeminiProvider(profile)
-    elif provider_name in ("openai", "anthropic", "openrouter"):
+    elif provider_name in (
+        "openai",
+        "anthropic",
+        "openrouter",
+        "opencode",
+        "opencode_go",
+        "opencode_zen",
+        "deepseek",
+        "ollama",
+        "openai_compatible",
+    ):
         return UnifiedApiProvider(profile)
     else:
         if profile.command:
             return AcpProvider(profile)
+        if profile.base_url:
+            return UnifiedApiProvider(profile)
         return GeminiProvider(profile)
 
 
@@ -33,10 +45,23 @@ def get_provider_for_profile(profile: Profile) -> BaseProvider:
 
     fallback_providers: list[BaseProvider] = []
     for fb in profile.fallbacks:
-        fb_dict = fb if isinstance(fb, dict) else {"provider": str(fb)}
-        fb_profile_data = profile.model_dump(mode="python", exclude={"fallbacks"})
-        fb_profile_data.update(fb_dict)
-        fb_profile = Profile(**fb_profile_data)
+        fb_dict = fb.model_dump(exclude_none=True) if hasattr(fb, "model_dump") else (fb if isinstance(fb, dict) else {"provider": str(fb)})
+        fb_profile = profile.model_copy(deep=True)
+        fb_profile.resilience.fallbacks = []
+
+        if "provider" in fb_dict and fb_dict["provider"]:
+            fb_profile.model_cfg.provider = fb_dict["provider"]
+        target_model = fb_dict.get("model") or fb_dict.get("name")
+        if target_model:
+            fb_profile.model_cfg.name = target_model
+            fb_profile.identity.name = f"{profile.name}-{target_model}"
+        if "base_url" in fb_dict and fb_dict["base_url"]:
+            fb_profile.model_cfg.base_url = fb_dict["base_url"]
+        if "api_key_env" in fb_dict and fb_dict["api_key_env"]:
+            fb_profile.model_cfg.api_key_env = fb_dict["api_key_env"]
+        if "command" in fb_dict and fb_dict["command"]:
+            fb_profile.model_cfg.command = fb_dict["command"]
+
         fallback_providers.append(_instantiate_single_provider(fb_profile))
 
     return FallbackProviderChain(primary=primary, fallbacks=fallback_providers)

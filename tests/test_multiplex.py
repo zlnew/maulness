@@ -31,6 +31,7 @@ def test_bot_profile_binding(tmp_path):
     prof = Profile(
         name="office-bot",
         provider="acp",
+        command="agy",
         env_vars={
             "DISCORD_BOT_TOKEN": "test_office_token_xyz",
             "OWNER_DISCORD_ID": "123456789",
@@ -49,16 +50,19 @@ def test_bot_multi_profile_channel_routing(tmp_path):
     prof_default = Profile(
         name="default",
         provider="acp",
+        command="agy",
         env_vars={"DISCORD_HOME_CHANNEL": "1001", "DISCORD_BOT_TOKEN": "tok1"},
     )
     prof_life = Profile(
         name="life",
         provider="acp",
+        command="agy",
         env_vars={"DISCORD_HOME_CHANNEL": "2002", "DISCORD_BOT_TOKEN": "tok1"},
     )
     prof_research = Profile(
         name="research",
         provider="acp",
+        command="agy",
         env_vars={"DISCORD_HOME_CHANNEL": "3003", "DISCORD_BOT_TOKEN": "tok1"},
     )
     bot = MaulnessBot(storage=storage, profiles=[prof_default, prof_life, prof_research])

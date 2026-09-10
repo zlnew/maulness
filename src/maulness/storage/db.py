@@ -27,17 +27,20 @@ class StorageManager:
 
     @asynccontextmanager
     async def _connect(self):
-        """Yield an aiosqlite connection with foreign keys enabled."""
+        """Yield an aiosqlite connection with foreign keys, WAL mode, and busy timeout enabled."""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA foreign_keys = ON;")
+            await db.execute("PRAGMA busy_timeout = 5000;")
             yield db
 
     async def initialize(self):
-        """Ensure parent directories exist and execute SQLite DDL schema."""
+        """Ensure parent directories exist, configure WAL mode, and execute SQLite DDL schema."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
 
         async with self._connect() as db:
+            await db.execute("PRAGMA journal_mode = WAL;")
+            await db.execute("PRAGMA synchronous = NORMAL;")
             await db.executescript(schema_sql)
             await db.commit()
 

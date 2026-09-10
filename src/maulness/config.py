@@ -42,14 +42,21 @@ class Config:
         # Gemini API Key (Optional)
         self.gemini_api_key: Optional[str] = os.getenv("GEMINI_API_KEY")
 
-        # Antigravity binary command
-        self.agy_cmd: list[str] = os.getenv("AGY_CMD", "agy").split()
+        # Streaming & Execution Watchdog
+        self.stream_idle_timeout_seconds: float = float(
+            os.getenv("STREAM_IDLE_TIMEOUT_SECONDS", "180.0")
+        )
 
         # Gateway Multiplexing (Hermes-style)
         self.gateway_multiplex_profiles: bool = False
         self.gateway_multiplex_profile_allowlist: list[str] = []
         self.gateway_profile_routes: list[dict] = []
         self._load_yaml_config()
+
+    @property
+    def agy_cmd(self) -> list[str]:
+        """Backward-compatible default CLI binary token list."""
+        return os.getenv("AGY_CMD", "agy").split()
 
     def _load_yaml_config(self) -> None:
         """Load optional root configuration from ~/.config/maulness/config.yaml or config.yml."""
@@ -61,6 +68,24 @@ class Config:
                 import yaml
                 data = yaml.safe_load(cfg_yaml.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
+                    # Workspace group
+                    ws = data.get("workspace", {})
+                    if isinstance(ws, dict) and "root" in ws:
+                        self.workspace_root = Path(ws["root"]).expanduser().resolve()
+                        self.repo_dir = self.workspace_root / "repo"
+
+                    # Storage group
+                    storage = data.get("storage", {})
+                    if isinstance(storage, dict) and "db_path" in storage:
+                        self.db_path = Path(storage["db_path"]).expanduser().resolve()
+
+                    # Execution group
+                    exec_cfg = data.get("execution", {})
+                    if isinstance(exec_cfg, dict):
+                        if "stream_idle_timeout_seconds" in exec_cfg:
+                            self.stream_idle_timeout_seconds = float(exec_cfg["stream_idle_timeout_seconds"])
+
+                    # Gateway group
                     gw = data.get("gateway", {})
                     if isinstance(gw, dict):
                         self.gateway_multiplex_profiles = bool(gw.get("multiplex_profiles", False))

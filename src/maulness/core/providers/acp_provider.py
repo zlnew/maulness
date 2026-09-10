@@ -37,7 +37,9 @@ class AcpProvider(BaseProvider):
         on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
         on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
     ) -> str:
-        cmd_tokens = self.profile.command.split() if self.profile.command else config.agy_cmd
+        if not self.profile.command or not self.profile.command.strip():
+            raise ValueError(f"Profile '{self.profile.name}' specifies provider 'acp' but has no 'command' configured in config.yaml")
+        cmd_tokens = self.profile.command.split()
         cwd = str(workspace_path) if workspace_path else str(config.workspace_root)
 
         binary = cmd_tokens[0]
@@ -111,9 +113,22 @@ class AcpProvider(BaseProvider):
         accumulated: list[str] = []
         assert proc.stdout is not None
 
+        idle_timeout = config.stream_idle_timeout_seconds
         try:
             while True:
-                line_bytes = await proc.stdout.readline()
+                try:
+                    line_bytes = await asyncio.wait_for(proc.stdout.readline(), timeout=idle_timeout)
+                except asyncio.TimeoutError:
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                        await proc.wait()
+                    raise TimeoutError(
+                        f"Antigravity stream idle watchdog triggered: no output received for {int(idle_timeout)}s"
+                    )
+
                 if not line_bytes:
                     break
 

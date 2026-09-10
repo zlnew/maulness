@@ -7,9 +7,40 @@ from maulness.core.providers.gemini_provider import GeminiProvider
 
 
 def test_provider_factory_acp():
-    profile = Profile(name="builder", provider="acp")
+    profile = Profile(name="builder", provider="acp", command="agy")
     provider = get_provider_for_profile(profile)
     assert isinstance(provider, AcpProvider)
+
+
+def test_provider_factory_acp_missing_command_raises():
+    with pytest.raises(ValueError, match="specifies provider 'acp' but has no 'command'"):
+        Profile(name="invalid_builder", provider="acp")
+
+
+def test_provider_factory_opencode_go():
+    profile = Profile(
+        name="cheap_coder",
+        provider="opencode_go",
+        model="minimax-01",
+        env_vars={"OPENCODE_API_KEY": "test_key"},
+    )
+    provider = get_provider_for_profile(profile)
+    assert isinstance(provider, UnifiedApiProvider)
+    assert provider.base_url == "https://api.opencode.ai/v1"
+    assert provider.api_key == "test_key"
+
+
+def test_provider_factory_custom_base_url():
+    profile = Profile(
+        name="local_llm",
+        provider="openai_compatible",
+        model="llama3",
+        base_url="http://localhost:11434/v1",
+        env_vars={"OPENAI_API_KEY": "dummy"},
+    )
+    provider = get_provider_for_profile(profile)
+    assert isinstance(provider, UnifiedApiProvider)
+    assert provider.base_url == "http://localhost:11434/v1"
 
 
 def test_provider_factory_gemini():
@@ -28,14 +59,22 @@ def test_provider_factory_fallback_chain():
     profile = Profile(
         name="resilient",
         provider="gemini",
-        fallbacks=[{"provider": "anthropic", "model": "claude-3-5-sonnet"}],
+        fallbacks=[
+            {
+                "provider": "anthropic",
+                "model": "claude-3-5-sonnet",
+                "base_url": "https://api.anthropic.com/v1",
+            }
+        ],
     )
     provider = get_provider_for_profile(profile)
     from maulness.core.providers.fallback import FallbackProviderChain
+
     assert isinstance(provider, FallbackProviderChain)
     assert len(provider.fallbacks) == 1
     assert isinstance(provider.primary, GeminiProvider)
     assert isinstance(provider.fallbacks[0], UnifiedApiProvider)
+    assert provider.fallbacks[0].base_url == "https://api.anthropic.com/v1"
 
 
 @pytest.mark.asyncio

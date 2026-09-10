@@ -67,7 +67,18 @@ class GeminiProvider(BaseProvider):
             config=gen_config,
         )
 
-        async for chunk in response_stream:
+        idle_timeout = config.stream_idle_timeout_seconds
+        stream_iter = response_stream.__aiter__()
+        while True:
+            try:
+                chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=idle_timeout)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                raise TimeoutError(
+                    f"Gemini stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
+                )
+
             # Check for thinking parts if present
             if hasattr(chunk, "candidates") and chunk.candidates:
                 for cand in chunk.candidates:

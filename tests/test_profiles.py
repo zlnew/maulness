@@ -64,6 +64,7 @@ def test_soul_params_interpolation():
     profile = Profile(
         name="orchestrator",
         provider="acp",
+        command="agy",
         workspace="personal",
         soul_params={"role": "Vice-Captain", "captain": "Maul", "fleet": "Grand Fleet"},
         soul_content="Ye be Silvers Rayleigh, {{role}} of {{captain}}'s {fleet}. Acting in {workspace}.",
@@ -71,6 +72,50 @@ def test_soul_params_interpolation():
     prompt = profile.effective_system_prompt()
     assert "Vice-Captain of Maul's Grand Fleet" in prompt
     assert "Acting in personal" in prompt
+
+
+def test_grouped_yaml_profile_loading(tmp_path):
+    prof_dir = tmp_path / "grouped_bot"
+    prof_dir.mkdir()
+    grouped_yaml = """
+identity:
+  name: grouped_bot
+  description: "Grouped bot test"
+  system_prompt: "You are grouped."
+model:
+  provider: opencode_zen
+  name: gpt-4o
+  base_url: https://api.opencode.ai/v1
+  vertex:
+    enabled: false
+parameters:
+  temperature: 0.3
+  max_tokens: 2048
+execution:
+  workspace: inherit
+  yolo: true
+resilience:
+  fallbacks:
+    - provider: gemini
+      model: gemini-2.5-flash
+"""
+    (prof_dir / "config.yaml").write_text(grouped_yaml, encoding="utf-8")
+
+    pm = ProfileManager(profiles_dir=tmp_path)
+    p = pm.get_profile("grouped_bot")
+
+    assert p.name == "grouped_bot"
+    assert p.provider == "opencode_zen"
+    assert p.model == "gpt-4o"
+    assert p.base_url == "https://api.opencode.ai/v1"
+    assert p.temperature == 0.3
+    assert p.max_tokens == 2048
+    assert p.yolo is True
+    assert len(p.fallbacks) == 1
+    assert p.fallbacks[0]["provider"] == "gemini"
+    assert p.fallbacks[0]["model"] == "gemini-2.5-flash"
+    assert p.resilience.fallbacks[0].provider == "gemini"
+    assert p.resilience.fallbacks[0].model == "gemini-2.5-flash"
 
 
 def test_standard_api_key_resolution_without_api_key_env():

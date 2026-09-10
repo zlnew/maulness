@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Optional
 from dotenv import dotenv_values
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from maulness.config import config
 from maulness.core.skills import SkillManager
@@ -16,49 +16,288 @@ USER_PROFILES_DIR = config.config_dir / "profiles"
 TEMPLATE_PROFILES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "templates" / "profiles"
 
 
-class Profile(BaseModel):
-    name: str
+class IdentityConfig(BaseModel):
+    name: str = "default"
     description: str = ""
-    provider: str = "acp"  # acp, antigravity_sdk, gemini, anthropic, openai, openrouter
-    model: Optional[str] = None
-    api_key_env: Optional[str] = None  # Deprecated legacy field, optional for backwards compatibility
-    temperature: float = 0.7
-    max_tokens: int = 4096
-    command: Optional[str] = None  # ACP command (e.g. "agy")
-    inject_soul: bool = True
-    soul_params: dict[str, Any] = Field(default_factory=dict)
     system_prompt: str = ""
-    workspace: Optional[str] = None  # Per-profile workspace directory or repo name
-    vertex: bool = False
-    project: Optional[str] = None  # Google Cloud Project ID (Vertex AI)
+    soul_inject: bool = True
+    soul_params: dict[str, Any] = Field(default_factory=dict)
+
+
+class VertexConfig(BaseModel):
+    enabled: bool = True
+    project: Optional[str] = None
     location: Optional[str] = "us-central1"
 
-    # Hermes Directory-based attributes
+
+class ModelConfig(BaseModel):
+    provider: str = "acp"
+    name: Optional[str] = None  # target model identifier
+    base_url: Optional[str] = None  # custom endpoint (e.g. OpenCode, Ollama, DeepSeek)
+    api_key_env: Optional[str] = None
+    command: Optional[str] = None  # CLI command for ACP (e.g. "agy", "opencode run")
+    vertex: Optional[VertexConfig] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_model_alias(cls, data: Any) -> Any:
+        if isinstance(data, str):
+            return {"name": data}
+        if isinstance(data, dict):
+            if "model" in data and "name" not in data:
+                data["name"] = data.pop("model")
+        return data
+
+
+class ParameterConfig(BaseModel):
+    temperature: float = 0.7
+    max_tokens: int = 4096
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+
+
+class ExecutionConfig(BaseModel):
+    workspace: Optional[str] = None
+    yolo: bool = False
+    rate_limit_per_minute: int = 20
+    system_prompt_mode: str = "prepend"
+
+
+class FallbackItem(BaseModel):
+    provider: str
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key_env: Optional[str] = None
+    command: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+
+
+class ResilienceConfig(BaseModel):
+    fallbacks: list[FallbackItem] = Field(default_factory=list)
+
+
+class Profile(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    identity: IdentityConfig
+    model_cfg: ModelConfig = Field(default_factory=ModelConfig, alias="model")
+    parameters: ParameterConfig = Field(default_factory=ParameterConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
+
+    # Hermes Directory-based attributes (loaded dynamically)
     profile_dir: Optional[Path] = None
     soul_content: Optional[str] = None
     memory_content: Optional[str] = None
     user_content: Optional[str] = None
-    fallbacks: list[dict[str, Any]] = Field(default_factory=list)
     env_vars: dict[str, str] = Field(default_factory=dict)
     skills_dir: Optional[Path] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_config_structure(cls, data: Any) -> Any:
+        """Transparently accepts both new grouped YAML and legacy flat YAML."""
+        if not isinstance(data, dict):
+            return data
+
+        # Check if already using the new grouped structure
+        if "identity" in data and isinstance(data["identity"], (dict, IdentityConfig)):
+            # Normalize vertex if passed as flat inside model or top-level
+            if "cloud" in data and isinstance(data["cloud"], dict):
+                cloud_data = data["cloud"]
+                if "model" in data and isinstance(data["model"], dict):
+                    data["model"]["vertex"] = {
+                        "enabled": cloud_data.get("vertex", True),
+                        "project": cloud_data.get("project"),
+                        "location": cloud_data.get("location", "us-central1"),
+                    }
+            return data
+
+        # Otherwise, dynamically reshape flat legacy keys into structured groups
+        vertex_cfg = None
+        if data.get("vertex") or data.get("project"):
+            vertex_cfg = {
+                "enabled": bool(data.get("vertex", True)),
+                "project": data.get("project"),
+                "location": data.get("location", "us-central1"),
+            }
+
+        fallbacks_raw = data.get("fallbacks", [])
+        fallbacks = []
+        for fb in fallbacks_raw:
+            if isinstance(fb, dict):
+                fallbacks.append(fb)
+            elif isinstance(fb, str):
+                fallbacks.append({"provider": fb})
+
+        return {
+            "identity": {
+                "name": data.get("name", "default"),
+                "description": data.get("description", ""),
+                "system_prompt": data.get("system_prompt", ""),
+                "soul_inject": data.get("soul_inject", data.get("inject_soul", True)),
+                "soul_params": data.get("soul_params", {}),
+            },
+            "model": {
+                "provider": data.get("provider", "acp"),
+                "name": data.get("model") or data.get("model_name"),
+                "base_url": data.get("base_url"),
+                "api_key_env": data.get("api_key_env"),
+                "command": data.get("command"),
+                "vertex": vertex_cfg,
+            },
+            "parameters": {
+                "temperature": data.get("temperature", 0.7),
+                "max_tokens": data.get("max_tokens", 4096),
+                "top_p": data.get("top_p"),
+                "top_k": data.get("top_k"),
+            },
+            "execution": {
+                "workspace": data.get("workspace"),
+                "yolo": data.get("yolo", False),
+                "worktree": data.get("worktree", False),
+            },
+            "resilience": {
+                "fallbacks": fallbacks,
+            },
+            # Preserve runtime fields
+            "profile_dir": data.get("profile_dir"),
+            "soul_content": data.get("soul_content"),
+            "memory_content": data.get("memory_content"),
+            "user_content": data.get("user_content"),
+            "env_vars": data.get("env_vars", {}),
+            "skills_dir": data.get("skills_dir"),
+        }
+
+    @model_validator(mode="after")
+    def _validate_acp_command(self) -> "Profile":
+        """Enforce explicit command requirement for ACP provider."""
+        if self.model_cfg.provider.lower().strip() == "acp" and not (self.model_cfg.command and self.model_cfg.command.strip()):
+            raise ValueError(
+                f"Profile '{self.name}' specifies provider 'acp' but has no 'command' configured in config.yaml"
+            )
+        return self
+
+    # --------------------------------------------------------------------------
+    # Backward-Compatible Properties (Existing code continues to work seamlessly)
+    # --------------------------------------------------------------------------
+    @property
+    def name(self) -> str:
+        return self.identity.name
+
+    @property
+    def description(self) -> str:
+        return self.identity.description
+
+    @property
+    def system_prompt(self) -> str:
+        return self.identity.system_prompt
+
+    @property
+    def inject_soul(self) -> bool:
+        return self.identity.soul_inject
+
+    @property
+    def soul_params(self) -> dict[str, Any]:
+        return self.identity.soul_params
+
+    @property
+    def provider(self) -> str:
+        return self.model_cfg.provider
+
+    @property
+    def model(self) -> Optional[str]:
+        return self.model_cfg.name
+
+    @property
+    def model_name(self) -> Optional[str]:
+        return self.model_cfg.name
+
+    @property
+    def base_url(self) -> Optional[str]:
+        return self.model_cfg.base_url
+
+    @property
+    def api_key_env(self) -> Optional[str]:
+        return self.model_cfg.api_key_env
+
+    @property
+    def command(self) -> Optional[str]:
+        return self.model_cfg.command
+
+    @property
+    def vertex(self) -> bool:
+        return bool(self.model_cfg.vertex and self.model_cfg.vertex.enabled)
+
+    @property
+    def project(self) -> Optional[str]:
+        return self.model_cfg.vertex.project if self.model_cfg.vertex else None
+
+    @property
+    def location(self) -> Optional[str]:
+        return self.model_cfg.vertex.location if self.model_cfg.vertex else "us-central1"
+
+    @property
+    def temperature(self) -> float:
+        return self.parameters.temperature
+
+    @property
+    def max_tokens(self) -> int:
+        return self.parameters.max_tokens
+
+    @property
+    def top_p(self) -> Optional[float]:
+        return self.parameters.top_p
+
+    @property
+    def top_k(self) -> Optional[int]:
+        return self.parameters.top_k
+
+    @property
+    def workspace(self) -> Optional[str]:
+        return self.execution.workspace
+
+    @property
+    def yolo(self) -> bool:
+        return self.execution.yolo
+
+    @property
+    def worktree(self) -> bool:
+        return self.execution.worktree
+
+    @property
+    def fallbacks(self) -> list[dict[str, Any]]:
+        return [f.model_dump(exclude_none=True) for f in self.resilience.fallbacks]
+
     def get_api_key(self) -> Optional[str]:
         """Fetch API key prioritizing profile-specific .env, then system environment."""
-        # Provider-to-env-var standard mapping
         std_key_names = {
             "gemini": "GEMINI_API_KEY",
             "antigravity_sdk": "GEMINI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
             "openai": "OPENAI_API_KEY",
             "openrouter": "OPENROUTER_API_KEY",
+            "opencode": "OPENCODE_API_KEY",
+            "opencode_go": "OPENCODE_API_KEY",
+            "opencode_zen": "OPENCODE_API_KEY",
+            "deepseek": "DEEPSEEK_API_KEY",
         }
-        key_name = self.api_key_env or std_key_names.get(self.provider)
+        prov = self.provider.lower().strip()
+        key_name = self.api_key_env or std_key_names.get(prov)
 
         # 1. Check profile-specific .env
         if key_name and key_name in self.env_vars:
             return self.env_vars[key_name]
-        for candidate in ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
-            if candidate in self.env_vars and self.provider in candidate.lower():
+        for candidate in (
+            "OPENCODE_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "GEMINI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+        ):
+            if candidate in self.env_vars and prov in candidate.lower():
                 return self.env_vars[candidate]
 
         # 2. Check system environment
@@ -66,6 +305,10 @@ class Profile(BaseModel):
             val = os.getenv(key_name)
             if val:
                 return val
+
+        # 3. Generic fallback for OpenAI-compatible providers
+        if prov in ("openai_compatible", "opencode", "opencode_go", "opencode_zen"):
+            return os.getenv("OPENCODE_API_KEY") or os.getenv("OPENAI_API_KEY")
 
         return None
 
