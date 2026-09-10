@@ -51,7 +51,7 @@ def get_provider_for_profile(profile: Profile) -> BaseProvider:
 
         if "provider" in fb_dict and fb_dict["provider"]:
             fb_profile.agent_cfg.provider = fb_dict["provider"]
-        target_model = fb_dict.get("model") or fb_dict.get("name")
+        target_model = fb_dict.get("model")
         if target_model:
             fb_profile.agent_cfg.model = target_model
             fb_profile.identity.name = f"{profile.name}-{target_model}"

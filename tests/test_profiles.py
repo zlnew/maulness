@@ -40,7 +40,7 @@ def test_fallback_profile():
 def test_directory_profile_loading(tmp_path):
     prof_dir = tmp_path / "custom"
     prof_dir.mkdir()
-    (prof_dir / "config.yaml").write_text("name: custom\nprovider: gemini\nmodel: gemini-2.5-flash", encoding="utf-8")
+    (prof_dir / "config.yaml").write_text("identity:\n  name: custom\nagent:\n  provider: gemini\n  model: gemini-2.5-flash", encoding="utf-8")
     (prof_dir / "SOUL.md").write_text("# Custom Doctrine\nBe extremely fast.", encoding="utf-8")
     (prof_dir / ".env").write_text("GEMINI_API_KEY=test_custom_key_123\n", encoding="utf-8")
 
@@ -62,11 +62,12 @@ def test_directory_profile_loading(tmp_path):
 
 def test_soul_params_interpolation():
     profile = Profile(
-        name="orchestrator",
-        provider="acp",
-        command="agy",
-        workspace="personal",
-        soul_params={"role": "Vice-Captain", "captain": "Maul", "fleet": "Grand Fleet"},
+        identity={
+            "name": "orchestrator",
+            "soul_params": {"role": "Vice-Captain", "captain": "Maul", "fleet": "Grand Fleet"},
+        },
+        agent={"provider": "acp", "command": "agy"},
+        execution={"workspace": "personal"},
         soul_content="Ye be Silvers Rayleigh, {{role}} of {{captain}}'s {fleet}. Acting in {workspace}.",
     )
     prompt = profile.effective_system_prompt()
@@ -125,8 +126,8 @@ resilience:
 
 def test_standard_api_key_resolution_without_api_key_env():
     profile = Profile(
-        name="claude-dev",
-        provider="anthropic",
+        identity={"name": "claude-dev"},
+        agent={"provider": "anthropic"},
         env_vars={"ANTHROPIC_API_KEY": "sk-ant-test-123"},
     )
     assert profile.get_api_key() == "sk-ant-test-123"
@@ -135,7 +136,7 @@ def test_standard_api_key_resolution_without_api_key_env():
 def test_dual_target_memory_loading_and_injection(tmp_path):
     prof_dir = tmp_path / "memory_bot"
     prof_dir.mkdir()
-    (prof_dir / "config.yaml").write_text("name: memory_bot\nprovider: gemini\nmodel: gemini-2.5-flash", encoding="utf-8")
+    (prof_dir / "config.yaml").write_text("identity:\n  name: memory_bot\nagent:\n  provider: gemini\n  model: gemini-2.5-flash", encoding="utf-8")
     (prof_dir / "SOUL.md").write_text("# Persona\nI am helpful.", encoding="utf-8")
     (prof_dir / "USER.md").write_text("# User Style\nMaul prefers concise bullet points.", encoding="utf-8")
     (prof_dir / "MEMORY.md").write_text("# Workspace Memory\nDocker port 8000 is used by expense-tracker.", encoding="utf-8")
@@ -153,13 +154,10 @@ def test_dual_target_memory_loading_and_injection(tmp_path):
     assert "Docker port 8000 is used by expense-tracker" in effective
 
 
-def test_reasoning_effort_flat_yaml():
-    """Legacy flat YAML with reasoning_effort key is normalized correctly."""
+def test_reasoning_effort_config():
     p = Profile(
-        name="thinker",
-        provider="gemini",
-        model="gemini-2.5-pro",
-        reasoning_effort="high",
+        identity={"name": "thinker"},
+        agent={"provider": "gemini", "model": "gemini-2.5-pro", "reasoning_effort": "high"},
     )
     assert p.reasoning_effort == "high"
     assert p.agent_cfg.reasoning_effort == "high"
@@ -167,30 +165,8 @@ def test_reasoning_effort_flat_yaml():
 
 def test_reasoning_effort_defaults_to_none():
     """Profile without reasoning_effort defaults to None."""
-    p = Profile(name="gemini-bot", provider="gemini")
+    p = Profile(identity={"name": "gemini-bot"}, agent={"provider": "gemini"})
     assert p.reasoning_effort is None
-
-
-def test_legacy_model_block_migrates_to_agent(tmp_path):
-    """Old-style 'model:' block in grouped YAML is transparently migrated to 'agent:'."""
-    prof_dir = tmp_path / "legacy_grouped"
-    prof_dir.mkdir()
-    old_yaml = """
-identity:
-  name: legacy_grouped
-  description: "Legacy grouped profile"
-model:
-  provider: gemini
-  name: gemini-2.5-pro
-parameters:
-  temperature: 0.1
-"""
-    (prof_dir / "config.yaml").write_text(old_yaml, encoding="utf-8")
-    pm = ProfileManager(profiles_dir=tmp_path)
-    p = pm.get_profile("legacy_grouped")
-    assert p.provider == "gemini"
-    assert p.model == "gemini-2.5-pro"
-    assert p.temperature == 0.1
 
 
 def test_fallback_reasoning_effort_propagated():
@@ -199,16 +175,17 @@ def test_fallback_reasoning_effort_propagated():
     from maulness.core.providers.fallback import FallbackProviderChain
 
     profile = Profile(
-        name="smart-gemini",
-        provider="gemini",
-        reasoning_effort="high",
-        fallbacks=[
-            {
-                "provider": "anthropic",
-                "model": "claude-3-7-sonnet-20250219",
-                "reasoning_effort": "medium",
-            }
-        ],
+        identity={"name": "smart-gemini"},
+        agent={"provider": "gemini", "reasoning_effort": "high"},
+        resilience={
+            "fallbacks": [
+                {
+                    "provider": "anthropic",
+                    "model": "claude-3-7-sonnet-20250219",
+                    "reasoning_effort": "medium",
+                }
+            ]
+        },
     )
     provider = get_provider_for_profile(profile)
     assert isinstance(provider, FallbackProviderChain)

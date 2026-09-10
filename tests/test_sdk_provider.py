@@ -9,7 +9,7 @@ from maulness.core.providers.sdk_provider import AntigravitySdkProvider
 
 
 def test_sdk_provider_factory():
-    profile = Profile(name="sdk_agent", provider="antigravity_sdk", model="gemini-2.5-flash")
+    profile = Profile(identity={"name": "sdk_agent"}, agent={"provider": "antigravity_sdk", "model": "gemini-2.5-flash"})
     provider = get_provider_for_profile(profile)
     assert isinstance(provider, AntigravitySdkProvider)
 
@@ -17,10 +17,8 @@ def test_sdk_provider_factory():
 @pytest.mark.asyncio
 async def test_sdk_provider_run(monkeypatch):
     profile = Profile(
-        name="test_sdk",
-        provider="antigravity_sdk",
-        model="gemini-2.5-flash",
-        api_key_env="TEST_KEY",
+        identity={"name": "test_sdk"},
+        agent={"provider": "antigravity_sdk", "model": "gemini-2.5-flash", "api_key_env": "TEST_KEY"},
     )
     provider = AntigravitySdkProvider(profile)
 

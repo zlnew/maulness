@@ -42,13 +42,9 @@ class AgentConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _normalize_agent_fields(cls, data: Any) -> Any:
+    def _coerce_string(cls, data: Any) -> Any:
         if isinstance(data, str):
             return {"model": data}
-        if isinstance(data, dict):
-            # Accept legacy "name" field as "model" inside this block
-            if "name" in data and "model" not in data:
-                data["model"] = data.pop("name")
         return data
 
 
@@ -84,7 +80,7 @@ class ResilienceConfig(BaseModel):
 class Profile(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    identity: IdentityConfig
+    identity: IdentityConfig = Field(default_factory=IdentityConfig)
     agent_cfg: AgentConfig = Field(default_factory=AgentConfig, alias="agent")
     parameters: ParameterConfig = Field(default_factory=ParameterConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
@@ -98,89 +94,6 @@ class Profile(BaseModel):
     env_vars: dict[str, str] = Field(default_factory=dict)
     skills_dir: Optional[Path] = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_config_structure(cls, data: Any) -> Any:
-        """Transparently accepts new grouped YAML (agent:), old grouped (model:), and legacy flat YAML."""
-        if not isinstance(data, dict):
-            return data
-
-        # ── New grouped structure: identity: + agent: (or old model: block) ───
-        if "identity" in data and isinstance(data["identity"], (dict, IdentityConfig)):
-            # Rename legacy "model:" block → "agent:" if present
-            if "model" in data and isinstance(data["model"], dict) and "agent" not in data:
-                data["agent"] = data.pop("model")
-
-            # Normalize legacy cloud: block into agent.vertex
-            if "cloud" in data and isinstance(data["cloud"], dict):
-                cloud_data = data["cloud"]
-                agent_block = data.get("agent", {})
-                if isinstance(agent_block, dict):
-                    agent_block["vertex"] = {
-                        "enabled": cloud_data.get("vertex", True),
-                        "project": cloud_data.get("project"),
-                        "location": cloud_data.get("location", "us-central1"),
-                    }
-                    data["agent"] = agent_block
-            return data
-
-        # ── Legacy flat YAML: reshape into grouped structure ───────────────────
-        vertex_cfg = None
-        if data.get("vertex") or data.get("project"):
-            vertex_cfg = {
-                "enabled": bool(data.get("vertex", True)),
-                "project": data.get("project"),
-                "location": data.get("location", "us-central1"),
-            }
-
-        fallbacks_raw = data.get("fallbacks", [])
-        fallbacks = []
-        for fb in fallbacks_raw:
-            if isinstance(fb, dict):
-                fallbacks.append(fb)
-            elif isinstance(fb, str):
-                fallbacks.append({"provider": fb})
-
-        return {
-            "identity": {
-                "name": data.get("name", "default"),
-                "description": data.get("description", ""),
-                "system_prompt": data.get("system_prompt", ""),
-                "soul_inject": data.get("soul_inject", data.get("inject_soul", True)),
-                "soul_params": data.get("soul_params", {}),
-            },
-            "agent": {
-                "provider": data.get("provider", "acp"),
-                "model": data.get("model") or data.get("model_name"),
-                "base_url": data.get("base_url"),
-                "api_key_env": data.get("api_key_env"),
-                "command": data.get("command"),
-                "reasoning_effort": data.get("reasoning_effort"),
-                "vertex": vertex_cfg,
-            },
-            "parameters": {
-                "temperature": data.get("temperature", 0.7),
-                "max_tokens": data.get("max_tokens", 4096),
-                "top_p": data.get("top_p"),
-                "top_k": data.get("top_k"),
-            },
-            "execution": {
-                "workspace": data.get("workspace"),
-                "yolo": data.get("yolo", False),
-                "worktree": data.get("worktree", False),
-            },
-            "resilience": {
-                "fallbacks": fallbacks,
-            },
-            # Preserve runtime fields
-            "profile_dir": data.get("profile_dir"),
-            "soul_content": data.get("soul_content"),
-            "memory_content": data.get("memory_content"),
-            "user_content": data.get("user_content"),
-            "env_vars": data.get("env_vars", {}),
-            "skills_dir": data.get("skills_dir"),
-        }
-
     @model_validator(mode="after")
     def _validate_acp_command(self) -> "Profile":
         """Enforce explicit command requirement for ACP provider."""
@@ -191,7 +104,7 @@ class Profile(BaseModel):
         return self
 
     # --------------------------------------------------------------------------
-    # Backward-Compatible Properties (Existing code continues to work seamlessly)
+    # Convenience Properties
     # --------------------------------------------------------------------------
     @property
     def name(self) -> str:
@@ -219,10 +132,6 @@ class Profile(BaseModel):
 
     @property
     def model(self) -> Optional[str]:
-        return self.agent_cfg.model
-
-    @property
-    def model_name(self) -> Optional[str]:
         return self.agent_cfg.model
 
     @property
@@ -412,11 +321,12 @@ class ProfileManager:
 
         # If not found, return fallback default profile
         return Profile(
-            name=name,
-            description="Ephemeral default fallback profile",
-            provider="acp" if name in ("default", "builder") else "gemini",
-            model="gemini-2.5-flash",
-            command="agy" if name in ("default", "builder") else None,
+            identity=IdentityConfig(name=name, description="Ephemeral default fallback profile"),
+            agent=AgentConfig(
+                provider="acp" if name in ("default", "builder") else "gemini",
+                model="gemini-2.5-flash",
+                command="agy" if name in ("default", "builder") else None,
+            ),
         )
 
     def resolve_workspace_for_profile(self, profile: Profile, fallback_workspace: Path) -> Path:
@@ -426,25 +336,18 @@ class ProfileManager:
         return fallback_workspace
 
     def _discover_in_dir(self, directory: Path) -> list[Profile]:
-        """Discover directory-based profiles and fallback standalone YAML files."""
+        """Discover Hermes-style directory-based profiles (<name>/config.yaml)."""
         discovered: list[Profile] = []
         if not directory.exists() or not directory.is_dir():
             return discovered
 
         for entry in sorted(directory.iterdir()):
-            # Hermes Directory Mode: <name>/config.yaml
             if entry.is_dir():
                 config_file = entry / "config.yaml"
                 if config_file.exists():
                     p = self._load_directory_profile(entry, config_file)
                     if p:
                         discovered.append(p)
-
-            # Legacy single-file mode: <name>.yaml
-            elif entry.is_file() and entry.suffix in (".yaml", ".yml"):
-                p = self._load_file_profile(entry)
-                if p:
-                    discovered.append(p)
 
         return discovered
 
@@ -455,7 +358,7 @@ class ProfileManager:
                 return None
 
             # Directory name is the canonical profile identifier
-            data["name"] = profile_dir.name
+            data.setdefault("identity", {})["name"] = profile_dir.name
 
             soul_content = None
             soul_file = profile_dir / "SOUL.md"
@@ -501,12 +404,3 @@ class ProfileManager:
         except Exception as e:
             logger.warning("Failed to load profile from %s: %s", profile_dir, e)
             return None
-
-    def _load_file_profile(self, path: Path) -> Optional[Profile]:
-        try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return Profile(**data)
-        except Exception as e:
-            logger.warning("Failed to load profile from %s: %s", path, e)
-        return None

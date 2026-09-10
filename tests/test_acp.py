@@ -120,7 +120,10 @@ async def test_agy_stream_conversation_persistence(monkeypatch):
     from maulness.core.profiles import Profile
     from maulness.core.providers.acp_provider import AcpProvider
 
-    profile = Profile(name="builder", command="agy --output-format stream-json")
+    profile = Profile(
+        identity={"name": "builder"},
+        agent={"provider": "acp", "command": "agy --output-format stream-json"},
+    )
     provider = AcpProvider(profile)
 
     captured_cmds = []

@@ -59,10 +59,8 @@ class Config:
         return os.getenv("AGY_CMD", "agy").split()
 
     def _load_yaml_config(self) -> None:
-        """Load optional root configuration from ~/.config/maulness/config.yaml or config.yml."""
+        """Load root configuration from ~/.config/maulness/config.yaml."""
         cfg_yaml = self.config_dir / "config.yaml"
-        if not cfg_yaml.exists():
-            cfg_yaml = self.config_dir / "config.yml"
         if cfg_yaml.exists():
             try:
                 import yaml
@@ -95,8 +93,6 @@ class Config:
                         routes = gw.get("profile_routes", [])
                         if isinstance(routes, list):
                             self.gateway_profile_routes = routes
-                    elif "multiplex_profiles" in data:
-                        self.gateway_multiplex_profiles = bool(data.get("multiplex_profiles", False))
             except Exception:
                 pass
 

@@ -7,21 +7,20 @@ from maulness.core.providers.gemini_provider import GeminiProvider
 
 
 def test_provider_factory_acp():
-    profile = Profile(name="builder", provider="acp", command="agy")
+    profile = Profile(identity={"name": "builder"}, agent={"provider": "acp", "command": "agy"})
     provider = get_provider_for_profile(profile)
     assert isinstance(provider, AcpProvider)
 
 
 def test_provider_factory_acp_missing_command_raises():
     with pytest.raises(ValueError, match="specifies provider 'acp' but has no 'command'"):
-        Profile(name="invalid_builder", provider="acp")
+        Profile(identity={"name": "invalid_builder"}, agent={"provider": "acp"})
 
 
 def test_provider_factory_opencode_go():
     profile = Profile(
-        name="cheap_coder",
-        provider="opencode_go",
-        model="minimax-01",
+        identity={"name": "cheap_coder"},
+        agent={"provider": "opencode_go", "model": "minimax-01"},
         env_vars={"OPENCODE_API_KEY": "test_key"},
     )
     provider = get_provider_for_profile(profile)
@@ -32,10 +31,8 @@ def test_provider_factory_opencode_go():
 
 def test_provider_factory_custom_base_url():
     profile = Profile(
-        name="local_llm",
-        provider="openai_compatible",
-        model="llama3",
-        base_url="http://localhost:11434/v1",
+        identity={"name": "local_llm"},
+        agent={"provider": "openai_compatible", "model": "llama3", "base_url": "http://localhost:11434/v1"},
         env_vars={"OPENAI_API_KEY": "dummy"},
     )
     provider = get_provider_for_profile(profile)
@@ -44,28 +41,30 @@ def test_provider_factory_custom_base_url():
 
 
 def test_provider_factory_gemini():
-    profile = Profile(name="planner", provider="gemini")
+    profile = Profile(identity={"name": "planner"}, agent={"provider": "gemini"})
     provider = get_provider_for_profile(profile)
     assert isinstance(provider, GeminiProvider)
 
 
 def test_provider_factory_unified_api():
-    profile = Profile(name="coder", provider="anthropic")
+    profile = Profile(identity={"name": "coder"}, agent={"provider": "anthropic"})
     provider = get_provider_for_profile(profile)
     assert isinstance(provider, UnifiedApiProvider)
 
 
 def test_provider_factory_fallback_chain():
     profile = Profile(
-        name="resilient",
-        provider="gemini",
-        fallbacks=[
-            {
-                "provider": "anthropic",
-                "model": "claude-3-5-sonnet",
-                "base_url": "https://api.anthropic.com/v1",
-            }
-        ],
+        identity={"name": "resilient"},
+        agent={"provider": "gemini"},
+        resilience={
+            "fallbacks": [
+                {
+                    "provider": "anthropic",
+                    "model": "claude-3-5-sonnet",
+                    "base_url": "https://api.anthropic.com/v1",
+                }
+            ]
+        },
     )
     provider = get_provider_for_profile(profile)
     from maulness.core.providers.fallback import FallbackProviderChain
@@ -83,8 +82,8 @@ async def test_fallback_provider_chain_execution_failover():
     from maulness.core.providers.fallback import FallbackProviderChain
     from maulness.core.providers.base import BaseProvider
 
-    p1 = Profile(name="p1", provider="gemini")
-    p2 = Profile(name="p2", provider="anthropic")
+    p1 = Profile(identity={"name": "p1"}, agent={"provider": "gemini"})
+    p2 = Profile(identity={"name": "p2"}, agent={"provider": "anthropic"})
 
     mock_primary = AsyncMock(spec=BaseProvider)
     mock_primary.profile = p1
