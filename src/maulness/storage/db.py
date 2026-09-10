@@ -426,3 +426,62 @@ class StorageManager:
                 rows = await cursor.fetchall()
                 return {row[0]: row[1] for row in rows}
 
+    async def add_conversation_message(
+        self, conversation_id: str, role: str, content: str
+    ) -> int:
+        """Append a message turn (user/assistant) to conversation history."""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO conversation_messages (conversation_id, role, content)
+                VALUES (?, ?, ?)
+                """,
+                (conversation_id, role, content),
+            )
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_conversation_messages(
+        self, conversation_id: str, limit: int = 20
+    ) -> list[dict[str, str]]:
+        """Retrieve recent conversation history in chronological order."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT role, content FROM conversation_messages
+                WHERE conversation_id = ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (conversation_id, limit),
+            )
+            rows = await cursor.fetchall()
+            return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+    async def clear_conversation_messages(self, conversation_id: str) -> int:
+        """Clear message history for a conversation UUID."""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM conversation_messages WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+            await db.commit()
+            return cursor.rowcount
+
+    async def get_latest_compacted_memory(self, channel_id: int) -> Optional[str]:
+        """Retrieve the most recent compacted session summary for a channel."""
+        prefix = f"discord_{channel_id}_%"
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT summary FROM session_memories
+                WHERE session_id LIKE ? OR session_id = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (prefix, str(channel_id)),
+            )
+            row = await cursor.fetchone()
+            return row["summary"] if row else None
+
+

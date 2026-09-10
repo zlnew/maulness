@@ -1,5 +1,7 @@
 import asyncio
 import json
+import logging
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 import httpx
@@ -13,6 +15,10 @@ from maulness.core.models import (
 )
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
+from maulness.core.tools import TOOL_DEFINITIONS, execute_tool_call
+from maulness.storage.db import StorageManager
+
+logger = logging.getLogger("maulness.providers.api")
 
 
 class UnifiedApiProvider(BaseProvider):
@@ -29,9 +35,14 @@ class UnifiedApiProvider(BaseProvider):
         "ollama": "http://localhost:11434/v1/chat/completions",
     }
 
+    def __init__(self, profile: Profile, storage: Optional[StorageManager] = None):
+        super().__init__(profile)
+        self.storage = storage or StorageManager()
+        self._last_conv_id: Optional[str] = None
+
     @property
     def last_conversation_id(self) -> Optional[str]:
-        return None
+        return self._last_conv_id
 
     @property
     def base_url(self) -> Optional[str]:
@@ -72,22 +83,46 @@ class UnifiedApiProvider(BaseProvider):
                 f"Set {key_name} in ~/.config/maulness/env or profile .env"
             )
 
+        conv_id = conversation_id or str(uuid.uuid4())
+        self._last_conv_id = conv_id
+        if on_init:
+            await on_init(conv_id)
+
         if provider_type == "anthropic":
-            return await self._stream_anthropic(session_id, prompt, api_key or "", on_message, on_thought)
+            return await self._stream_anthropic(
+                session_id=session_id,
+                conv_id=conv_id,
+                prompt=prompt,
+                api_key=api_key or "",
+                on_message=on_message,
+                on_thought=on_thought,
+            )
         else:
             return await self._stream_openai_compatible(
-                provider_type, session_id, prompt, api_key or "", on_message, on_thought, on_tool_call
+                provider_type=provider_type,
+                session_id=session_id,
+                conv_id=conv_id,
+                prompt=prompt,
+                api_key=api_key or "",
+                workspace_path=workspace_path,
+                on_message=on_message,
+                on_thought=on_thought,
+                on_tool_call=on_tool_call,
+                on_approval=on_approval,
             )
 
     async def _stream_openai_compatible(
         self,
         provider_type: str,
         session_id: str,
+        conv_id: str,
         prompt: str,
         api_key: str,
-        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]],
+        workspace_path: Optional[Path] = None,
+        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
         on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
         on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
+        on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
     ) -> str:
         url = self.profile.base_url or self.BASE_URLS.get(provider_type, self.BASE_URLS["openai"])
         if not url.endswith("/chat/completions"):
@@ -108,15 +143,22 @@ class UnifiedApiProvider(BaseProvider):
         elif provider_type.startswith("opencode") or provider_type == "deepseek":
             default_model = "deepseek-ai/deepseek-coder-v3"
 
-        payload = {
+        # Multi-turn history retrieval
+        history = await self.storage.get_conversation_messages(conv_id, limit=20)
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self.profile.effective_system_prompt()}
+        ]
+        for turn in history:
+            messages.append({"role": turn["role"], "content": turn["content"]})
+        messages.append({"role": "user", "content": prompt})
+
+        payload: dict[str, Any] = {
             "model": self.profile.model or default_model,
-            "messages": [
-                {"role": "system", "content": self.profile.effective_system_prompt()},
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
             "temperature": self.profile.temperature,
             "max_tokens": self.profile.max_tokens,
             "stream": True,
+            "tools": TOOL_DEFINITIONS,
         }
         effort = self.profile.reasoning_effort
         if effort:
@@ -198,22 +240,37 @@ class UnifiedApiProvider(BaseProvider):
                                 AgentMessageEvent(delta=text_delta, session_id=session_id)
                             )
 
-        # If model only generated tool calls and no content, surface tool invocation
-        if not accumulated and captured_tool_calls:
+        # Process captured tool calls if any
+        if captured_tool_calls:
             for tc in captured_tool_calls:
-                call_name = tc.get("name", "unknown_tool")
-                call_args = tc.get("arguments", "")
-                tool_msg = f"[Tool Request: {call_name}({call_args})]"
-                accumulated.append(tool_msg)
+                call_name = tc.get("name", "").strip()
+                call_args_str = tc.get("arguments", "").strip()
+                if not call_name:
+                    continue
+                try:
+                    call_args = json.loads(call_args_str) if call_args_str else {}
+                except Exception:
+                    call_args = {"raw": call_args_str}
+
                 if on_tool_call:
                     await on_tool_call(
                         AgentToolCallEvent(
                             call_id=f"call_{call_name}",
                             tool_name=call_name,
-                            args={"raw_arguments": call_args},
+                            args=call_args,
                             session_id=session_id,
                         )
                     )
+
+                tool_result = await execute_tool_call(
+                    name=call_name,
+                    args=call_args,
+                    workspace_path=workspace_path,
+                    session_id=session_id,
+                    on_approval=on_approval,
+                )
+                tool_msg = f"\n\n⚡ **Tool Result (`{call_name}`):**\n```\n{tool_result}\n```\n"
+                accumulated.append(tool_msg)
                 if on_message:
                     await on_message(
                         AgentMessageEvent(delta=tool_msg, session_id=session_id)
@@ -225,11 +282,19 @@ class UnifiedApiProvider(BaseProvider):
                 f"Provider '{provider_type}' ({self.profile.model}) returned an empty response"
             )
 
+        # Persist conversation turn
+        try:
+            await self.storage.add_conversation_message(conv_id, "user", prompt)
+            await self.storage.add_conversation_message(conv_id, "assistant", result_text)
+        except Exception as e:
+            logger.debug("Failed to persist conversation turn: %s", e)
+
         return result_text
 
     async def _stream_anthropic(
         self,
         session_id: str,
+        conv_id: str,
         prompt: str,
         api_key: str,
         on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]],
@@ -243,10 +308,19 @@ class UnifiedApiProvider(BaseProvider):
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
+
+        # Multi-turn history retrieval
+        history = await self.storage.get_conversation_messages(conv_id, limit=20)
+        messages: list[dict[str, Any]] = []
+        for turn in history:
+            role = "assistant" if turn["role"] == "assistant" else "user"
+            messages.append({"role": role, "content": turn["content"]})
+        messages.append({"role": "user", "content": prompt})
+
         payload = {
             "model": self.profile.model or "claude-3-7-sonnet-20250219",
             "system": self.profile.effective_system_prompt(),
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "max_tokens": self.profile.max_tokens,
             "temperature": self.profile.temperature,
             "stream": True,
@@ -323,5 +397,12 @@ class UnifiedApiProvider(BaseProvider):
         result_text = "".join(accumulated).strip()
         if not result_text:
             raise RuntimeError(f"Anthropic model '{self.profile.model}' returned an empty response")
+
+        # Persist conversation turn
+        try:
+            await self.storage.add_conversation_message(conv_id, "user", prompt)
+            await self.storage.add_conversation_message(conv_id, "assistant", result_text)
+        except Exception as e:
+            logger.debug("Failed to persist conversation turn: %s", e)
 
         return result_text

@@ -366,6 +366,20 @@ class MaulnessBot(commands.Bot):
 
         active_conv_id = self.channel_conversations.get(channel_id) if channel_id else None
 
+        # Re-inject compacted session memory into context upon starting a fresh conversation
+        if channel_id and not active_conv_id:
+            try:
+                compacted_summary = await self.storage.get_latest_compacted_memory(channel_id)
+                if compacted_summary and compacted_summary.strip():
+                    prompt = (
+                        f"[PREVIOUS COMPACTED SESSION CONTEXT]\n"
+                        f"{compacted_summary.strip()}\n"
+                        f"[/PREVIOUS COMPACTED SESSION CONTEXT]\n\n"
+                        f"{prompt}"
+                    )
+            except Exception as e:
+                logger.debug("Failed to retrieve compacted session memory: %s", e)
+
         current_task = asyncio.current_task()
         if channel_id and current_task:
             self.channel_tasks[channel_id] = session_key
@@ -444,6 +458,22 @@ class MaulnessBot(commands.Bot):
                 elapsed,
                 len(debouncer.full_text),
             )
+
+            # Trigger background autonomous memory extraction for durable developer facts
+            if channel_id:
+                conv_id = self.channel_conversations.get(channel_id)
+                if conv_id:
+                    async def _run_fact_extraction(cid: str, pname: str):
+                        try:
+                            from maulness.core.memory import AutonomousMemoryExtractor
+                            recent = await self.storage.get_conversation_messages(cid, limit=10)
+                            if len(recent) >= 4:
+                                extractor = AutonomousMemoryExtractor()
+                                await extractor.extract_and_update(recent, profile_name=pname)
+                        except Exception as ex:
+                            logger.debug("Background fact extraction skipped: %s", ex)
+
+                    asyncio.create_task(_run_fact_extraction(conv_id, target_profile.name))
 
             # Process next queued prompt in channel if any
             if channel_id and self.channel_queues.get(channel_id):

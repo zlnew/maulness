@@ -172,3 +172,57 @@ async def test_reset_stale_sessions(tmp_path: Path):
     task = await storage.get_task("task_inflight")
     assert task.status == TaskStatus.FAILED
 
+
+@pytest.mark.asyncio
+async def test_conversation_messages_storage(tmp_path: Path):
+    db_file = tmp_path / "test_conv.db"
+    storage = StorageManager(db_path=db_file)
+    await storage.initialize()
+
+    conv_id = "test-conv-uuid-123"
+
+    # Initially empty
+    msgs = await storage.get_conversation_messages(conv_id)
+    assert msgs == []
+
+    # Add messages
+    await storage.add_conversation_message(conv_id, "user", "Hello world")
+    await storage.add_conversation_message(conv_id, "assistant", "Hi there!")
+    await storage.add_conversation_message(conv_id, "user", "How are you?")
+
+    # Fetch chronological messages
+    msgs = await storage.get_conversation_messages(conv_id, limit=10)
+    assert len(msgs) == 3
+    assert msgs[0] == {"role": "user", "content": "Hello world"}
+    assert msgs[1] == {"role": "assistant", "content": "Hi there!"}
+    assert msgs[2] == {"role": "user", "content": "How are you?"}
+
+    # Clear messages
+    cleared = await storage.clear_conversation_messages(conv_id)
+    assert cleared == 3
+    assert await storage.get_conversation_messages(conv_id) == []
+
+
+@pytest.mark.asyncio
+async def test_compacted_memory_storage(tmp_path: Path):
+    db_file = tmp_path / "test_memory.db"
+    storage = StorageManager(db_path=db_file)
+    await storage.initialize()
+
+    channel_id = 99887766
+
+    # None initially
+    assert await storage.get_latest_compacted_memory(channel_id) is None
+
+    # Save session memory
+    await storage.save_session_memory(
+        session_id=f"discord_{channel_id}_123",
+        summary="User prefers pnpm and service-name addressing in docker",
+        token_count=100,
+    )
+
+    summary = await storage.get_latest_compacted_memory(channel_id)
+    assert summary is not None
+    assert "User prefers pnpm" in summary
+
+

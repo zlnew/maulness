@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 from google import genai
@@ -14,10 +16,23 @@ from maulness.core.models import (
 )
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
+from maulness.core.tools import TOOL_DEFINITIONS, execute_tool_call
+from maulness.storage.db import StorageManager
+
+logger = logging.getLogger("maulness.providers.gemini")
 
 
 class GeminiProvider(BaseProvider):
     """Direct Google Gemini API provider using the official google-genai SDK."""
+
+    def __init__(self, profile: Profile, storage: Optional[StorageManager] = None):
+        super().__init__(profile)
+        self.storage = storage or StorageManager()
+        self._last_conversation_id: Optional[str] = None
+
+    @property
+    def last_conversation_id(self) -> Optional[str]:
+        return self._last_conversation_id
 
     async def run(
         self,
@@ -31,6 +46,11 @@ class GeminiProvider(BaseProvider):
         on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
         on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
     ) -> str:
+        conv_id = conversation_id or str(uuid.uuid4())
+        self._last_conversation_id = conv_id
+        if on_init:
+            await on_init(conv_id)
+
         if self.profile.vertex:
             project = self.profile.project or os.getenv("GOOGLE_CLOUD_PROJECT")
             location = self.profile.location or os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
@@ -78,7 +98,40 @@ class GeminiProvider(BaseProvider):
             max_tokens = max(max_tokens, budget + 4096)
 
         gen_config_kwargs["max_output_tokens"] = max_tokens
+
+        # Direct provider tool declarations
+        tool_declarations = []
+        for td in TOOL_DEFINITIONS:
+            fn = td["function"]
+            tool_declarations.append(
+                types.FunctionDeclaration(
+                    name=fn["name"],
+                    description=fn["description"],
+                    parameters=fn.get("parameters"),
+                )
+            )
+        if tool_declarations:
+            gen_config_kwargs["tools"] = [types.Tool(function_declarations=tool_declarations)]
+
         gen_config = types.GenerateContentConfig(**gen_config_kwargs)
+
+        # Retrieve conversation history
+        history_turns = await self.storage.get_conversation_messages(conv_id, limit=20)
+        contents = []
+        for turn in history_turns:
+            role = "model" if turn["role"] == "assistant" else "user"
+            contents.append(
+                types.Content(
+                    role=role,
+                    parts=[types.Part.from_text(text=turn["content"])],
+                )
+            )
+        contents.append(
+            types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=prompt)],
+            )
+        )
 
         accumulated = []
         init_timeout = min(float(config.stream_idle_timeout_seconds), 20.0)
@@ -87,7 +140,7 @@ class GeminiProvider(BaseProvider):
             response_stream = await asyncio.wait_for(
                 client.aio.models.generate_content_stream(
                     model=model_name,
-                    contents=prompt,
+                    contents=contents,
                     config=gen_config,
                 ),
                 timeout=init_timeout,
@@ -127,17 +180,27 @@ class GeminiProvider(BaseProvider):
                             if getattr(part, "function_call", None):
                                 fn = part.function_call
                                 has_parts = True
-                                tool_desc = f"[Tool Invocation: {fn.name}({dict(fn.args) if fn.args else ''})]"
-                                accumulated.append(tool_desc)
+                                call_name = fn.name
+                                call_args = dict(fn.args) if fn.args else {}
                                 if on_tool_call:
                                     await on_tool_call(
                                         AgentToolCallEvent(
-                                            call_id=f"call_{fn.name}",
-                                            tool_name=fn.name,
-                                            args=dict(fn.args) if fn.args else {},
+                                            call_id=f"call_{call_name}",
+                                            tool_name=call_name,
+                                            args=call_args,
                                             session_id=session_id,
                                         )
                                     )
+                                # Execute the tool with HITL gating
+                                tool_result = await execute_tool_call(
+                                    name=call_name,
+                                    args=call_args,
+                                    workspace_path=workspace_path,
+                                    session_id=session_id,
+                                    on_approval=on_approval,
+                                )
+                                tool_desc = f"\n\n⚡ **Tool Result (`{call_name}`):**\n```\n{tool_result}\n```\n"
+                                accumulated.append(tool_desc)
                                 if on_message:
                                     await on_message(
                                         AgentMessageEvent(delta=tool_desc, session_id=session_id)
@@ -169,5 +232,12 @@ class GeminiProvider(BaseProvider):
         result_text = "".join(accumulated).strip()
         if not result_text:
             raise RuntimeError(f"Gemini model '{model_name}' completed stream but returned an empty response")
+
+        # Persist conversation turn
+        try:
+            await self.storage.add_conversation_message(conv_id, "user", prompt)
+            await self.storage.add_conversation_message(conv_id, "assistant", result_text)
+        except Exception as e:
+            logger.debug("Failed to persist conversation turn: %s", e)
 
         return result_text

@@ -105,8 +105,15 @@ async def main(profile_filter: Optional[str] = None):
 
     logger.info("Maulness daemon is ready and listening (%d bot adapters active).", len(discord_tasks))
 
+    # Start background scheduler
+    from maulness.daemon.scheduler import DaemonScheduler
+    scheduler = DaemonScheduler(storage=storage, bots=bots)
+    scheduler.start()
+
     # Await stop event
     await stop_event.wait()
+
+    scheduler.stop()
 
     for bot, task in zip(bots, discord_tasks):
         if not task.done():
