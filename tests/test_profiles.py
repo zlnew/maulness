@@ -58,3 +58,25 @@ def test_directory_profile_loading(tmp_path):
     assert profile.get_api_key() == "test_custom_key_123"
     assert "Custom Doctrine" in profile.effective_system_prompt()
     assert "my-custom-skill" in profile.effective_system_prompt()
+
+
+def test_soul_params_interpolation():
+    profile = Profile(
+        name="orchestrator",
+        provider="acp",
+        workspace="personal",
+        soul_params={"role": "Vice-Captain", "captain": "Maul", "fleet": "Grand Fleet"},
+        soul_content="Ye be Silvers Rayleigh, {{role}} of {{captain}}'s {fleet}. Acting in {workspace}.",
+    )
+    prompt = profile.effective_system_prompt()
+    assert "Vice-Captain of Maul's Grand Fleet" in prompt
+    assert "Acting in personal" in prompt
+
+
+def test_standard_api_key_resolution_without_api_key_env():
+    profile = Profile(
+        name="claude-dev",
+        provider="anthropic",
+        env_vars={"ANTHROPIC_API_KEY": "sk-ant-test-123"},
+    )
+    assert profile.get_api_key() == "sk-ant-test-123"

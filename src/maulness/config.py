@@ -45,6 +45,35 @@ class Config:
         # Antigravity binary command
         self.agy_cmd: list[str] = os.getenv("AGY_CMD", "agy").split()
 
+        # Gateway Multiplexing (Hermes-style)
+        self.gateway_multiplex_profiles: bool = False
+        self.gateway_multiplex_profile_allowlist: list[str] = []
+        self._load_yaml_config()
+
+    def _load_yaml_config(self) -> None:
+        """Load optional root configuration from ~/.config/maulness/config.yaml."""
+        cfg_yaml = self.config_dir / "config.yaml"
+        if cfg_yaml.exists():
+            try:
+                import yaml
+                data = yaml.safe_load(cfg_yaml.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    gw = data.get("gateway", {})
+                    if isinstance(gw, dict):
+                        self.gateway_multiplex_profiles = bool(gw.get("multiplex_profiles", False))
+                        allowlist = gw.get("multiplex_profile_allowlist", [])
+                        if isinstance(allowlist, list):
+                            self.gateway_multiplex_profile_allowlist = [str(x) for x in allowlist]
+                    elif "multiplex_profiles" in data:
+                        self.gateway_multiplex_profiles = bool(data.get("multiplex_profiles", False))
+            except Exception:
+                pass
+
+        # Environment variable override takes precedence
+        env_multiplex = os.getenv("GATEWAY_MULTIPLEX_PROFILES")
+        if env_multiplex is not None:
+            self.gateway_multiplex_profiles = env_multiplex.strip().lower() in ("1", "true", "yes", "on")
+
     @property
     def has_discord(self) -> bool:
         return bool(self.discord_bot_token and self.owner_discord_id)

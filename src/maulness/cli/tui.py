@@ -59,10 +59,10 @@ def get_daemon_status() -> str:
             timeout=2.0,
         )
         if res.stdout.strip() == "active":
-            return "[#a6e3a1]● active[/#a6e3a1]"
+            return "[green]● active[/green]"
     except Exception:
         pass
-    return "[#6c7086]○ standby[/#6c7086]"
+    return "[dim]○ standby[/dim]"
 
 
 # ==============================================================================
@@ -82,7 +82,7 @@ class CommandPaletteModal(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="palette-dialog"):
-            yield Label("[bold #bb9af7]󰍉 Command Palette[/bold #bb9af7] [dim #737aa2](Type to filter, ↑/↓ to navigate, Enter/Tab to select, Esc to close)[/dim #737aa2]", classes="palette-title")
+            yield Label("[bold magenta]󰍉 Command Palette[/bold magenta] [dim](Type to filter, ↑/↓ to navigate, Enter/Tab to select, Esc to close)[/dim]", classes="palette-title")
             yield Input(value=self.initial_query, placeholder="Filter commands (/pipeline, /profile, /diff, !<cmd>)...", id="palette-filter")
             ol = OptionList(id="palette-options")
             yield ol
@@ -112,7 +112,7 @@ class CommandPaletteModal(ModalScreen[Optional[str]]):
 
         scored.sort(key=lambda x: x[0], reverse=True)
         for _, cmd, desc in scored:
-            prompt_markup = f"[bold #7aa2f7]{cmd}[/bold #7aa2f7] [dim #737aa2]— {desc}[/dim #737aa2]"
+            prompt_markup = f"[bold cyan]{cmd}[/bold cyan] [dim]— {desc}[/dim]"
             ol.add_option(Option(prompt_markup, id=cmd))
 
         if ol.option_count > 0:
@@ -173,8 +173,8 @@ class ApprovalModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="modal-dialog"):
-            yield Label("[bold #e0af68]⚠️  HITL Tool Approval Required[/bold #e0af68]", classes="modal-title")
-            yield Label(f"[bold #7aa2f7]Tool:[/bold #7aa2f7] {self.event.tool_name}", classes="modal-row")
+            yield Label("[bold yellow]⚠️  HITL Tool Approval Required[/bold yellow]", classes="modal-title")
+            yield Label(f"[bold cyan]Tool:[/bold cyan] {self.event.tool_name}", classes="modal-row")
             try:
                 formatted_args = json.dumps(self.event.args, indent=2)
             except Exception:
@@ -210,7 +210,7 @@ class GateModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="modal-dialog"):
-            yield Label("[bold #bb9af7]🚦 Pipeline Confirmation Gate[/bold #bb9af7]", classes="modal-title")
+            yield Label("[bold magenta]🚦 Pipeline Confirmation Gate[/bold magenta]", classes="modal-title")
             yield Label(self.gate_prompt, classes="modal-row")
             with Horizontal(classes="modal-buttons"):
                 yield Button("Proceed (y)", variant="primary", id="btn-proceed")
@@ -246,7 +246,7 @@ class DiffModal(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="diff-dialog"):
-            yield Label("[bold #7aa2f7]🔍 Git Diff HEAD[/bold #7aa2f7] [dim #737aa2](j/k to scroll, q or Esc to close)[/dim #737aa2]")
+            yield Label("[bold cyan]🔍 Git Diff HEAD[/bold cyan] [dim](j/k to scroll, q or Esc to close)[/dim]")
             res = subprocess.run(
                 ["git", "diff", "HEAD"],
                 cwd=str(self.workspace_path),
@@ -298,15 +298,15 @@ class ProfileModal(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="palette-dialog"):
-            yield Label("[bold #bb9af7]Select Active Profile[/bold #bb9af7] [dim #737aa2](Enter to switch, Esc to cancel)[/dim #737aa2]", classes="palette-title")
+            yield Label("[bold magenta]Select Active Profile[/bold magenta] [dim](Enter to switch, Esc to cancel)[/dim]", classes="palette-title")
             ol = OptionList(id="profile-options")
             yield ol
 
     def on_mount(self) -> None:
         ol = self.query_one("#profile-options", OptionList)
         for idx, p in enumerate(self.profiles):
-            is_active = " [bold #a6e3a1]● ACTIVE[/bold #a6e3a1]" if p.name == self.current_profile else ""
-            label = f"[bold #7aa2f7]{p.name}[/bold #7aa2f7] ({p.provider}) — [dim #737aa2]{p.description[:50]}[/dim #737aa2]{is_active}"
+            is_active = " [bold green]● ACTIVE[/bold green]" if p.name == self.current_profile else ""
+            label = f"[bold cyan]{p.name}[/bold cyan] ({p.provider}) — [dim]{p.description[:50]}[/dim]{is_active}"
             ol.add_option(Option(label, id=p.name))
             if p.name == self.current_profile:
                 ol.highlighted = idx
@@ -396,7 +396,7 @@ class UserCard(Static):
         self.branch = branch
 
     def compose(self) -> ComposeResult:
-        yield Label(f"[bold #7aa2f7]Maul[/bold #7aa2f7] [dim #565f89]({self.repo}:{self.branch})[/dim #565f89]", classes="card-header")
+        yield Label(f"[bold cyan]Maul[/bold cyan] [dim]({self.repo}:{self.branch})[/dim]", classes="card-header")
         yield Static(self.prompt, classes="card-body")
 
 
@@ -410,7 +410,7 @@ class SystemCard(Static):
         self.is_error = is_error
 
     def compose(self) -> ComposeResult:
-        color = "#f7768e" if self.is_error else "#e0af68"
+        color = "red" if self.is_error else "yellow"
         yield Label(f"[bold {color}]{self.card_title}[/bold {color}]", classes="card-header")
         yield Static(self.card_content, classes="card-body")
 
@@ -430,12 +430,12 @@ class AgentCard(Static):
         self.thought_static = Static("", classes="thought-box")
         self.tools_static = Static("", classes="tools-box")
         self.message_static = Static("", classes="card-body")
-        self.status_label = Label("[dim #737aa2]󰑮 Initializing...[/dim #737aa2]")
+        self.status_label = Label("[dim]󰑮 Initializing...[/dim]")
 
         self._last_render_time = 0.0
 
     def compose(self) -> ComposeResult:
-        yield Label(f"[bold #bb9af7]Maulness[/bold #bb9af7] [dim #565f89]({self.profile_name})[/dim #565f89]", classes="card-header")
+        yield Label(f"[bold magenta]Maulness[/bold magenta] [dim]({self.profile_name})[/dim]", classes="card-header")
         yield self.thought_static
         yield self.tools_static
         yield self.message_static
@@ -448,9 +448,9 @@ class AgentCard(Static):
             full_thought = "".join(self.thought_text).strip()
             lines = [line.strip() for line in full_thought.splitlines() if line.strip()]
             snippet = lines[-1][:75] if lines else "Thinking..."
-            self.thought_static.update(f"[dim italic #7aa2f7]💭 Thinking ({elapsed:.1f}s):[/dim italic #7aa2f7] [dim #a9b1d6]{snippet}[/dim #a9b1d6]")
+            self.thought_static.update(f"[dim italic cyan]💭 Thinking ({elapsed:.1f}s):[/dim italic cyan] [dim]{snippet}[/dim]")
             self.thought_static.add_class("visible")
-            self.status_label.update("[dim #7aa2f7]󰑮 Thinking...[/dim #7aa2f7]")
+            self.status_label.update("[dim cyan]󰑮 Thinking...[/dim cyan]")
 
     def record_tool_call(self, tool_name: str, args: Any = None) -> None:
         summary = ""
@@ -463,7 +463,7 @@ class AgentCard(Static):
                 summary = f": {args['TargetFile']}"
             elif "AbsolutePath" in args:
                 summary = f": {args['AbsolutePath']}"
-        self.tools_static.update(f"[bold #e0af68]⚡ Tool:[/bold #e0af68] [dim #a9b1d6]{tool_name}{summary}[/dim #a9b1d6]")
+        self.tools_static.update(f"[bold yellow]⚡ Tool:[/bold yellow] [dim]{tool_name}{summary}[/dim]")
         self.tools_static.add_class("visible")
 
     def append_message(self, delta: str, force_render: bool = False) -> None:
@@ -471,12 +471,12 @@ class AgentCard(Static):
             self.has_started_message = True
             self.thought_duration = time.time() - self.thought_start_time
             if self.thought_text:
-                self.thought_static.update(f"[dim #565f89]💭 Thought for {self.thought_duration:.1f}s[/dim #565f89]")
+                self.thought_static.update(f"[dim]💭 Thought for {self.thought_duration:.1f}s[/dim]")
                 self.thought_static.add_class("visible")
             else:
                 self.thought_static.remove_class("visible")
                 self.thought_static.update("")
-            self.status_label.update("[dim #737aa2]󰑮 Streaming response...[/dim #737aa2]")
+            self.status_label.update("[dim]󰑮 Streaming response...[/dim]")
 
         self.message_text.append(delta)
         now = time.time()
@@ -492,7 +492,7 @@ class AgentCard(Static):
     def flush_final(self) -> None:
         if not self.has_started_message and self.thought_text:
             duration = time.time() - self.thought_start_time
-            self.thought_static.update(f"[dim #565f89]💭 Thought for {duration:.1f}s[/dim #565f89]")
+            self.thought_static.update(f"[dim]💭 Thought for {duration:.1f}s[/dim]")
             self.thought_static.add_class("visible")
         self._render_message()
 
@@ -509,12 +509,12 @@ class PipelineCard(Static):
         self.pipeline_name = pipeline_name
         self.goal = goal
         self.stages_static = Static("")
-        self.status_label = Label("[dim #737aa2]󰑮 Initializing pipeline...[/dim #737aa2]")
+        self.status_label = Label("[dim]󰑮 Initializing pipeline...[/dim]")
         self.output_static = Static("", classes="card-body")
 
     def compose(self) -> ComposeResult:
         yield Label(
-            f"[bold #bb9af7]Pipeline: {self.pipeline_name}[/bold #bb9af7] — [dim #7aa2f7]{self.goal[:60]}[/dim #7aa2f7]",
+            f"[bold magenta]Pipeline: {self.pipeline_name}[/bold magenta] — [dim cyan]{self.goal[:60]}[/dim cyan]",
             classes="card-header",
         )
         yield self.stages_static
@@ -523,9 +523,9 @@ class PipelineCard(Static):
 
     def update_stage(self, stage_name: str, profile: str, current: int, total: int) -> None:
         self.stages_static.update(
-            f"[bold #e0af68]▶ Stage {current}/{total}:[/bold #e0af68] [bold #c0caf5]{stage_name}[/bold #c0caf5] ([#bb9af7]{profile}[/#bb9af7])"
+            f"[bold yellow]▶ Stage {current}/{total}:[/bold yellow] [bold]{stage_name}[/bold] ([magenta]{profile}[/magenta])"
         )
-        self.status_label.update(f"[dim #737aa2]Running stage {current} of {total}...[/dim #737aa2]")
+        self.status_label.update(f"[dim]Running stage {current} of {total}...[/dim]")
 
     def append_output(self, delta: str) -> None:
         self.output_static.update(RichMarkdown(delta))
@@ -543,8 +543,8 @@ class MaulnessTUIApp(App):
     TITLE = "Maulness ⚡"
     CSS = """
     Screen {
-        background: #1a1b26;
-        color: #c0caf5;
+        background: transparent;
+        color: $text;
     }
 
     ModalScreen {
@@ -554,36 +554,36 @@ class MaulnessTUIApp(App):
     #top-bar {
         dock: top;
         height: 3;
-        background: #16161e;
-        color: #a9b1d6;
+        background: transparent;
+        color: $text;
         padding: 0 2;
-        border-bottom: solid #24283b;
+        border-bottom: solid $border;
     }
 
     #chat-view {
         height: 1fr;
         padding: 1 2;
-        background: #1a1b26;
+        background: transparent;
     }
 
     .user-card {
-        background: #24283b;
-        border: round #7aa2f7;
-        padding: 1 2;
+        background: transparent;
+        border: round $accent;
+        padding: 0 1;
         margin: 1 0;
     }
 
     .agent-card {
-        background: #1f2335;
-        border: round #bb9af7;
-        padding: 1 2;
+        background: transparent;
+        border: round $primary;
+        padding: 0 1;
         margin: 1 0;
     }
 
     .system-card {
-        background: #1f2335;
-        border: round #414868;
-        padding: 1 2;
+        background: transparent;
+        border: round $border;
+        padding: 0 1;
         margin: 1 0;
     }
 
@@ -597,11 +597,11 @@ class MaulnessTUIApp(App):
 
     .thought-box {
         display: none;
-        color: #737aa2;
-        background: #16161e;
+        color: $text-muted;
+        background: transparent;
         padding: 0 1;
         margin-bottom: 1;
-        border-left: thick #414868;
+        border-left: thick $border;
     }
 
     .thought-box.visible {
@@ -610,11 +610,11 @@ class MaulnessTUIApp(App):
 
     .tools-box {
         display: none;
-        color: #e0af68;
-        background: #16161e;
+        color: $warning;
+        background: transparent;
         padding: 0 1;
         margin-bottom: 1;
-        border-left: thick #e0af68;
+        border-left: thick $warning;
     }
 
     .tools-box.visible {
@@ -625,8 +625,8 @@ class MaulnessTUIApp(App):
         dock: bottom;
         height: auto;
         max-height: 18;
-        background: #16161e;
-        border-top: solid #24283b;
+        background: transparent;
+        border-top: solid $border;
         padding: 0 1;
     }
 
@@ -634,8 +634,8 @@ class MaulnessTUIApp(App):
         display: none;
         max-height: 8;
         height: auto;
-        background: #1f2335;
-        border: tall #7aa2f7;
+        background: $panel;
+        border: tall $primary;
         margin-bottom: 0;
         scrollbar-size-vertical: 1;
     }
@@ -646,39 +646,39 @@ class MaulnessTUIApp(App):
 
     #vim-statusline {
         height: 1;
-        background: #16161e;
-        color: #a9b1d6;
+        background: transparent;
+        color: $text-muted;
         padding: 0 1;
     }
 
     #input-row {
         height: 3;
-        background: #1f2335;
-        border: tall #414868;
+        background: transparent;
+        border: tall $border;
         padding: 0 1;
     }
 
     #input-row.focused-insert {
-        border: tall #7aa2f7;
+        border: tall $primary;
     }
 
     #chat-input {
         width: 1fr;
         background: transparent;
         border: none;
-        color: #c0caf5;
+        color: $text;
     }
 
     #chat-input:focus {
         border: none;
     }
 
-    /* Modals (All Centered) */
+    /* Modals (All Centered, using solid $panel/$surface for high contrast against transparent background) */
     .palette-dialog {
         width: 75%;
         max-height: 22;
-        background: #1f2335;
-        border: double #bb9af7;
+        background: $panel;
+        border: double $primary;
         padding: 1 2;
     }
 
@@ -687,31 +687,31 @@ class MaulnessTUIApp(App):
     }
 
     #palette-filter {
-        background: #16161e;
-        border: tall #414868;
-        color: #c0caf5;
+        background: $surface;
+        border: tall $border;
+        color: $text;
         margin-bottom: 1;
     }
 
     #palette-options {
         max-height: 12;
-        background: #16161e;
-        border: tall #24283b;
+        background: $surface;
+        border: tall $border;
     }
 
     .modal-dialog {
         width: 70%;
         max-height: 80%;
-        background: #1f2335;
-        border: thick #bb9af7;
+        background: $panel;
+        border: thick $primary;
         padding: 1 2;
     }
 
     .diff-dialog {
         width: 90%;
         height: 90%;
-        background: #16161e;
-        border: thick #7aa2f7;
+        background: $panel;
+        border: thick $primary;
         padding: 1 2;
     }
 
@@ -778,19 +778,19 @@ class MaulnessTUIApp(App):
         daemon_str = get_daemon_status()
 
         yield Static(
-            f"[bold #f7768e]⚡ MAULNESS[/bold #f7768e] │ [bold #a6e3a1]repo:[/bold #a6e3a1] {self.repo_name} │ "
-            f"[bold #89dceb]branch:[/bold #89dceb] {branch} │ [bold #cba6f7]profile:[/bold #cba6f7] {self.current_profile} │ "
+            f"[bold red]⚡ MAULNESS[/bold red] │ [bold green]repo:[/bold green] {self.repo_name} │ "
+            f"[bold cyan]branch:[/bold cyan] {branch} │ [bold magenta]profile:[/bold magenta] {self.current_profile} │ "
             f"{daemon_str}",
             id="top-bar",
         )
 
         with VerticalScroll(id="chat-view"):
             yield Static(
-                f"[dim #737aa2]Welcome back, Maul. Scoped to [bold #a6e3a1]{self.workspace_path}[/bold #a6e3a1].\n"
-                f"• Natural language executes with [bold #cba6f7]{self.current_profile}[/bold #cba6f7].\n"
-                f"• Type [bold #7aa2f7]/[/bold #7aa2f7] for Neovim LSP-style floating autocomplete popup.\n"
-                f"• Press [bold #7aa2f7]Esc[/bold #7aa2f7] for NORMAL mode ([#a6e3a1]j/k[/#a6e3a1] scroll, [#a6e3a1]i[/#a6e3a1] insert, [#a6e3a1]?[/#a6e3a1] help).\n"
-                f"• Press [bold #f7768e]Ctrl+C[/bold #f7768e] or [bold #f7768e]Esc[/bold #f7768e] to CANCEL running tasks at any time.[/dim #737aa2]",
+                f"[dim]Welcome back, Maul. Scoped to [bold green]{self.workspace_path}[/bold green].\n"
+                f"• Natural language executes with [bold magenta]{self.current_profile}[/bold magenta].\n"
+                f"• Type [bold cyan]/[/bold cyan] for Neovim LSP-style floating autocomplete popup.\n"
+                f"• Press [bold cyan]Esc[/bold cyan] for NORMAL mode ([green]j/k[/green] scroll, [green]i[/green] insert, [green]?[/green] help).\n"
+                f"• Press [bold red]Ctrl+C[/bold red] or [bold red]Esc[/bold red] to CANCEL running tasks at any time.[/dim]",
                 classes="system-card",
             )
 
@@ -864,25 +864,25 @@ class MaulnessTUIApp(App):
     def _update_statusline(self) -> None:
         statusline = self.query_one("#vim-statusline", Static)
         if self.is_busy:
-            mode_badge = "[bold #16161e on #f7768e] BUSY [/bold #16161e on #f7768e]"
-            hints = "[bold #f7768e]Ctrl+C / Esc: STOP / CANCEL TASK[/bold #f7768e]"
+            mode_badge = "[bold white on red] BUSY [/bold white on red]"
+            hints = "[bold red]Ctrl+C / Esc: STOP / CANCEL TASK[/bold red]"
         elif self.mode == "insert":
-            mode_badge = "[bold #16161e on #7aa2f7] INSERT [/bold #16161e on #7aa2f7]"
-            hints = "[dim #737aa2]Esc: normal mode │ /: command palette │ Enter: send[/dim #737aa2]"
+            mode_badge = "[bold black on cyan] INSERT [/bold black on cyan]"
+            hints = "[dim]Esc: normal mode │ /: command palette │ Enter: send[/dim]"
         else:
-            mode_badge = "[bold #16161e on #a6e3a1] NORMAL [/bold #16161e on #a6e3a1]"
-            hints = "[dim #737aa2]i: insert │ /: commands │ j/k: scroll │ d/u: page │ gg/G: top/bottom │ ?: help │ q: quit[/dim #737aa2]"
+            mode_badge = "[bold black on green] NORMAL [/bold black on green]"
+            hints = "[dim]i: insert │ /: commands │ j/k: scroll │ d/u: page │ gg/G: top/bottom │ ?: help │ q: quit[/dim]"
 
         statusline.update(f"{mode_badge}  {hints}")
 
     def _update_top_bar(self) -> None:
         branch = get_git_branch(self.workspace_path)
         daemon_str = get_daemon_status()
-        status_text = "[#e0af68]busy[/#e0af68]" if self.is_busy else "[#a6e3a1]idle[/#a6e3a1]"
+        status_text = "[yellow]busy[/yellow]" if self.is_busy else "[green]idle[/green]"
         top_bar = self.query_one("#top-bar", Static)
         top_bar.update(
-            f"[bold #f7768e]⚡ MAULNESS[/bold #f7768e] │ [bold #a6e3a1]repo:[/bold #a6e3a1] {self.repo_name} │ "
-            f"[bold #89dceb]branch:[/bold #89dceb] {branch} │ [bold #cba6f7]profile:[/bold #cba6f7] {self.current_profile} │ "
+            f"[bold red]⚡ MAULNESS[/bold red] │ [bold green]repo:[/bold green] {self.repo_name} │ "
+            f"[bold cyan]branch:[/bold cyan] {branch} │ [bold magenta]profile:[/bold magenta] {self.current_profile} │ "
             f"{daemon_str} │ {status_text}"
         )
 
@@ -912,7 +912,7 @@ class MaulnessTUIApp(App):
             if matching_pipes:
                 popup.clear_options()
                 for p in matching_pipes:
-                    popup.add_option(Option(f"[bold #7aa2f7]/pipeline {p.name}[/bold #7aa2f7] [dim #737aa2]— {p.description}[/dim #737aa2]", id=f"/pipeline {p.name} "))
+                    popup.add_option(Option(f"[bold cyan]/pipeline {p.name}[/bold cyan] [dim]— {p.description}[/dim]", id=f"/pipeline {p.name} "))
                 popup.highlighted = 0
                 popup.add_class("visible")
                 return
@@ -927,7 +927,7 @@ class MaulnessTUIApp(App):
             if matching_profs:
                 popup.clear_options()
                 for p in matching_profs:
-                    popup.add_option(Option(f"[bold #7aa2f7]/profile {p.name}[/bold #7aa2f7] [dim #737aa2]— {p.description[:40]}[/dim #737aa2]", id=f"/profile {p.name}"))
+                    popup.add_option(Option(f"[bold cyan]/profile {p.name}[/bold cyan] [dim]— {p.description[:40]}[/dim]", id=f"/profile {p.name}"))
                 popup.highlighted = 0
                 popup.add_class("visible")
                 return
@@ -954,7 +954,7 @@ class MaulnessTUIApp(App):
 
         popup.clear_options()
         for cmd, desc in matching:
-            markup = f"[bold #7aa2f7]{cmd.strip()}[/bold #7aa2f7] [dim #737aa2]— {desc}[/dim #737aa2]"
+            markup = f"[bold cyan]{cmd.strip()}[/bold cyan] [dim]— {desc}[/dim]"
             popup.add_option(Option(markup, id=cmd))
 
         popup.highlighted = 0
@@ -1216,14 +1216,14 @@ class MaulnessTUIApp(App):
             est_tokens = self.total_chars_out // 4
             prof = self.profile_manager.get_profile(self.current_profile)
             usage_content = (
-                f"• Prompts Executed: [bold #a6e3a1]{self.total_prompts}[/bold #a6e3a1]\n"
-                f"• Queued Prompts: [bold #bb9af7]{len(self.prompt_queue)}[/bold #bb9af7]\n"
-                f"• Output Characters: [bold #7aa2f7]{self.total_chars_out:,}[/bold #7aa2f7]\n"
-                f"• Estimated Output Tokens: [bold #89dceb]~{est_tokens:,}[/bold #89dceb]\n"
-                f"• Active Profile: [bold #cba6f7]{self.current_profile}[/bold #cba6f7] ({prof.provider})\n"
-                f"• Antigravity Session: [bold #bb9af7]{self.active_acp_session_id or '(fresh turn)'}[/bold #bb9af7]\n"
-                f"• Session Uptime: [bold #e0af68]{m}m {s}s[/bold #e0af68]\n"
-                f"• Estimated Cost: [bold #a6e3a1]$0.00[/bold #a6e3a1] (Local Antigravity ACP / Free Tier)"
+                f"• Prompts Executed: [bold green]{self.total_prompts}[/bold green]\n"
+                f"• Queued Prompts: [bold magenta]{len(self.prompt_queue)}[/bold magenta]\n"
+                f"• Output Characters: [bold cyan]{self.total_chars_out:,}[/bold cyan]\n"
+                f"• Estimated Output Tokens: [bold blue]~{est_tokens:,}[/bold blue]\n"
+                f"• Active Profile: [bold magenta]{self.current_profile}[/bold magenta] ({prof.provider})\n"
+                f"• Antigravity Session: [bold magenta]{self.active_acp_session_id or '(fresh turn)'}[/bold magenta]\n"
+                f"• Session Uptime: [bold yellow]{m}m {s}s[/bold yellow]\n"
+                f"• Estimated Cost: [bold green]$0.00[/bold green] (Local Antigravity ACP / Free Tier)"
             )
             chat_view = self.query_one("#chat-view", VerticalScroll)
             await chat_view.mount(SystemCard("Session Metrics & Usage", usage_content))
@@ -1240,20 +1240,20 @@ class MaulnessTUIApp(App):
                 text=True,
             )
             dirty_count = len([l for l in diff_proc.stdout.splitlines() if l.strip()])
-            dirty_str = f"[#f7768e]{dirty_count} uncommitted changes[/#f7768e]" if dirty_count > 0 else "[#a6e3a1]clean[/#a6e3a1]"
+            dirty_str = f"[red]{dirty_count} uncommitted changes[/red]" if dirty_count > 0 else "[green]clean[/green]"
 
             prof = self.profile_manager.get_profile(self.current_profile)
             target = prof.model or prof.command or "default"
             ws_cfg = prof.workspace or "inherit"
 
             context_content = (
-                f"• Active Workspace: [bold #a6e3a1]{self.workspace_path}[/bold #a6e3a1] (repo: [bold]{self.repo_name}[/bold])\n"
-                f"• Git Branch: [bold #89dceb]{branch}[/bold #89dceb] ({dirty_str})\n"
-                f"• Active Profile: [bold #cba6f7]{self.current_profile}[/bold #cba6f7] ({prof.provider})\n"
-                f"• Target Engine: [bold #7aa2f7]{target}[/bold #7aa2f7]\n"
-                f"• Antigravity Session: [bold #bb9af7]{self.active_acp_session_id or '(none)'}[/bold #bb9af7]\n"
+                f"• Active Workspace: [bold green]{self.workspace_path}[/bold green] (repo: [bold]{self.repo_name}[/bold])\n"
+                f"• Git Branch: [bold cyan]{branch}[/bold cyan] ({dirty_str})\n"
+                f"• Active Profile: [bold magenta]{self.current_profile}[/bold magenta] ({prof.provider})\n"
+                f"• Target Engine: [bold cyan]{target}[/bold cyan]\n"
+                f"• Antigravity Session: [bold magenta]{self.active_acp_session_id or '(none)'}[/bold magenta]\n"
                 f"• Profile Workspace: [dim]{ws_cfg}[/dim]\n"
-                f"• Soul Doctrine: [bold #a6e3a1]Enabled[/bold #a6e3a1] (~/.config/maulness/SOUL.md)\n"
+                f"• Soul Doctrine: [bold green]Enabled[/bold green] (~/.config/maulness/SOUL.md)\n"
                 f"• Storage DB: [dim]{config.db_path}[/dim]\n"
                 f"• Daemon Status: {get_daemon_status()}\n"
                 f"• Prompt Queue: {len(self.prompt_queue)} pending"
@@ -1289,7 +1289,7 @@ class MaulnessTUIApp(App):
             await chat_view.mount(
                 SystemCard(
                     "📦 Context Compacted",
-                    f"Saved summary to SQLite ([bold #bb9af7]session_memories[/bold #bb9af7]).\n"
+                    f"Saved summary to SQLite ([bold magenta]session_memories[/bold magenta]).\n"
                     f"Session transcript compressed into memory. Active context reset for lean token usage.\n"
                     f"Persisted in: [dim]{config.db_path}[/dim]",
                 )
@@ -1305,9 +1305,9 @@ class MaulnessTUIApp(App):
                 SystemCard(
                     "Busy",
                     "Agent is currently busy processing a task.\n"
-                    "• Use [bold #f7768e]/cancel[/bold #f7768e] or [bold #f7768e]Ctrl+C[/bold #f7768e] to stop.\n"
-                    "• Use [bold #bb9af7]/interrupt <prompt>[/bold #bb9af7] to stop and steer immediately.\n"
-                    "• Use [bold #7aa2f7]/queue <prompt>[/bold #7aa2f7] to queue your prompt to run next.",
+                    "• Use [bold red]/cancel[/bold red] or [bold red]Ctrl+C[/bold red] to stop.\n"
+                    "• Use [bold magenta]/interrupt <prompt>[/bold magenta] to stop and steer immediately.\n"
+                    "• Use [bold cyan]/queue <prompt>[/bold cyan] to queue your prompt to run next.",
                     is_error=True,
                 )
             )
@@ -1429,11 +1429,11 @@ class MaulnessTUIApp(App):
                 on_approval=on_approval,
                 verbose=False,
             )
-            agent_card.set_status(f"[#a6e3a1]✓ Completed ({task.status.value})[/#a6e3a1]")
+            agent_card.set_status(f"[green]✓ Completed ({task.status.value})[/green]")
         except asyncio.CancelledError:
-            agent_card.set_status("[bold #f7768e]⏹ Stopped by user[/bold #f7768e]")
+            agent_card.set_status("[bold red]⏹ Stopped by user[/bold red]")
         except Exception as e:
-            agent_card.set_status(f"[#f7768e]✗ Failed: {e}[/#f7768e]")
+            agent_card.set_status(f"[red]✗ Failed: {e}[/red]")
         finally:
             self.is_busy = False
             self._update_top_bar()
@@ -1491,11 +1491,11 @@ class MaulnessTUIApp(App):
                 on_stage_start=on_stage_start,
                 verbose=False,
             )
-            p_card.finish(f"[#a6e3a1]✓ Pipeline Finished ({task.status.value})[/#a6e3a1]")
+            p_card.finish(f"[green]✓ Pipeline Finished ({task.status.value})[/green]")
         except asyncio.CancelledError:
-            p_card.finish("[bold #f7768e]⏹ Pipeline stopped by user[/bold #f7768e]")
+            p_card.finish("[bold red]⏹ Pipeline stopped by user[/bold red]")
         except Exception as e:
-            p_card.finish(f"[#f7768e]✗ Pipeline Failed: {e}[/#f7768e]")
+            p_card.finish(f"[red]✗ Pipeline Failed: {e}[/red]")
         finally:
             self.is_busy = False
             self._update_top_bar()

@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 import typer
 import yaml
 from rich.console import Console
@@ -26,11 +27,13 @@ daemon_app = typer.Typer(help="Manage the background daemon systemd service")
 task_app = typer.Typer(help="Inspect tasks and execution history")
 session_app = typer.Typer(help="Inspect active and past agent sessions")
 profile_app = typer.Typer(help="Inspect agent execution profiles")
+discord_app = typer.Typer(help="Manage Discord bot gateways")
 
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(task_app, name="task")
 app.add_typer(session_app, name="session")
 app.add_typer(profile_app, name="profile")
+app.add_typer(discord_app, name="discord")
 
 console = Console()
 
@@ -59,13 +62,17 @@ def status():
     table.add_row("Daemon Service", daemon_status_text, "systemd user unit maulness.service")
 
     # Check Discord
-    if config.has_discord:
-        table.add_row("Discord Gateway", "[green]Configured[/green]", "Token & Owner ID loaded")
+    if config.gateway_multiplex_profiles:
+        allowlist = config.gateway_multiplex_profile_allowlist
+        detail = f"Multiplexing ({', '.join(allowlist) if allowlist else 'all'})"
+        table.add_row("Discord Gateway", "[green]Multiplexing[/green]", detail)
+    elif config.has_discord:
+        table.add_row("Discord Gateway", "[green]Configured[/green]", "Single Default Profile")
     else:
         table.add_row(
             "Discord Gateway",
             "[yellow]Standby[/yellow]",
-            "Waiting for credentials in ~/.config/maulness/env",
+            "Waiting for credentials in ~/.config/maulness/env or profile .env",
         )
 
     # Check Antigravity binary
@@ -497,6 +504,18 @@ def daemon_logs(
     if follow:
         cmd.append("-f")
     subprocess.run(cmd)
+
+
+# ==========================================
+# Discord Gateway (run foreground)
+# ==========================================
+@discord_app.command("run")
+def discord_run(
+    profile: Optional[str] = typer.Option(None, "-p", "--profile", help="Target specific profile"),
+):
+    """Run Discord gateway adapter in the foreground."""
+    from maulness.daemon.service import main as service_main
+    asyncio.run(service_main(profile_filter=profile))
 
 
 def main():

@@ -34,9 +34,10 @@ class UnifiedApiProvider(BaseProvider):
     ) -> str:
         api_key = self.profile.get_api_key()
         if not api_key:
+            key_name = self.profile.api_key_env or f"{self.profile.provider.upper()}_API_KEY"
             raise ValueError(
                 f"Missing API key for profile '{self.profile.name}'. "
-                f"Set {self.profile.api_key_env} in ~/.config/maulness/env"
+                f"Set {key_name} in ~/.config/maulness/env or profile .env"
             )
 
         provider_type = self.profile.provider.lower()

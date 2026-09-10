@@ -1,0 +1,15 @@
+# ==============================================================================
+# Maulness Configuration Example (Hermes-compatible)
+# ==============================================================================
+# Save this file to ~/.config/maulness/config.yaml
+
+gateway:
+  # When true, the background daemon serves multiple profiles concurrently in a single process.
+  # Each profile's Discord bot adapter is spawned using DISCORD_BOT_TOKEN from its profiles/<name>/.env.
+  multiplex_profiles: false
+
+  # Optional list of profiles to serve when multiplexing is enabled.
+  # If omitted or empty, all discovered profiles with DISCORD_BOT_TOKEN configured are served.
+  multiplex_profile_allowlist:
+    - personal-orchestrator
+    - office-orchestrator

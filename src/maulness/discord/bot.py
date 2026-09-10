@@ -1,6 +1,7 @@
 import asyncio
 import io
 import logging
+from typing import Any, Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -25,36 +26,77 @@ logger = logging.getLogger("maulness.discord")
 
 
 class MaulnessBot(commands.Bot):
-    """Discord Bot gateway for Maulness with strict single-user authorization."""
+    """Discord Bot gateway for Maulness with strict single-user authorization and profile binding."""
 
-    def __init__(self, storage: StorageManager):
+    def __init__(
+        self,
+        storage: StorageManager,
+        profile_name: Optional[str] = None,
+        profile: Optional[Any] = None,
+    ):
         intents = discord.Intents.default()
         intents.message_content = True
 
         super().__init__(command_prefix="!mn ", intents=intents)
         self.storage = storage
         self.profile_manager = ProfileManager()
+
+        if profile:
+            self.bound_profile = profile
+            self.profile_name = profile.name
+        elif profile_name:
+            self.bound_profile = self.profile_manager.get_profile(profile_name)
+            self.profile_name = profile_name
+        else:
+            self.bound_profile = self.profile_manager.get_profile("default")
+            self.profile_name = "default"
+
         self.runner = TaskRunner(storage=storage, profile_manager=self.profile_manager)
         self.pipeline = PipelineOrchestrator(storage=storage, profile_manager=self.profile_manager)
+
+        # Scoped credentials from profile .env or config fallback
+        self.owner_id = self._resolve_owner_id()
+        self.guild_id = self._resolve_guild_id()
+
+    def _resolve_owner_id(self) -> Optional[int]:
+        if "OWNER_DISCORD_ID" in self.bound_profile.env_vars:
+            try:
+                return int(self.bound_profile.env_vars["OWNER_DISCORD_ID"])
+            except ValueError:
+                pass
+        return config.owner_discord_id
+
+    def _resolve_guild_id(self) -> Optional[int]:
+        if "DISCORD_GUILD_ID" in self.bound_profile.env_vars:
+            try:
+                return int(self.bound_profile.env_vars["DISCORD_GUILD_ID"])
+            except ValueError:
+                pass
+        return config.discord_guild_id
 
     async def setup_hook(self):
         """Sync slash commands on startup."""
         await self._register_slash_commands()
-        if config.discord_guild_id:
-            guild = discord.Object(id=config.discord_guild_id)
+        if self.guild_id:
+            guild = discord.Object(id=self.guild_id)
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
-            logger.info("Synced slash commands to guild %s", config.discord_guild_id)
+            logger.info("[%s] Synced slash commands to guild %s", self.profile_name, self.guild_id)
         else:
             await self.tree.sync()
-            logger.info("Synced global slash commands")
+            logger.info("[%s] Synced global slash commands", self.profile_name)
 
     async def on_ready(self):
-        logger.info("Maulness Discord bot online as %s (ID: %s)", self.user, self.user.id)
+        logger.info(
+            "Maulness Discord bot [%s] online as %s (ID: %s)",
+            self.profile_name,
+            self.user,
+            self.user.id,
+        )
 
     async def on_message(self, message: discord.Message):
         # Strict single-user authorization gate
-        if config.owner_discord_id and message.author.id != config.owner_discord_id:
+        if self.owner_id and message.author.id != self.owner_id:
             return  # Drop silently
 
         await self.process_commands(message)
@@ -82,13 +124,14 @@ class MaulnessBot(commands.Bot):
     async def _register_slash_commands(self):
         @self.tree.command(name="status", description="Show Maulness system status and active sessions")
         async def status_cmd(interaction: discord.Interaction):
-            if config.owner_discord_id and interaction.user.id != config.owner_discord_id:
+            if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
                 return
 
             tasks = await self.storage.list_tasks(limit=5)
             embed = discord.Embed(title="Maulness System Status", color=0xDC2626)
             embed.add_field(name="Gateway", value="Online (Connected)", inline=True)
+            embed.add_field(name="Bound Profile", value=f"`{self.profile_name}`", inline=True)
             embed.add_field(name="Recent Tasks", value=str(len(tasks)), inline=True)
 
             task_summary = "\n".join(
@@ -99,7 +142,7 @@ class MaulnessBot(commands.Bot):
 
         @self.tree.command(name="profiles", description="List all available execution profiles")
         async def profiles_cmd(interaction: discord.Interaction):
-            if config.owner_discord_id and interaction.user.id != config.owner_discord_id:
+            if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
                 return
 
@@ -107,8 +150,9 @@ class MaulnessBot(commands.Bot):
             embed = discord.Embed(title="Available Agent Profiles", color=0x9333EA)
             for p in profiles:
                 target = p.model or p.command or "-"
+                is_bound = " [BOUND]" if p.name == self.profile_name else ""
                 embed.add_field(
-                    name=f"`{p.name}` ({p.provider})",
+                    name=f"`{p.name}` ({p.provider}){is_bound}",
                     value=f"**Target:** `{target}`\n{p.description}",
                     inline=False,
                 )
@@ -117,12 +161,12 @@ class MaulnessBot(commands.Bot):
         @self.tree.command(name="ask", description="Fast conversational Q&A without spawning local subprocesses")
         @app_commands.describe(query="Your question, math, or query")
         async def ask_cmd(interaction: discord.Interaction, query: str):
-            if config.owner_discord_id and interaction.user.id != config.owner_discord_id:
+            if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
                 return
 
             await interaction.response.defer()
-            status_msg = await interaction.followup.send(f"💭 **Thinking...**\n> {query[:100]}")
+            status_msg = await interaction.followup.send(f"💭 **Thinking [{self.profile_name}]...**\n> {query[:100]}")
 
             async def flush_chunk(text: str, is_final: bool):
                 try:
@@ -135,7 +179,7 @@ class MaulnessBot(commands.Bot):
             async def on_message(event: AgentMessageEvent):
                 await debouncer.write(event.delta)
 
-            profile = self.profile_manager.get_profile("default")
+            profile = self.bound_profile
             provider = get_provider_for_profile(profile)
 
             try:
@@ -159,15 +203,16 @@ class MaulnessBot(commands.Bot):
             interaction: discord.Interaction,
             repo: str,
             prompt: str,
-            profile: str = "builder",
+            profile: Optional[str] = None,
         ):
-            if config.owner_discord_id and interaction.user.id != config.owner_discord_id:
+            if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
                 return
 
+            effective_profile = profile or self.profile_name
             await interaction.response.defer()
             status_msg = await interaction.followup.send(
-                f"⏳ **Initializing task on `{repo}` using profile `{profile}`...**\n> {prompt[:100]}"
+                f"⏳ **Initializing task on `{repo}` using profile `{effective_profile}`...**\n> {prompt[:100]}"
             )
 
             # Update tag if in a forum thread
@@ -178,7 +223,7 @@ class MaulnessBot(commands.Bot):
 
             async def flush_chunk(text: str, is_final: bool):
                 try:
-                    await status_msg.edit(content=f"**[{repo}] ({profile}) Running...**\n\n{text[:1900]}")
+                    await status_msg.edit(content=f"**[{repo}] ({effective_profile}) Running...**\n\n{text[:1900]}")
                 except Exception as e:
                     logger.debug("Failed to edit Discord message: %s", e)
 
@@ -209,7 +254,7 @@ class MaulnessBot(commands.Bot):
             task_record = await self.runner.run_direct(
                 repo_name=repo,
                 prompt=prompt,
-                profile_name=profile,
+                profile_name=effective_profile,
                 on_thought=on_thought,
                 on_message=on_message,
                 on_approval=on_approval,
@@ -239,7 +284,7 @@ class MaulnessBot(commands.Bot):
             prompt="Detailed task requirements",
         )
         async def task_cmd(interaction: discord.Interaction, repo: str, title: str, prompt: str):
-            if config.owner_discord_id and interaction.user.id != config.owner_discord_id:
+            if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("⛔ Unauthorized", ephemeral=True)
                 return
 

@@ -1,7 +1,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from dotenv import dotenv_values
 import yaml
 from pydantic import BaseModel, Field
@@ -21,11 +21,12 @@ class Profile(BaseModel):
     description: str = ""
     provider: str = "acp"  # acp, antigravity_sdk, gemini, anthropic, openai, openrouter
     model: Optional[str] = None
-    api_key_env: Optional[str] = None
+    api_key_env: Optional[str] = None  # Deprecated legacy field, optional for backwards compatibility
     temperature: float = 0.7
     max_tokens: int = 4096
     command: Optional[str] = None  # ACP command (e.g. "agy")
     inject_soul: bool = True
+    soul_params: dict[str, Any] = Field(default_factory=dict)
     system_prompt: str = ""
     workspace: Optional[str] = None  # Per-profile workspace directory or repo name
     vertex: bool = False
@@ -40,38 +41,65 @@ class Profile(BaseModel):
 
     def get_api_key(self) -> Optional[str]:
         """Fetch API key prioritizing profile-specific .env, then system environment."""
+        # Provider-to-env-var standard mapping
+        std_key_names = {
+            "gemini": "GEMINI_API_KEY",
+            "antigravity_sdk": "GEMINI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "openai": "OPENAI_API_KEY",
+            "openrouter": "OPENROUTER_API_KEY",
+        }
+        key_name = self.api_key_env or std_key_names.get(self.provider)
+
         # 1. Check profile-specific .env
-        if self.api_key_env and self.api_key_env in self.env_vars:
-            return self.env_vars[self.api_key_env]
-        if "GEMINI_API_KEY" in self.env_vars and self.provider in ("gemini", "antigravity_sdk"):
-            return self.env_vars["GEMINI_API_KEY"]
+        if key_name and key_name in self.env_vars:
+            return self.env_vars[key_name]
+        for candidate in ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
+            if candidate in self.env_vars and self.provider in candidate.lower():
+                return self.env_vars[candidate]
 
         # 2. Check system environment
-        if self.api_key_env:
-            key = os.getenv(self.api_key_env)
-            if key:
-                return key
-
-        if self.provider in ("gemini", "antigravity_sdk"):
-            return os.getenv("GEMINI_API_KEY")
+        if key_name:
+            val = os.getenv(key_name)
+            if val:
+                return val
 
         return None
+
+    def interpolate_soul_text(self, text: str) -> str:
+        """Substitute {param} and {{param}} placeholders with soul_params and runtime context."""
+        ctx: dict[str, Any] = {
+            "name": self.name,
+            "profile": self.name,
+            "workspace": self.workspace or "",
+            "provider": self.provider,
+            "model": self.model or "",
+            "user": os.getenv("USER", "Maul"),
+            **self.soul_params,
+        }
+        result = text
+        for k, v in ctx.items():
+            result = result.replace(f"{{{{{k}}}}}", str(v))
+            result = result.replace(f"{{{k}}}", str(v))
+        return result
 
     def effective_system_prompt(self) -> str:
         """Combine role-specific system prompt, profile SOUL.md, root SOUL.md, and skills summary."""
         parts = []
         if self.system_prompt.strip():
-            parts.append(self.system_prompt.strip())
+            parts.append(self.interpolate_soul_text(self.system_prompt.strip()))
 
         # Profile-specific SOUL doctrine (profiles/<name>/SOUL.md)
         if self.soul_content and self.soul_content.strip():
-            parts.append("\n---\n## Profile Operating Doctrine (SOUL.md)\n" + self.soul_content.strip())
+            interpolated_soul = self.interpolate_soul_text(self.soul_content.strip())
+            parts.append("\n---\n## Profile Operating Doctrine (SOUL.md)\n" + interpolated_soul)
 
         # Global personal doctrine (~/.config/maulness/SOUL.md)
         if self.inject_soul:
             soul = get_soul_content()
             if soul:
-                parts.append("\n---\n## Personal Operating Doctrine (SOUL.md)\n" + soul)
+                interpolated_global_soul = self.interpolate_soul_text(soul)
+                parts.append("\n---\n## Personal Operating Doctrine (SOUL.md)\n" + interpolated_global_soul)
 
         # Append effective skills index
         skill_mgr = SkillManager()
@@ -117,7 +145,6 @@ class ProfileManager:
             description="Ephemeral default fallback profile",
             provider="acp" if name in ("default", "builder") else "gemini",
             model="gemini-2.5-flash",
-            api_key_env="GEMINI_API_KEY",
             command="agy" if name in ("default", "builder") else None,
         )
 
