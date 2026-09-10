@@ -163,6 +163,8 @@ class MaulnessBot(commands.Bot):
         status_msg = await channel.send(f"💭 **{self.profile_name}** is thinking...\n> {prompt[:100]}")
 
         async def flush_chunk(text: str, is_final: bool):
+            if not text.strip():
+                return
             try:
                 display_text = text if len(text) <= 1950 else text[:1950] + "…"
                 await status_msg.edit(content=display_text)
@@ -207,7 +209,7 @@ class MaulnessBot(commands.Bot):
                     on_message=on_message_chunk,
                     on_approval=on_approval,
                 )
-                if res and not debouncer.buffer:
+                if res and not debouncer.full_text:
                     await debouncer.write(res)
         except Exception as e:
             logger.exception("[%s] Error executing chat prompt: %s", self.profile_name, e)
