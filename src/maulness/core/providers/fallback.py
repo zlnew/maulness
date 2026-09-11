@@ -128,7 +128,7 @@ class FallbackProviderChain(BaseProvider):
                     next_p = chain[idx + 1]
                     next_tag = f"{next_p.profile.provider}:{next_p.profile.model or next_p.profile.command or 'default'}"
                     notice = (
-                        f"⚠️ Provider [{prov_type}:{prov_model}] failed ({friendly_msg}). "
+                        f"Provider [{prov_type}:{prov_model}] failed ({friendly_msg}). "
                         f"Switching to fallback [{next_tag}]..."
                     )
                     if on_thought:
@@ -138,7 +138,7 @@ class FallbackProviderChain(BaseProvider):
 
                 if idx == len(chain) - 1:
                     summary = "\n".join(
-                        f"• {item['provider']}:{item['model']} ➔ {item['error']}"
+                        f"- {item['provider']}:{item['model']} -> {item['error']}"
                         for item in self.chain_errors
                     )
                     raise RuntimeError(f"All configured providers failed:\n{summary}") from last_error

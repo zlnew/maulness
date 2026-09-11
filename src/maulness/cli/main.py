@@ -436,7 +436,7 @@ def task_abort(task_id: str = typer.Argument(..., help="Task ID to abort")):
                         pass
                 closed_count += 1
         console.print(
-            f"[green]✓ Aborted task '{task_id}' (closed {closed_count} sessions).[/green]"
+            f"[green]Aborted task '{task_id}' (closed {closed_count} sessions).[/green]"
         )
 
     asyncio.run(_abort())
@@ -829,7 +829,7 @@ def db_migrate():
     """Apply SQLite DDL schemas to ensure database integrity."""
     storage = StorageManager(db_path=config.db_path)
     asyncio.run(storage.initialize())
-    console.print(f"[green]✓ Applied database DDL schemas at {config.db_path}[/green]")
+    console.print(f"[green]Applied database DDL schemas at {config.db_path}[/green]")
 
 
 @db_app.command("reset")
@@ -841,7 +841,7 @@ def db_reset():
         await storage.initialize()
         res = await storage.reset_stale_sessions()
         console.print(
-            f"[green]✓ Stale database state reset:[/green] "
+            f"[green]Stale database state reset:[/green] "
             f"closed {res['sessions_closed']} sessions, marked {res['tasks_failed']} tasks failed."
         )
 

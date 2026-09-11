@@ -82,10 +82,10 @@ class DaemonScheduler:
                             timeout=5,
                         )
                         dirty_lines = [l for l in status_proc.stdout.splitlines() if l.strip()]
-                        dirty_str = f"⚠️ {len(dirty_lines)} uncommitted" if dirty_lines else "✅ clean"
-                        repo_summaries.append(f"• **`{repo_path.name}`** (`{branch}`): {dirty_str}")
+                        dirty_str = f"{len(dirty_lines)} uncommitted" if dirty_lines else "clean"
+                        repo_summaries.append(f"- **`{repo_path.name}`** (`{branch}`): {dirty_str}")
                     except Exception as e:
-                        repo_summaries.append(f"• **`{repo_path.name}`**: Error inspecting git: {e}")
+                        repo_summaries.append(f"- **`{repo_path.name}`**: Error inspecting git: {e}")
 
         # Check DB backups
         backup_dir = config.workspace_root / "_backups" / "postgres"
@@ -99,18 +99,18 @@ class DaemonScheduler:
                 backup_status = f"`{latest.name}` ({size_mb:.2f} MB) at {mtime.strftime('%Y-%m-%d %H:%M')}"
 
         embed = discord.Embed(
-            title="🌅 Morning Workspace Standup",
+            title="Morning Workspace Standup",
             description="Automated morning health sweep across personal portfolio repos and databases.",
             color=0x10B981,
             timestamp=datetime.datetime.now(),
         )
         embed.add_field(
-            name="📦 Repositories Status",
+            name="Repositories Status",
             value="\n".join(repo_summaries) if repo_summaries else "No repositories found.",
             inline=False,
         )
         embed.add_field(
-            name="💾 Latest Postgres Backup",
+            name="Latest Postgres Backup",
             value=backup_status,
             inline=False,
         )

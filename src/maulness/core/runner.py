@@ -111,7 +111,7 @@ class TaskRunner:
             if classifier.should_auto_approve(event.tool_name, event.args):
                 if verbose:
                     console.print(
-                        f"[dim cyan]⚡ [Auto-Approved{' / YOLO' if yolo else ''}] {event.tool_name}[/dim cyan]"
+                        f"[dim cyan][Auto-Approved{' / YOLO' if yolo else ''}] {event.tool_name}[/dim cyan]"
                     )
                 return True
 
@@ -133,7 +133,7 @@ class TaskRunner:
             console.print(
                 Panel(
                     details.strip(),
-                    title="⚠️  Approval Required (HITL)",
+                    title="Approval Required (HITL)",
                     border_style="yellow",
                 )
             )
@@ -141,16 +141,16 @@ class TaskRunner:
             answer = await loop.run_in_executor(None, input, "Approve execution? [y/N]: ")
             approved = answer.strip().lower() in ("y", "yes")
             if approved:
-                console.print("[green]✓ Approved[/green]\n")
+                console.print("[green]Approved[/green]\n")
             else:
-                console.print("[red]✗ Denied[/red]\n")
+                console.print("[red]Denied[/red]\n")
             return approved
 
         async def default_thought_handler(event: AgentThoughtEvent):
             if on_thought:
                 await on_thought(event)
             else:
-                console.print(f"[dim italic grey70]💭 {event.delta}[/dim italic grey70]")
+                console.print(f"[dim italic grey70][thought] {event.delta}[/dim italic grey70]")
 
         async def default_message_handler(event: AgentMessageEvent):
             if on_message:
@@ -186,16 +186,16 @@ class TaskRunner:
 
             await self.storage.update_task_status(task_id, TaskStatus.DONE)
             if verbose:
-                console.print(f"\n[bold green][+] Task {task_id} completed successfully.[/bold green]")
+                console.print(f"\n[bold green]Task {task_id} completed successfully.[/bold green]")
 
         except FileNotFoundError as e:
             if verbose:
-                console.print(f"[bold red][x] Execution error: {e}[/bold red]")
+                console.print(f"[bold red]Execution error: {e}[/bold red]")
             await self.storage.update_task_status(task_id, TaskStatus.FAILED)
             raise
         except Exception as e:
             if verbose:
-                console.print(f"\n[bold red][x] Task failed: {e}[/bold red]")
+                console.print(f"\n[bold red]Task failed: {e}[/bold red]")
             await self.storage.update_task_status(task_id, TaskStatus.FAILED)
             raise
 

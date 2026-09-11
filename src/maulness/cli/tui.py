@@ -59,10 +59,10 @@ def get_daemon_status() -> str:
             timeout=2.0,
         )
         if res.stdout.strip() == "active":
-            return "[green]● active[/green]"
+            return "[green]active[/green]"
     except Exception:
         pass
-    return "[dim]○ standby[/dim]"
+    return "[dim]standby[/dim]"
 
 
 # ==============================================================================
@@ -82,7 +82,7 @@ class CommandPaletteModal(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="palette-dialog"):
-            yield Label("[bold magenta]󰍉 Command Palette[/bold magenta] [dim](Type to filter, ↑/↓ to navigate, Enter/Tab to select, Esc to close)[/dim]", classes="palette-title")
+            yield Label("[bold magenta]Command Palette[/bold magenta] [dim](Type to filter, ↑/↓ to navigate, Enter/Tab to select, Esc to close)[/dim]", classes="palette-title")
             yield Input(value=self.initial_query, placeholder="Filter commands (/new, /pipeline, /profile, !<cmd>)...", id="palette-filter")
             ol = OptionList(id="palette-options")
             yield ol
@@ -173,7 +173,7 @@ class ApprovalModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="modal-dialog"):
-            yield Label("[bold yellow]⚠️  HITL Tool Approval Required[/bold yellow]", classes="modal-title")
+            yield Label("[bold yellow]HITL Tool Approval Required[/bold yellow]", classes="modal-title")
             yield Label(f"[bold cyan]Tool:[/bold cyan] {self.event.tool_name}", classes="modal-row")
             if self.event.tool_name == "run_command":
                 cmd = self.event.args.get("command", "")
@@ -222,7 +222,7 @@ class GateModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="modal-dialog"):
-            yield Label("[bold magenta]🚦 Pipeline Confirmation Gate[/bold magenta]", classes="modal-title")
+            yield Label("[bold magenta]Pipeline Confirmation Gate[/bold magenta]", classes="modal-title")
             yield Label(self.gate_prompt, classes="modal-row")
             with Horizontal(classes="modal-buttons"):
                 yield Button("Proceed (y)", variant="primary", id="btn-proceed")
@@ -258,7 +258,7 @@ class DiffModal(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="diff-dialog"):
-            yield Label("[bold cyan]🔍 Git Diff HEAD[/bold cyan] [dim](j/k to scroll, q or Esc to close)[/dim]")
+            yield Label("[bold cyan]Git Diff HEAD[/bold cyan] [dim](j/k to scroll, q or Esc to close)[/dim]")
             res = subprocess.run(
                 ["git", "diff", "HEAD"],
                 cwd=str(self.workspace_path),
@@ -317,7 +317,7 @@ class ProfileModal(ModalScreen[Optional[str]]):
     def on_mount(self) -> None:
         ol = self.query_one("#profile-options", OptionList)
         for idx, p in enumerate(self.profiles):
-            is_active = " [bold green]● ACTIVE[/bold green]" if p.name == self.current_profile else ""
+            is_active = " [bold green]ACTIVE[/bold green]" if p.name == self.current_profile else ""
             label = f"[bold cyan]{p.name}[/bold cyan] ({p.provider}) — [dim]{p.description[:50]}[/dim]{is_active}"
             ol.add_option(Option(label, id=p.name))
             if p.name == self.current_profile:
@@ -445,7 +445,7 @@ class AgentCard(Static):
         self.thought_static = Static("", classes="thought-box")
         self.tools_static = Static("", classes="tools-box")
         self.message_static = Static("", classes="card-body")
-        self.status_label = Label("[dim]󰑮 Initializing...[/dim]")
+        self.status_label = Label("[dim]Initializing...[/dim]")
 
         self._last_render_time = 0.0
 
@@ -459,17 +459,17 @@ class AgentCard(Static):
 
     def append_thought(self, delta: str) -> None:
         self.thought_text.append(delta)
-        if "⚠️ Provider" in delta or "Switching to fallback" in delta:
+        if "Provider" in delta or "Switching to fallback" in delta:
             self.status_label.update(f"[bold yellow]{delta.strip()}[/bold yellow]")
         if not self.has_started_message:
             elapsed = time.time() - self.thought_start_time
             full_thought = "".join(self.thought_text).strip()
             lines = [line.strip() for line in full_thought.splitlines() if line.strip()]
             snippet = lines[-1][:75] if lines else "Thinking..."
-            self.thought_static.update(f"[dim italic cyan]💭 Thinking ({elapsed:.1f}s):[/dim italic cyan] [dim]{snippet}[/dim]")
+            self.thought_static.update(f"[dim italic cyan]Thinking ({elapsed:.1f}s):[/dim italic cyan] [dim]{snippet}[/dim]")
             self.thought_static.add_class("visible")
-            if "⚠️ Provider" not in delta:
-                self.status_label.update("[dim cyan]󰑮 Thinking...[/dim cyan]")
+            if "Provider" not in delta:
+                self.status_label.update("[dim cyan]Thinking...[/dim cyan]")
 
     def record_tool_call(self, tool_name: str, args: Any = None) -> None:
         summary = ""
@@ -486,7 +486,7 @@ class AgentCard(Static):
                 summary = f": {args['TargetFile']}"
             elif "AbsolutePath" in args:
                 summary = f": {args['AbsolutePath']}"
-        self.tools_static.update(f"[bold yellow]⚡ Tool:[/bold yellow] [dim]{tool_name}{summary}[/dim]")
+        self.tools_static.update(f"[bold yellow]Tool:[/bold yellow] [dim]{tool_name}{summary}[/dim]")
         self.tools_static.add_class("visible")
 
     def append_message(self, delta: str, force_render: bool = False) -> None:
@@ -494,12 +494,12 @@ class AgentCard(Static):
             self.has_started_message = True
             self.thought_duration = time.time() - self.thought_start_time
             if self.thought_text:
-                self.thought_static.update(f"[dim]💭 Thought for {self.thought_duration:.1f}s[/dim]")
+                self.thought_static.update(f"[dim]Thought for {self.thought_duration:.1f}s[/dim]")
                 self.thought_static.add_class("visible")
             else:
                 self.thought_static.remove_class("visible")
                 self.thought_static.update("")
-            self.status_label.update("[dim]󰑮 Streaming response...[/dim]")
+            self.status_label.update("[dim]Streaming response...[/dim]")
 
         self.message_text.append(delta)
         now = time.time()
@@ -515,7 +515,7 @@ class AgentCard(Static):
     def flush_final(self) -> None:
         if not self.has_started_message and self.thought_text:
             duration = time.time() - self.thought_start_time
-            self.thought_static.update(f"[dim]💭 Thought for {duration:.1f}s[/dim]")
+            self.thought_static.update(f"[dim]Thought for {duration:.1f}s[/dim]")
             self.thought_static.add_class("visible")
         self._render_message()
 
@@ -532,7 +532,7 @@ class PipelineCard(Static):
         self.pipeline_name = pipeline_name
         self.goal = goal
         self.stages_static = Static("")
-        self.status_label = Label("[dim]󰑮 Initializing pipeline...[/dim]")
+        self.status_label = Label("[dim]Initializing pipeline...[/dim]")
         self.output_static = Static("", classes="card-body")
 
     def compose(self) -> ComposeResult:
@@ -546,7 +546,7 @@ class PipelineCard(Static):
 
     def update_stage(self, stage_name: str, profile: str, current: int, total: int) -> None:
         self.stages_static.update(
-            f"[bold yellow]▶ Stage {current}/{total}:[/bold yellow] [bold]{stage_name}[/bold] ([magenta]{profile}[/magenta])"
+            f"[bold yellow]Stage {current}/{total}:[/bold yellow] [bold]{stage_name}[/bold] ([magenta]{profile}[/magenta])"
         )
         self.status_label.update(f"[dim]Running stage {current} of {total}...[/dim]")
 
@@ -563,7 +563,7 @@ class PipelineCard(Static):
 class MaulnessTUIApp(App):
     """Full-screen Neovim-styled terminal harness for Maulness."""
 
-    TITLE = "Maulness ⚡"
+    TITLE = "Maulness"
     CSS = """
     Screen {
         background: transparent;
@@ -803,7 +803,7 @@ class MaulnessTUIApp(App):
         daemon_str = get_daemon_status()
 
         yield Static(
-            f"[bold red]⚡ MAULNESS[/bold red] │ [bold green]repo:[/bold green] {self.repo_name} │ "
+            f"[bold red]MAULNESS[/bold red] │ [bold green]repo:[/bold green] {self.repo_name} │ "
             f"[bold cyan]branch:[/bold cyan] {branch} │ [bold magenta]profile:[/bold magenta] {self.current_profile} │ "
             f"{daemon_str}",
             id="top-bar",
@@ -850,7 +850,7 @@ class MaulnessTUIApp(App):
 
         # 2. Pipelines from PipelineManager (custom user YAMLs + templates)
         for pipe in self.pipeline_manager.list_pipelines():
-            stages_summary = " ➔ ".join(s.name for s in pipe.stages)
+            stages_summary = " -> ".join(s.name for s in pipe.stages)
             desc = pipe.description or f"Pipeline {pipe.name}"
             if stages_summary:
                 desc = f"{desc} ({stages_summary})"
@@ -915,7 +915,7 @@ class MaulnessTUIApp(App):
         wt_badge = " │ [bold cyan]WT[/bold cyan]" if self.use_worktree else ""
         top_bar = self.query_one("#top-bar", Static)
         top_bar.update(
-            f"[bold red]⚡ MAULNESS[/bold red] │ [bold green]repo:[/bold green] {self.repo_name} │ "
+            f"[bold red]MAULNESS[/bold red] │ [bold green]repo:[/bold green] {self.repo_name} │ "
             f"[bold cyan]branch:[/bold cyan] {branch} │ [bold magenta]profile:[/bold magenta] {self.current_profile}{yolo_badge}{wt_badge} │ "
             f"{daemon_str} │ {status_text}"
         )
@@ -1195,7 +1195,7 @@ class MaulnessTUIApp(App):
             chat_view = self.query_one("#chat-view", VerticalScroll)
             await chat_view.mount(
                 SystemCard(
-                    "✨ New Session",
+                    "New Session",
                     f"Reset active conversation context for repo **{self.repo_name}**.\n"
                     f"Operating profile: **{self.current_profile}**.",
                 )
@@ -1208,7 +1208,7 @@ class MaulnessTUIApp(App):
             chat_view = self.query_one("#chat-view", VerticalScroll)
             if self.is_busy:
                 self.cancel_active_task()
-                await chat_view.mount(SystemCard("Stopped", "⏹ Active task cancelled upon user request."))
+                await chat_view.mount(SystemCard("Stopped", "Active task cancelled upon user request."))
             else:
                 await chat_view.mount(SystemCard("Info", "No task is currently running."))
             chat_view.scroll_end(animate=False)
@@ -1227,7 +1227,7 @@ class MaulnessTUIApp(App):
             chat_view = self.query_one("#chat-view", VerticalScroll)
             if self.is_busy:
                 self.cancel_active_task()
-                await chat_view.mount(SystemCard("Interrupt", f"⚡ Interrupted previous task to steer: {steer_prompt}"))
+                await chat_view.mount(SystemCard("Interrupt", f"Interrupted previous task to steer: {steer_prompt}"))
                 chat_view.scroll_end(animate=False)
 
             self.active_worker = self.run_worker(self._execute_direct(steer_prompt), exclusive=True)
@@ -1338,7 +1338,7 @@ class MaulnessTUIApp(App):
             chat_view.remove_children()
             await chat_view.mount(
                 SystemCard(
-                    "📦 Context Compacted",
+                    "Context Compacted",
                     f"Saved summary to SQLite ([bold magenta]session_memories[/bold magenta]).\n"
                     f"Session transcript compressed into memory. Active context reset for lean token usage.\n"
                     f"Persisted in: [dim]{config.db_path}[/dim]",
@@ -1495,11 +1495,11 @@ class MaulnessTUIApp(App):
                 on_approval=on_approval,
                 verbose=False,
             )
-            agent_card.set_status(f"[green]✓ Completed ({task.status.value})[/green]")
+            agent_card.set_status(f"[green]Completed ({task.status.value})[/green]")
         except asyncio.CancelledError:
-            agent_card.set_status("[bold red]⏹ Stopped by user[/bold red]")
+            agent_card.set_status("[bold red]Stopped by user[/bold red]")
         except Exception as e:
-            agent_card.set_status(f"[red]✗ Failed: {e}[/red]")
+            agent_card.set_status(f"[red]Failed: {e}[/red]")
         finally:
             self.is_busy = False
             self._update_top_bar()
@@ -1560,11 +1560,11 @@ class MaulnessTUIApp(App):
                 on_stage_start=on_stage_start,
                 verbose=False,
             )
-            p_card.finish(f"[green]✓ Pipeline Finished ({task.status.value})[/green]")
+            p_card.finish(f"[green]Pipeline Finished ({task.status.value})[/green]")
         except asyncio.CancelledError:
-            p_card.finish("[bold red]⏹ Pipeline stopped by user[/bold red]")
+            p_card.finish("[bold red]Pipeline stopped by user[/bold red]")
         except Exception as e:
-            p_card.finish(f"[red]✗ Pipeline Failed: {e}[/red]")
+            p_card.finish(f"[red]Pipeline Failed: {e}[/red]")
         finally:
             self.is_busy = False
             self._update_top_bar()

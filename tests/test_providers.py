@@ -103,7 +103,7 @@ async def test_fallback_provider_chain_execution_failover():
     assert result == "Fallback succeeded!"
     assert chain.last_used_provider == mock_fallback
     assert len(thought_events) == 1
-    assert "⚠️ Provider [gemini:default] failed (Rate limit / quota exceeded (429))" in thought_events[0]
+    assert "Provider [gemini:default] failed (Rate limit / quota exceeded (429))" in thought_events[0]
     assert "Switching to fallback [anthropic:default]" in thought_events[0]
     mock_primary.run.assert_called_once()
     mock_fallback.run.assert_called_once()
@@ -132,8 +132,8 @@ async def test_fallback_provider_chain_all_fail_aggregates_errors():
 
     err_text = str(exc_info.value)
     assert "All configured providers failed" in err_text
-    assert "gemini:gemini-3.8-flash ➔ Internal server error (500)" in err_text
-    assert "ollama:gemma4:31b-cloud ➔ Request timed out" in err_text
+    assert "gemini:gemini-3.8-flash -> Internal server error (500)" in err_text
+    assert "ollama:gemma4:31b-cloud -> Request timed out" in err_text
 
 
 def test_format_user_friendly_error():

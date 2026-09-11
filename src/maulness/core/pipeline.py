@@ -176,7 +176,7 @@ class PipelineOrchestrator:
                     await on_stage_finish(stage, stage_output)
 
                 if verbose:
-                    console.print(f"[green]✓ Stage '{stage.name}' complete.[/green]")
+                    console.print(f"[green]Stage '{stage.name}' complete.[/green]")
 
             # All stages finished successfully
             await self.storage.update_task_status(task_id, TaskStatus.DONE)

@@ -59,7 +59,7 @@ class TerminalLiveRenderer:
                 spinner = Spinner("dots", text=f" [dim italic]Thinking: {thought_text[-120:].strip()}[/dim italic]")
                 content.append(spinner)
             else:
-                content.append(f"[dim italic grey70]💭 {thought_text[-150:].strip()}[/dim italic grey70]")
+                content.append(f"[dim italic grey70][thought] {thought_text[-150:].strip()}[/dim italic grey70]")
 
         # Render message tokens as Markdown
         msg_text = "".join(self.tokens)

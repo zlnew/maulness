@@ -211,7 +211,7 @@ async def execute_tool_call(
                 return f"Error: Directory '{target}' not found."
             entries = []
             for item in sorted(target.iterdir()):
-                prefix = "📁 " if item.is_dir() else "📄 "
+                prefix = "[dir] " if item.is_dir() else "[file] "
                 entries.append(f"{prefix}{item.name}")
             return "\n".join(entries) or "(Directory is empty)"
         except Exception as e:
@@ -253,7 +253,7 @@ def format_lean_tool_breadcrumb(name: str, args: dict[str, Any], result: str) ->
 
     # If single-line or brief output (<= 120 chars, no newlines)
     if "\n" not in clean_res and len(clean_res) <= 120:
-        return f"> ⚡ **`{label}`** ➔ `{clean_res}`\n\n"
+        return f"> **`{label}`** -> `{clean_res}`\n\n"
 
     # Multiline output: compact preview
     preview_lines = clean_res.splitlines()
@@ -261,5 +261,5 @@ def format_lean_tool_breadcrumb(name: str, args: dict[str, Any], result: str) ->
         preview = "\n".join(preview_lines[:6]) + f"\n... (+{len(preview_lines)-6} more lines)"
     else:
         preview = clean_res
-    return f"> ⚡ **`{label}`**:\n```\n{preview}\n```\n\n"
+    return f"> **`{label}`**:\n```\n{preview}\n```\n\n"
 
