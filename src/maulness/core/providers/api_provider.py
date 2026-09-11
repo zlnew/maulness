@@ -23,10 +23,41 @@ from maulness.core.tools import (
     execute_tool_call,
     extract_checkpoint_info,
     format_lean_tool_breadcrumb,
+    tombstone_tool_output,
 )
 from maulness.storage.db import StorageManager
 
 logger = logging.getLogger("maulness.providers.api")
+
+
+def compact_in_flight_tool_messages(messages: list[dict[str, Any]], keep_recent: int = 3) -> None:
+    """Compact older tool messages in place to preserve context window and attention fidelity."""
+    tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    if len(tool_indices) <= keep_recent:
+        return
+
+    to_compact = tool_indices[:-keep_recent]
+    for idx in to_compact:
+        msg = messages[idx]
+        raw_content = msg.get("content", "")
+        # Only compact substantial content that has not already been compacted
+        if len(raw_content) > 200 and not raw_content.startswith("[Tool result for "):
+            call_id = msg.get("tool_call_id")
+            name = "tool"
+            args: dict[str, Any] = {}
+            for prev_idx in range(idx - 1, -1, -1):
+                prev_msg = messages[prev_idx]
+                if prev_msg.get("role") == "assistant":
+                    for tc in prev_msg.get("tool_calls", []):
+                        if tc.get("id") == call_id:
+                            name = tc.get("function", {}).get("name", "tool")
+                            try:
+                                args = json.loads(tc.get("function", {}).get("arguments", "{}"))
+                            except Exception:
+                                pass
+                            break
+                    break
+            msg["content"] = tombstone_tool_output(name, args, raw_content)
 
 
 class UnifiedApiProvider(BaseProvider):
@@ -334,6 +365,7 @@ class UnifiedApiProvider(BaseProvider):
                     if asst_tool_calls:
                         current_messages.append({"role": "assistant", "tool_calls": asst_tool_calls})
                         current_messages.extend(tool_results)
+                        compact_in_flight_tool_messages(current_messages, keep_recent=3)
                         payload["messages"] = current_messages
 
                         if max_tool_turns > 0 and turn_count >= max_tool_turns:
@@ -430,6 +462,7 @@ class UnifiedApiProvider(BaseProvider):
                             "tool_call_id": call_id,
                             "content": tool_result,
                         })
+                        compact_in_flight_tool_messages(current_messages, keep_recent=3)
                         payload["messages"] = current_messages
 
                         if max_tool_turns > 0 and turn_count >= max_tool_turns:

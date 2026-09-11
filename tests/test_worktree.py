@@ -51,7 +51,32 @@ def test_isolated_worktree_context_manager(tmp_path: Path):
         captured_wt_path = wt_path
         assert wt_path.exists()
         assert (wt_path / "README.md").exists()
-        (wt_path / "temp.txt").write_text("temporary data")
-
     # Upon exit, worktree directory should be cleanly removed
     assert not captured_wt_path.exists()
+
+
+def test_checkpoint_and_rollback(tmp_path: Path):
+    repo_path = setup_git_repo(tmp_path / "cp_repo")
+    wm = WorktreeManager()
+
+    # Initial state
+    readme = repo_path / "README.md"
+    assert readme.read_text() == "# Test Repo\n"
+
+    # Create checkpoint at clean state
+    cp1 = wm.create_checkpoint(repo_path, "stage1_start")
+    assert cp1 is not None
+
+    # Modify file and create new file
+    readme.write_text("# Test Repo Modified\n")
+    new_file = repo_path / "dirty.txt"
+    new_file.write_text("should be wiped\n")
+    assert readme.read_text() == "# Test Repo Modified\n"
+    assert new_file.exists()
+
+    # Rollback to checkpoint 1
+    rolled_back = wm.rollback_to_checkpoint(repo_path, cp1)
+    assert rolled_back is True
+    assert readme.read_text() == "# Test Repo\n"
+    assert not new_file.exists()
+

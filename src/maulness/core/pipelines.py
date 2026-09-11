@@ -23,6 +23,7 @@ class StageTransitions(BaseModel):
     rework_target: Optional[str] = None
     fail_target: Optional[str] = None
     max_reworks: int = 2
+    rollback_on_rework: bool = False
 
 
 class PipelineStage(BaseModel):
@@ -33,6 +34,7 @@ class PipelineStage(BaseModel):
     requires_diff: bool = False
     requires_approval: bool = False
     use_worktree: bool = False
+    checkpoint_before_stage: bool = False
     prompt: str
     gate: Optional[PipelineGate] = None
     transitions: Optional[StageTransitions] = None

@@ -1016,6 +1016,36 @@ async def test_unified_api_provider_unlimited_tool_turns(tmp_path):
     assert "[Relay Checkpoint" not in result
 
 
+def test_compact_in_flight_tool_messages():
+    from maulness.core.providers.api_provider import compact_in_flight_tool_messages
+
+    messages = [
+        {"role": "system", "content": "You are an assistant."},
+        {"role": "user", "content": "Fix code"},
+        # Turn 1: tool call
+        {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "run_command", "arguments": '{"command": "pytest"}'}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "Very long output\n" * 30},
+        # Turn 2: tool call
+        {"role": "assistant", "tool_calls": [{"id": "call_2", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "foo.py"}'}}]},
+        {"role": "tool", "tool_call_id": "call_2", "content": "File lines\n" * 30},
+        # Turn 3: tool call
+        {"role": "assistant", "tool_calls": [{"id": "call_3", "type": "function", "function": {"name": "replace_file_content", "arguments": '{"path": "foo.py"}'}}]},
+        {"role": "tool", "tool_call_id": "call_3", "content": "Replacement result\n" * 30},
+        # Turn 4: tool call (recent)
+        {"role": "assistant", "tool_calls": [{"id": "call_4", "type": "function", "function": {"name": "run_command", "arguments": '{"command": "pytest"}'}}]},
+        {"role": "tool", "tool_call_id": "call_4", "content": "Recent output\n" * 30},
+    ]
+
+    compact_in_flight_tool_messages(messages, keep_recent=3)
+
+    assert "[Tool result for 'run_command' (`pytest`) compacted:" in messages[3]["content"]
+    assert "Very long output" not in messages[3]["content"]
+    assert "File lines" in messages[5]["content"]
+    assert "Replacement result" in messages[7]["content"]
+    assert "Recent output" in messages[9]["content"]
+
+
+
 
 
 

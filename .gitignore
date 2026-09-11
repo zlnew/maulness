@@ -49,3 +49,6 @@ htmlcov/
 
 # Logs
 *.log
+
+# Runtime agent metadata
+.maulness/

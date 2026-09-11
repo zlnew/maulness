@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import subprocess
 import uuid
 from pathlib import Path
@@ -28,7 +29,60 @@ from maulness.core.providers.factory import get_provider_for_profile
 from maulness.core.worktree import WorktreeManager
 from maulness.storage.db import StorageManager
 
+logger = logging.getLogger("maulness.pipeline")
 console = Console()
+
+
+def sync_task_ledger(
+    workspace: Path,
+    task_id: str,
+    title: str,
+    definition: PipelineDefinition,
+    current_stage_idx: int,
+    rework_counts: dict[str, int],
+    context: dict[str, Any],
+) -> str:
+    """Create or update durable .maulness/task.md in target workspace."""
+    ledger_dir = workspace / ".maulness"
+    ledger_path = ledger_dir / "task.md"
+    try:
+        ledger_dir.mkdir(parents=True, exist_ok=True)
+        total_stages = len(definition.stages)
+        current_stage = definition.stages[current_stage_idx] if current_stage_idx < total_stages else None
+
+        stage_lines = []
+        for idx, s in enumerate(definition.stages):
+            if idx < current_stage_idx:
+                prefix = "- [x]"
+                state_str = "Passed"
+            elif idx == current_stage_idx:
+                prefix = "- [/]"
+                reworks = rework_counts.get(s.name, 0)
+                rework_str = f" (Rework {reworks})" if reworks > 0 else ""
+                state_str = f"Active{rework_str}"
+            else:
+                prefix = "- [ ]"
+                state_str = "Pending"
+            stage_lines.append(f"{prefix} **{s.name.title()}** (`{s.profile}`) - {state_str}")
+
+        stages_checklist = "\n".join(stage_lines)
+        notes = context.get("reviewer_feedback") or context.get("prompt") or "(No additional notes)"
+
+        content = (
+            f"# Task Ledger: {title}\n\n"
+            f"- **Task ID:** `{task_id}`\n"
+            f"- **Pipeline:** `{definition.name}`\n"
+            f"- **Active Stage:** `{current_stage.name if current_stage else 'Complete'}`\n\n"
+            f"## Pipeline Execution Progress\n"
+            f"{stages_checklist}\n\n"
+            f"## Active Objective & Feedback\n"
+            f"{notes}\n"
+        )
+        ledger_path.write_text(content, encoding="utf-8")
+        return content
+    except Exception as e:
+        logger.warning("Failed to sync task ledger to '%s': %s", ledger_path, e)
+        return ""
 
 
 class PipelineOrchestrator:
@@ -102,17 +156,42 @@ class PipelineOrchestrator:
                 "previous_output": "",
                 "rework_feedback_block": "",
                 "reviewer_feedback": "",
+                "task_ledger": "",
             }
 
             total_stages = len(definition.stages)
             stage_map = {s.name: i for i, s in enumerate(definition.stages)}
             rework_counts: dict[str, int] = {}
             stage_executions: dict[str, int] = {}
+            stage_checkpoints: dict[str, str] = {}
 
             stage_index = 0
             while stage_index < total_stages:
                 stage = definition.stages[stage_index]
                 display_idx = stage_index + 1
+
+                # Sync durable task ledger in workspace
+                context["task_ledger"] = sync_task_ledger(
+                    effective_workspace,
+                    task_id,
+                    title,
+                    definition,
+                    stage_index,
+                    rework_counts,
+                    context,
+                )
+
+                # Capture pre-stage git checkpoint if explicitly requested or rollback configured
+                should_checkpoint = (
+                    stage.checkpoint_before_stage
+                    or bool(stage.transitions and stage.transitions.rollback_on_rework)
+                )
+                if should_checkpoint and self.worktree_manager.is_git_repo(effective_workspace):
+                    exec_count = stage_executions.get(stage.name, 0)
+                    cp_label = f"{task_id}_{stage.name}_r{exec_count}"
+                    cp_hash = self.worktree_manager.create_checkpoint(effective_workspace, cp_label)
+                    if cp_hash:
+                        stage_checkpoints[stage.name] = cp_hash
 
                 # Check gate before stage begins if specified
                 if stage.gate and not effective_auto_proceed:
@@ -214,6 +293,18 @@ class PipelineOrchestrator:
                                         f"(Cycle {rework_counts[stage.name]}/{stage.transitions.max_reworks}). "
                                         f"Looping back to '{target_name}'...[/bold yellow]"
                                     )
+                                # Rollback working tree if configured on stage transitions
+                                if stage.transitions.rollback_on_rework:
+                                    target_cp = stage_checkpoints.get(target_name)
+                                    if target_cp:
+                                        rolled_back = self.worktree_manager.rollback_to_checkpoint(
+                                            effective_workspace, target_cp
+                                        )
+                                        if rolled_back and verbose:
+                                            console.print(
+                                                f"[bold yellow][!] Rolled back working tree to pre-stage checkpoint "
+                                                f"{target_cp[:8]} for clean rework restart.[/bold yellow]"
+                                            )
                                 context["reviewer_feedback"] = stage_output
                                 context["rework_feedback_block"] = (
                                     f"\n## Reviewer Feedback (Rework Cycle {rework_counts[stage.name]}/{stage.transitions.max_reworks})\n"
@@ -262,6 +353,18 @@ class PipelineOrchestrator:
 
             # All stages finished successfully
             await self.storage.update_task_status(task_id, TaskStatus.DONE)
+
+            # Final sync for task ledger marking completion
+            sync_task_ledger(
+                effective_workspace,
+                task_id,
+                title,
+                definition,
+                total_stages,
+                rework_counts,
+                context,
+            )
+
             if verbose:
                 console.print(
                     f"\n[bold green][+] Pipeline '{definition.name}' completed successfully![/bold green]"

@@ -217,9 +217,10 @@ async def test_orchestrator_cyclic_rework_loop(tmp_path: Path, monkeypatch):
 
     orchestrator = PipelineOrchestrator(storage=storage, pipeline_manager=pipeline_manager)
     task = await orchestrator.run_pipeline(
-        repo_name="maulness",
+        repo_name="cyclic_repo",
         title="Cyclic Feature Task",
         prompt="Add balance validation",
+        workspace_path=tmp_path / "ws1",
         pipeline_def=cyclic_pipeline,
         auto_proceed=True,
     )
@@ -296,9 +297,10 @@ async def test_orchestrator_cyclic_max_reworks_cap(tmp_path: Path, monkeypatch):
 
     orchestrator = PipelineOrchestrator(storage=storage, pipeline_manager=pipeline_manager)
     task = await orchestrator.run_pipeline(
-        repo_name="maulness",
+        repo_name="stubborn_repo",
         title="Stubborn Task",
         prompt="Do something impossible",
+        workspace_path=tmp_path / "ws2",
         pipeline_def=cyclic_pipeline,
         auto_proceed=True,
     )
@@ -306,11 +308,117 @@ async def test_orchestrator_cyclic_max_reworks_cap(tmp_path: Path, monkeypatch):
     # Must halt with FAILED when max_reworks ceiling is hit
     assert task.status == TaskStatus.FAILED
 
-    # Cycle breakdown:
-    # 1. building initial
-    # 2. review initial -> rework 1/2
-    # 3. building rework 1
-    # 4. review rework 1 -> rework 2/2
-    # 5. building rework 2
     # 6. review rework 2 -> hits cap (2 >= 2) -> halts
     assert len(executed_prompts) == 6
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rework_with_rollback(tmp_path: Path, monkeypatch):
+    from maulness.core.pipeline import PipelineOrchestrator
+    from maulness.core.worktree import WorktreeManager
+    from maulness.core.models import TaskStatus
+    from maulness.storage.db import StorageManager
+
+    repo_path = tmp_path / "rollback_repo"
+    wm = WorktreeManager()
+    # Setup git repo
+    repo_path.mkdir(parents=True, exist_ok=True)
+    import subprocess
+    subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_path), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@maulness.local"], cwd=str(repo_path), check=True)
+    subprocess.run(["git", "config", "user.name", "Maulness Tester"], cwd=str(repo_path), check=True)
+    (repo_path / "README.md").write_text("# Initial\n")
+    subprocess.run(["git", "add", "README.md"], cwd=str(repo_path), check=True)
+    subprocess.run(["git", "commit", "-m", "Initial"], cwd=str(repo_path), check=True)
+
+    storage = StorageManager(db_path=tmp_path / "test.db")
+    pipeline_manager = PipelineManager(pipelines_dir=tmp_path / "pipes")
+
+    rollback_pipeline = PipelineDefinition(
+        name="rollback_pipe",
+        description="Pipeline testing rollback on rework",
+        stages=[
+            PipelineStage(
+                name="building",
+                profile="builder",
+                status="building",
+                checkpoint_before_stage=True,
+                prompt="Build feature: {title}",
+            ),
+            PipelineStage(
+                name="review",
+                profile="reviewer",
+                status="review",
+                prompt="Review changes",
+                transitions=StageTransitions(
+                    rework_target="building",
+                    max_reworks=1,
+                    rollback_on_rework=True,
+                ),
+            ),
+        ],
+    )
+
+    call_count = 0
+
+    class RollbackMockProvider:
+        async def run(self, prompt, session_id=None, workspace_path=None, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            ws = Path(workspace_path)
+            if "review" in (session_id or ""):
+                return "[DECISION: REWORK]\nFlawed logic, restart needed."
+            else:
+                # Building stage: write a file
+                (ws / f"attempt_{call_count}.txt").write_text("Dirty state")
+                return f"Built attempt {call_count}"
+
+    from maulness.core import pipeline as pipeline_module
+    monkeypatch.setattr(pipeline_module, "get_provider_for_profile", lambda p: RollbackMockProvider())
+
+    orchestrator = PipelineOrchestrator(storage=storage, pipeline_manager=pipeline_manager, worktree_manager=wm)
+    task = await orchestrator.run_pipeline(
+        repo_name="rollback_repo",
+        title="Rollback Test",
+        prompt="Build and review",
+        workspace_path=repo_path,
+        pipeline_def=rollback_pipeline,
+        auto_proceed=True,
+    )
+
+    # Building was called twice: attempt 1 and attempt 2 (after rework)
+    # Because rollback_on_rework was True, attempt_1.txt must have been rolled back when rework occurred!
+    assert not (repo_path / "attempt_1.txt").exists()
+    assert (repo_path / "attempt_3.txt").exists()  # attempt 3 is call_count 3 (building rework)
+
+
+def test_sync_task_ledger(tmp_path: Path):
+    from maulness.core.pipeline import sync_task_ledger
+
+    definition = PipelineDefinition(
+        name="standard",
+        description="Standard Kanban flow",
+        stages=[
+            PipelineStage(name="planning", profile="planner", prompt="Plan"),
+            PipelineStage(name="building", profile="builder", prompt="Build"),
+            PipelineStage(name="review", profile="reviewer", prompt="Review"),
+        ],
+    )
+
+    ledger = sync_task_ledger(
+        workspace=tmp_path,
+        task_id="task_12345",
+        title="Add caching layer",
+        definition=definition,
+        current_stage_idx=1,
+        rework_counts={"building": 1},
+        context={"reviewer_feedback": "Check cache invalidation"},
+    )
+
+    assert (tmp_path / ".maulness" / "task.md").exists()
+    assert "# Task Ledger: Add caching layer" in ledger
+    assert "- [x] **Planning**" in ledger
+    assert "- [/] **Building** (`builder`) - Active (Rework 1)" in ledger
+    assert "- [ ] **Review**" in ledger
+    assert "Check cache invalidation" in ledger
+

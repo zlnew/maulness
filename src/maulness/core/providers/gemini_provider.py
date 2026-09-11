@@ -24,10 +24,36 @@ from maulness.core.tools import (
     execute_tool_call,
     extract_checkpoint_info,
     format_lean_tool_breadcrumb,
+    tombstone_tool_output,
 )
 from maulness.storage.db import StorageManager
 
 logger = logging.getLogger("maulness.providers.gemini")
+
+
+def compact_gemini_in_flight_contents(contents: list[Any], keep_recent: int = 3) -> None:
+    """Compact older Gemini function_response parts in place to protect context window."""
+    resp_entries = []
+    for c_idx, content in enumerate(contents):
+        parts = getattr(content, "parts", None)
+        if parts:
+            for p_idx, part in enumerate(parts):
+                fn_resp = getattr(part, "function_response", None)
+                if fn_resp:
+                    resp_entries.append((c_idx, p_idx, fn_resp))
+
+    if len(resp_entries) <= keep_recent:
+        return
+
+    to_compact = resp_entries[:-keep_recent]
+    for c_idx, p_idx, fn_resp in to_compact:
+        resp_dict = getattr(fn_resp, "response", None)
+        if isinstance(resp_dict, dict) and "result" in resp_dict:
+            raw_res = str(resp_dict["result"])
+            if len(raw_res) > 200 and not raw_res.startswith("[Tool result for "):
+                fn_name = getattr(fn_resp, "name", "tool")
+                tombstone = tombstone_tool_output(fn_name, {}, raw_res)
+                resp_dict["result"] = tombstone
 
 
 class GeminiProvider(BaseProvider):
@@ -303,6 +329,7 @@ class GeminiProvider(BaseProvider):
 
                     current_contents.append(types.Content(role="model", parts=model_parts))
                     current_contents.append(types.Content(role="user", parts=tool_response_parts))
+                    compact_gemini_in_flight_contents(current_contents, keep_recent=3)
 
                     if max_tool_turns > 0 and turn_count >= max_tool_turns:
                         forcing_synthesis = True

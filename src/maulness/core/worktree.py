@@ -1,10 +1,13 @@
 import contextlib
+import logging
 import os
 import shutil
 import subprocess
 import uuid
 from pathlib import Path
 from typing import Generator, Optional
+
+logger = logging.getLogger("maulness.worktree")
 
 
 class WorktreeManager:
@@ -133,3 +136,66 @@ class WorktreeManager:
                 force=True,
                 delete_branch=delete_branch,
             )
+
+    def create_checkpoint(self, repo_path: Path, label: str) -> Optional[str]:
+        """Create a lightweight Git checkpoint commit or capture current HEAD hash."""
+        if not self.is_git_repo(repo_path):
+            return None
+        try:
+            status_res = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            has_changes = bool(status_res.stdout.strip())
+            if has_changes:
+                subprocess.run(["git", "add", "-A"], cwd=str(repo_path), capture_output=True, timeout=10)
+                subprocess.run(
+                    ["git", "commit", "-m", f"checkpoint: {label}", "--allow-empty"],
+                    cwd=str(repo_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+
+            rev_res = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if rev_res.returncode == 0:
+                commit_hash = rev_res.stdout.strip()
+                logger.info("Created git checkpoint '%s' at %s", label, commit_hash[:8])
+                return commit_hash
+        except Exception as e:
+            logger.warning("Failed to create git checkpoint '%s': %s", label, e)
+        return None
+
+    def rollback_to_checkpoint(self, repo_path: Path, commit_hash: str) -> bool:
+        """Reset repository working tree cleanly to the specified commit hash."""
+        if not self.is_git_repo(repo_path) or not commit_hash:
+            return False
+        try:
+            logger.info("Rolling back working tree in '%s' to %s", repo_path, commit_hash[:8])
+            reset_res = subprocess.run(
+                ["git", "reset", "--hard", commit_hash],
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            clean_res = subprocess.run(
+                ["git", "clean", "-fd"],
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            return reset_res.returncode == 0 and clean_res.returncode == 0
+        except Exception as e:
+            logger.error("Failed to rollback to checkpoint %s: %s", commit_hash, e)
+            return False

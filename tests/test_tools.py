@@ -8,7 +8,9 @@ def test_tool_definitions():
     names = [t["function"]["name"] for t in TOOL_DEFINITIONS]
     assert "run_command" in names
     assert "read_file" in names
+    assert "replace_file_content" in names
     assert "write_file" in names
+    assert "search_files" in names
     assert "list_dir" in names
     assert "git_status" in names
 
@@ -290,5 +292,178 @@ async def test_execute_run_command_sandboxed_allows_workspace_write(tmp_path: Pa
     )
     assert "inside_test.txt" in res
     assert (tmp_path / "inside_test.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_execute_read_file_line_slicing(tmp_path: Path):
+    target = tmp_path / "numbers.txt"
+    target.write_text("\n".join(f"Line {i}" for i in range(1, 21)))
+
+    # Read slice 5 to 8
+    res = await execute_tool_call(
+        name="read_file",
+        args={"path": "numbers.txt", "start_line": 5, "end_line": 8},
+        workspace_path=tmp_path,
+    )
+    assert "[numbers.txt lines 5-8 of 20]" in res
+    assert "L5: Line 5" in res
+    assert "L8: Line 8" in res
+    assert "Line 4" not in res
+    assert "Line 9" not in res
+
+    # Out of bounds start_line
+    err_res = await execute_tool_call(
+        name="read_file",
+        args={"path": "numbers.txt", "start_line": 50},
+        workspace_path=tmp_path,
+    )
+    assert "Error: start_line 50 exceeds total lines" in err_res
+
+
+@pytest.mark.asyncio
+async def test_execute_replace_file_content(tmp_path: Path):
+    target = tmp_path / "code.py"
+    target.write_text("def hello():\n    return 'old'\n")
+
+    # Successful replacement
+    res = await execute_tool_call(
+        name="replace_file_content",
+        args={
+            "path": "code.py",
+            "target_content": "return 'old'",
+            "replacement_content": "return 'new'",
+        },
+        workspace_path=tmp_path,
+        yolo=True,
+    )
+    assert "Successfully replaced 1 occurrence(s)" in res
+    assert target.read_text() == "def hello():\n    return 'new'\n"
+
+    # Missing target content
+    fail_res = await execute_tool_call(
+        name="replace_file_content",
+        args={
+            "path": "code.py",
+            "target_content": "non_existent_code()",
+            "replacement_content": "new_code()",
+        },
+        workspace_path=tmp_path,
+        yolo=True,
+    )
+    assert "Error: target_content not found" in fail_res
+
+
+@pytest.mark.asyncio
+async def test_execute_replace_file_content_multiple(tmp_path: Path):
+    target = tmp_path / "multi.txt"
+    target.write_text("val = 1\nval = 1\n")
+
+    # Multiple without allow_multiple flag -> refused for safety
+    refused = await execute_tool_call(
+        name="replace_file_content",
+        args={
+            "path": "multi.txt",
+            "target_content": "val = 1",
+            "replacement_content": "val = 2",
+        },
+        workspace_path=tmp_path,
+        yolo=True,
+    )
+    assert "found 2 times" in refused
+
+    # Multiple with allow_multiple=True -> replaced all
+    allowed = await execute_tool_call(
+        name="replace_file_content",
+        args={
+            "path": "multi.txt",
+            "target_content": "val = 1",
+            "replacement_content": "val = 2",
+            "allow_multiple": True,
+        },
+        workspace_path=tmp_path,
+        yolo=True,
+    )
+    assert "Successfully replaced 2 occurrence(s)" in allowed
+    assert target.read_text() == "val = 2\nval = 2\n"
+
+
+@pytest.mark.asyncio
+async def test_execute_search_files(tmp_path: Path):
+    (tmp_path / "a.py").write_text("def find_me():\n    pass\n")
+    (tmp_path / "b.txt").write_text("not here\n")
+
+    res = await execute_tool_call(
+        name="search_files",
+        args={"pattern": "find_me"},
+        workspace_path=tmp_path,
+    )
+    assert "find_me" in res
+    assert "a.py" in res
+
+    # Glob filtering
+    filtered_res = await execute_tool_call(
+        name="search_files",
+        args={"pattern": "find_me", "glob_pattern": "*.txt"},
+        workspace_path=tmp_path,
+    )
+    assert "No matches found" in filtered_res
+
+
+def test_truncate_observation():
+    from maulness.core.tools import truncate_observation
+
+    # Under limit
+    short_out = "Short output\n"
+    assert truncate_observation(short_out) == short_out
+
+    # Over 300 lines
+    huge_out = "\n".join(f"Line {i}" for i in range(500))
+    truncated = truncate_observation(huge_out, max_lines=300, head_lines=50, tail_lines=50)
+    assert "lines omitted for brevity" in truncated
+    assert "Line 0" in truncated
+    assert "Line 499" in truncated
+
+
+def test_tombstone_tool_output():
+    from maulness.core.tools import tombstone_tool_output
+
+    # Tiny output remains unchanged
+    tiny = "clean"
+    assert tombstone_tool_output("git_status", {}, tiny) == tiny
+
+    # Bulky output gets compacted
+    bulky = "\n".join(f"Item {i}: result details here" for i in range(20))
+    tomb = tombstone_tool_output("run_command", {"command": "pytest -v"}, bulky)
+    assert "[Tool result for 'run_command' (`pytest -v`) compacted:" in tomb
+    assert "20 lines" in tomb
+
+
+def test_action_loop_detector():
+    from maulness.core.tools import ActionLoopDetector
+
+    detector = ActionLoopDetector(window_size=6, repetition_threshold=3)
+    session = "test_session_loop"
+
+    # Step 1: run pytest (fails)
+    loop, msg = detector.record_and_check(session, "run_command", {"command": "pytest"})
+    assert not loop
+
+    # Step 2: run pytest again (fails)
+    loop, msg = detector.record_and_check(session, "run_command", {"command": "pytest"})
+    assert not loop
+
+    # Step 3: run pytest 3rd time without any intervening modifying action -> TRIPPED!
+    loop, msg = detector.record_and_check(session, "run_command", {"command": "pytest"})
+    assert loop
+    assert "[LOOP INTERVENTION]" in msg
+
+    # Now verify modifying action in between resets the consecutive thrashing counter
+    session2 = "test_session_recovery"
+    detector.record_and_check(session2, "run_command", {"command": "pytest"})
+    detector.record_and_check(session2, "replace_file_content", {"path": "a.py", "target_content": "1", "replacement_content": "2"})
+    detector.record_and_check(session2, "run_command", {"command": "pytest"})
+    loop, _ = detector.record_and_check(session2, "replace_file_content", {"path": "a.py", "target_content": "2", "replacement_content": "3"})
+    assert not loop
+
 
 

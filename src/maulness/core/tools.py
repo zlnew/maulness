@@ -1,4 +1,7 @@
 import asyncio
+from collections import deque
+import fnmatch
+import hashlib
 import json
 import logging
 import os
@@ -35,16 +38,53 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read the text contents of a file relative to the workspace or by absolute path.",
+            "description": "Read the text contents of a file relative to the workspace or by absolute path. Optional start_line and end_line allow reading specific slices with line numbers.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "Path to the file to read",
-                    }
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Optional 1-indexed starting line number",
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "Optional 1-indexed ending line number (inclusive)",
+                    },
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "replace_file_content",
+            "description": "Surgically replace an exact target block of text within a file. Preferred over rewriting the whole file to prevent regressions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to modify",
+                    },
+                    "target_content": {
+                        "type": "string",
+                        "description": "The exact string or lines of code to replace (must match exactly)",
+                    },
+                    "replacement_content": {
+                        "type": "string",
+                        "description": "The replacement string or lines of code",
+                    },
+                    "allow_multiple": {
+                        "type": "boolean",
+                        "description": "Whether to replace multiple occurrences if found (defaults to false)",
+                    },
+                },
+                "required": ["path", "target_content", "replacement_content"],
             },
         },
     },
@@ -66,6 +106,35 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": "Search for a regex or string pattern across workspace files using ripgrep or fallback search.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "The pattern to search for",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Optional directory or file path to search within (defaults to workspace root)",
+                    },
+                    "glob_pattern": {
+                        "type": "string",
+                        "description": "Optional glob filter (e.g. '*.py' or '!vendor/*')",
+                    },
+                    "case_insensitive": {
+                        "type": "boolean",
+                        "description": "Whether search is case-insensitive (defaults to true)",
+                    },
+                },
+                "required": ["pattern"],
             },
         },
     },
@@ -132,6 +201,133 @@ def resolve_path(target_path: str, workspace_path: Optional[Path]) -> Path:
         return home_candidate
 
     return candidate
+
+
+def truncate_observation(
+    output: str,
+    max_lines: int = 300,
+    max_chars: int = 15000,
+    head_lines: int = 100,
+    tail_lines: int = 100,
+) -> str:
+    """Truncate verbose command or tool outputs preserving informative head and tail context."""
+    if not output:
+        return output
+
+    lines = output.splitlines()
+    if len(lines) > max_lines:
+        omitted = len(lines) - (head_lines + tail_lines)
+        if omitted > 10:
+            output = (
+                "\n".join(lines[:head_lines])
+                + f"\n\n[... {omitted} lines omitted for brevity ...]\n\n"
+                + "\n".join(lines[-tail_lines:])
+            )
+
+    if len(output) > max_chars:
+        head_chars = max_chars // 2 - 200
+        tail_chars = max_chars // 2 - 200
+        omitted_chars = len(output) - (head_chars + tail_chars)
+        output = (
+            output[:head_chars]
+            + f"\n\n[... {omitted_chars} characters omitted for brevity ...]\n\n"
+            + output[-tail_chars:]
+        )
+
+    return output
+
+
+def tombstone_tool_output(name: str, args: dict[str, Any], result: str) -> str:
+    """Produce a concise single-line tombstone summary for an older tool result."""
+    clean_res = result.strip()
+    lines = clean_res.splitlines()
+    if len(clean_res) <= 200 and len(lines) <= 4:
+        return clean_res
+
+    arg_summary = ""
+    if name == "run_command":
+        cmd = args.get("command", "")
+        arg_summary = f"`{cmd[:60]}`" if len(cmd) > 60 else f"`{cmd}`"
+    elif name in ("read_file", "write_file", "replace_file_content"):
+        arg_summary = f"`{args.get('path', '')}`"
+    elif name == "search_files":
+        arg_summary = f"pattern: `{args.get('pattern', '')}`"
+    elif name == "list_dir":
+        arg_summary = f"`{args.get('path', '.')}`"
+    elif name == "git_status":
+        arg_summary = f"`{args.get('repo_path', 'status')}`"
+
+    summary_part = f" ({arg_summary})" if arg_summary else ""
+    return (
+        f"[Tool result for '{name}'{summary_part} compacted: "
+        f"{len(lines)} lines / {len(clean_res)} characters originally returned]"
+    )
+
+
+class ActionLoopDetector:
+    """Sliding-window loop and action thrashing detector to protect long-running agent sessions."""
+
+    def __init__(self, window_size: int = 6, repetition_threshold: int = 3):
+        self.window_size = window_size
+        self.repetition_threshold = repetition_threshold
+        # session_id -> deque of (tool_name, args_hash, is_modifying)
+        self._history: dict[str, deque[tuple[str, str, bool]]] = {}
+
+    def _hash_args(self, args: dict[str, Any]) -> str:
+        try:
+            canonical = json.dumps(args, sort_keys=True, default=str)
+        except Exception:
+            canonical = str(args)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+    def _is_modifying(self, name: str) -> bool:
+        return name in ("write_file", "replace_file_content")
+
+    def record_and_check(self, session_id: str, name: str, args: dict[str, Any]) -> tuple[bool, str]:
+        """Record an action and return (is_loop_detected, intervention_message)."""
+        if not session_id:
+            return False, ""
+
+        if session_id not in self._history:
+            self._history[session_id] = deque(maxlen=self.window_size)
+
+        win = self._history[session_id]
+        args_hash = self._hash_args(args)
+        is_mod = self._is_modifying(name)
+
+        # Count occurrences of exact same (name, args_hash) in current sliding window
+        identical_count = sum(1 for (n, h, _) in win if n == name and h == args_hash)
+
+        if identical_count >= self.repetition_threshold - 1:
+            recent_modifying = any(m for (_, _, m) in win)
+            # If this action is modifying or if no modifying actions occurred between repetitions:
+            if not recent_modifying or is_mod:
+                intervention = (
+                    f"[LOOP INTERVENTION] Tool '{name}' has been executed with identical arguments "
+                    f"{identical_count + 1} times recently without progress. "
+                    "Further identical calls are blocked to prevent an infinite loop. "
+                    "Analyze why the prior attempts did not yield the expected result, "
+                    "re-read the previous output, or adopt an alternative approach."
+                )
+                logger.warning("[%s] Loop detector tripped on tool '%s' (hash: %s)", session_id, name, args_hash)
+                return True, intervention
+
+        win.append((name, args_hash, is_mod))
+        return False, ""
+
+    def clear(self, session_id: Optional[str] = None) -> None:
+        if session_id:
+            self._history.pop(session_id, None)
+        else:
+            self._history.clear()
+
+
+_LOOP_DETECTOR = ActionLoopDetector()
+
+
+def get_loop_detector() -> ActionLoopDetector:
+    """Return the global ActionLoopDetector instance."""
+    return _LOOP_DETECTOR
 
 
 _ACTIVE_TURN_CACHE: dict[str, dict[str, str]] = {}
@@ -233,8 +429,13 @@ async def execute_tool_call(
         logger.warning("Tool execution blocked by security policy: %s", reason)
         return f"Execution blocked by security policy: {reason}"
 
+    # Anti-thrashing loop check
+    is_loop, intervention = _LOOP_DETECTOR.record_and_check(session_id, name, args)
+    if is_loop:
+        return intervention
+
     # Generic HITL Gate for any tool explicitly configured to ASK
-    if policy == PolicyAction.ASK and name not in ("run_command", "write_file"):
+    if policy == PolicyAction.ASK and name not in ("run_command", "write_file", "replace_file_content"):
         if on_approval and not yolo:
             req = ApprovalRequestEvent(
                 request_id=1,
@@ -269,6 +470,130 @@ async def execute_tool_call(
             "result": res,
         })
 
+    return res
+
+
+def _execute_replace_file_content(
+    target: Path,
+    target_content: str,
+    replacement_content: str,
+    allow_multiple: bool = False,
+) -> str:
+    """Execute precision chunk replacement within a target file."""
+    if not target.exists():
+        return f"Error: File '{target}' does not exist."
+    if target.is_dir():
+        return f"Error: '{target}' is a directory, not a file."
+    if not target_content:
+        return "Error: target_content must not be empty."
+
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return f"Error reading file '{target}': {e}"
+
+    count = content.count(target_content)
+    if count == 0:
+        return (
+            f"Error: target_content not found in '{target}'. "
+            "Ensure exact matching including indentation, spaces, and line breaks."
+        )
+
+    if count > 1 and not allow_multiple:
+        return (
+            f"Error: target_content found {count} times in '{target}'. "
+            "Provide more surrounding lines of context to uniquely identify the block to replace, "
+            "or set allow_multiple=true if you intend to replace all occurrences."
+        )
+
+    new_content = content.replace(target_content, replacement_content, -1 if allow_multiple else 1)
+    try:
+        target.write_text(new_content, encoding="utf-8")
+        replaced_count = count if allow_multiple else 1
+        lines_add = len(replacement_content.splitlines())
+        lines_sub = len(target_content.splitlines())
+        return (
+            f"Successfully replaced {replaced_count} occurrence(s) in '{target}'. "
+            f"(+{lines_add} / -{lines_sub} lines)"
+        )
+    except Exception as e:
+        return f"Error writing file '{target}': {e}"
+
+
+async def _execute_search_files(
+    pattern: str,
+    target_dir: Path,
+    glob_pattern: Optional[str] = None,
+    case_insensitive: bool = True,
+    max_results: int = 50,
+) -> str:
+    """Search for string or regex pattern across workspace files."""
+    if not target_dir.exists():
+        return f"Error: Search directory '{target_dir}' does not exist."
+
+    rg_path = shutil.which("rg")
+    if rg_path:
+        cmd = [rg_path, "--line-number", "--no-heading", "--color", "never", "--max-count", str(max_results)]
+        if case_insensitive:
+            cmd.append("-i")
+        if glob_pattern:
+            cmd.extend(["-g", glob_pattern])
+        cmd.extend(["-e", pattern, "."])
+        try:
+            loop = asyncio.get_running_loop()
+            res = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    cmd,
+                    cwd=str(target_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                ),
+            )
+            out = res.stdout.strip()
+            if not out:
+                return f"No matches found for pattern '{pattern}'."
+            lines = out.splitlines()
+            if len(lines) >= max_results:
+                return "\n".join(lines[:max_results]) + f"\n... (Results capped at {max_results} matches)"
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug("ripgrep search failed, falling back to python: %s", e)
+
+    matches = []
+    regex_flags = re.IGNORECASE if case_insensitive else 0
+    try:
+        rx = re.compile(pattern, regex_flags)
+    except re.error as e:
+        return f"Error: Invalid regex pattern '{pattern}': {e}"
+
+    for root, dirs, files in os.walk(target_dir):
+        dirs[:] = [d for d in dirs if d not in (".git", ".venv", "__pycache__", "node_modules", ".worktrees")]
+        for file in sorted(files):
+            if glob_pattern and not fnmatch.fnmatch(file, glob_pattern):
+                continue
+            file_path = Path(root) / file
+            try:
+                rel_path = file_path.relative_to(target_dir)
+                content = file_path.read_text(encoding="utf-8", errors="replace")
+                for line_no, line in enumerate(content.splitlines(), 1):
+                    if rx.search(line):
+                        matches.append(f"{rel_path}:{line_no}: {line.strip()[:200]}")
+                        if len(matches) >= max_results:
+                            break
+            except Exception:
+                continue
+            if len(matches) >= max_results:
+                break
+        if len(matches) >= max_results:
+            break
+
+    if not matches:
+        return f"No matches found for pattern '{pattern}'."
+    res = "\n".join(matches)
+    if len(matches) >= max_results:
+        res += f"\n... (Results capped at {max_results} matches)"
     return res
 
 
@@ -321,7 +646,7 @@ async def _execute_tool_action(
             output = proc.stdout
             if proc.stderr:
                 output += f"\n[stderr]\n{proc.stderr}"
-            return output.strip() or "(Command completed with empty output)"
+            return truncate_observation(output.strip() or "(Command completed with empty output)")
         except subprocess.TimeoutExpired:
             return "Error: Command timed out after 60s."
         except Exception as e:
@@ -330,19 +655,62 @@ async def _execute_tool_action(
     # 2. read_file
     elif name == "read_file":
         target = resolve_path(args.get("path", ""), cwd)
+        start_line = args.get("start_line")
+        end_line = args.get("end_line")
         try:
             if not target.exists():
                 return f"Error: File '{target}' does not exist."
             if target.is_dir():
                 return f"Error: '{target}' is a directory, not a file."
             content = target.read_text(encoding="utf-8", errors="replace")
+            lines = content.splitlines()
+
+            if start_line is not None or end_line is not None:
+                total_lines = len(lines)
+                s = max(1, int(start_line)) if start_line is not None else 1
+                e = min(total_lines, int(end_line)) if end_line is not None else total_lines
+                if s > total_lines:
+                    return f"Error: start_line {s} exceeds total lines ({total_lines}) in '{target}'."
+                if s > e:
+                    return f"Error: start_line {s} is greater than end_line {e}."
+                sliced = lines[s - 1 : e]
+                formatted = [f"L{s + idx}: {l}" for idx, l in enumerate(sliced)]
+                header = f"[{target.name} lines {s}-{e} of {total_lines}]\n"
+                return header + "\n".join(formatted)
+
             if len(content) > 50000:
                 return content[:50000] + "\n\n... (truncated 50,000 chars)"
             return content
         except Exception as e:
             return f"Error reading file '{target}': {e}"
 
-    # 3. write_file
+    # 3. replace_file_content
+    elif name == "replace_file_content":
+        target = resolve_path(args.get("path", ""), cwd)
+        target_content = args.get("target_content", "")
+        replacement_content = args.get("replacement_content", "")
+        allow_multiple = bool(args.get("allow_multiple", False))
+
+        if policy == PolicyAction.ASK and on_approval and not yolo:
+            req = ApprovalRequestEvent(
+                request_id=1,
+                call_id=f"call_{name}",
+                tool_name="replace_file_content",
+                args={
+                    "path": str(target),
+                    "target_len": len(target_content),
+                    "replacement_len": len(replacement_content),
+                    "allow_multiple": allow_multiple,
+                },
+                session_id=session_id,
+            )
+            approved = await on_approval(req)
+            if not approved:
+                return f"Execution cancelled: User rejected replace in '{target}'."
+
+        return _execute_replace_file_content(target, target_content, replacement_content, allow_multiple)
+
+    # 4. write_file
     elif name == "write_file":
         target = resolve_path(args.get("path", ""), cwd)
         content = args.get("content", "")
@@ -366,7 +734,18 @@ async def _execute_tool_action(
         except Exception as e:
             return f"Error writing file '{target}': {e}"
 
-    # 4. list_dir
+    # 5. search_files
+    elif name == "search_files":
+        pattern = args.get("pattern", "").strip()
+        if not pattern:
+            return "Error: No pattern provided."
+        raw_path = args.get("path", "")
+        target_dir = resolve_path(raw_path, cwd) if raw_path else cwd
+        glob_pat = args.get("glob_pattern")
+        case_ins = bool(args.get("case_insensitive", True))
+        return await _execute_search_files(pattern, target_dir, glob_pattern=glob_pat, case_insensitive=case_ins)
+
+    # 6. list_dir
     elif name == "list_dir":
         raw_path = args.get("path", "")
         target = resolve_path(raw_path, cwd) if raw_path else cwd
@@ -381,7 +760,7 @@ async def _execute_tool_action(
         except Exception as e:
             return f"Error listing directory '{target}': {e}"
 
-    # 5. git_status
+    # 7. git_status
     elif name == "git_status":
         raw_repo = args.get("repo_path", "")
         target = resolve_path(raw_repo, cwd) if raw_repo else cwd
@@ -406,8 +785,11 @@ def format_lean_tool_breadcrumb(name: str, args: dict[str, Any], result: str) ->
     summary_arg = ""
     if name == "run_command":
         summary_arg = args.get("command", "")
-    elif name in ("read_file", "write_file"):
+    elif name in ("read_file", "write_file", "replace_file_content"):
         summary_arg = args.get("path", "")
+    elif name == "search_files":
+        pattern = args.get("pattern", "")
+        summary_arg = f"'{pattern[:40]}'" if len(pattern) > 40 else f"'{pattern}'"
     elif name == "list_dir":
         summary_arg = args.get("path", "") or "."
     elif name == "git_status":
@@ -444,7 +826,10 @@ def detect_simulated_tool_call(text: str) -> Optional[tuple[str, dict[str, Any]]
     tool_name = match.group(1).strip()
     raw_arg = (match.group(2) or "").strip()
 
-    known_tools = {"run_command", "read_file", "write_file", "list_dir", "git_status"}
+    known_tools = {
+        "run_command", "read_file", "write_file", "list_dir", "git_status",
+        "replace_file_content", "search_files",
+    }
     if tool_name not in known_tools:
         return None
 
@@ -457,6 +842,10 @@ def detect_simulated_tool_call(text: str) -> Optional[tuple[str, dict[str, Any]]
         args = {"repo_path": raw_arg}
     elif tool_name == "write_file":
         args = {"path": raw_arg}
+    elif tool_name == "replace_file_content":
+        args = {"path": raw_arg}
+    elif tool_name == "search_files":
+        args = {"pattern": raw_arg}
 
     return tool_name, args
 
