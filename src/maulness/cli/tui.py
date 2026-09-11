@@ -175,11 +175,23 @@ class ApprovalModal(ModalScreen[bool]):
         with Container(classes="modal-dialog"):
             yield Label("[bold yellow]⚠️  HITL Tool Approval Required[/bold yellow]", classes="modal-title")
             yield Label(f"[bold cyan]Tool:[/bold cyan] {self.event.tool_name}", classes="modal-row")
-            try:
-                formatted_args = json.dumps(self.event.args, indent=2)
-            except Exception:
-                formatted_args = str(self.event.args)
-            yield Static(Syntax(formatted_args, "json", theme="monokai"), classes="args-box")
+            if self.event.tool_name == "run_command":
+                cmd = self.event.args.get("command", "")
+                cwd = self.event.args.get("cwd", "")
+                yield Label(f"[bold green]$[/bold green] [bold white]{cmd}[/bold white]", classes="modal-row")
+                if cwd:
+                    yield Label(f"[dim]Directory: {cwd}[/dim]", classes="modal-row")
+            elif self.event.tool_name in ("write_file", "read_file"):
+                path = self.event.args.get("path", "")
+                yield Label(f"[bold magenta]Path:[/bold magenta] [white]{path}[/white]", classes="modal-row")
+                if "bytes" in self.event.args:
+                    yield Label(f"[dim]Size: {self.event.args['bytes']} bytes[/dim]", classes="modal-row")
+            else:
+                try:
+                    formatted_args = json.dumps(self.event.args, indent=2)
+                except Exception:
+                    formatted_args = str(self.event.args)
+                yield Static(Syntax(formatted_args, "json", theme="monokai"), classes="args-box")
             with Horizontal(classes="modal-buttons"):
                 yield Button("Allow Once (y)", variant="success", id="btn-allow")
                 yield Button("Deny (n)", variant="error", id="btn-deny")
@@ -462,10 +474,14 @@ class AgentCard(Static):
     def record_tool_call(self, tool_name: str, args: Any = None) -> None:
         summary = ""
         if isinstance(args, dict):
-            if "CommandLine" in args:
-                summary = f": {args['CommandLine'][:40]}"
+            if "command" in args:
+                summary = f": {args['command'][:45]}"
+            elif "CommandLine" in args:
+                summary = f": {args['CommandLine'][:45]}"
             elif "path" in args:
                 summary = f": {args['path']}"
+            elif "repo_path" in args:
+                summary = f": {args['repo_path']}"
             elif "TargetFile" in args:
                 summary = f": {args['TargetFile']}"
             elif "AbsolutePath" in args:

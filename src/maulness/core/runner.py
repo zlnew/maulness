@@ -118,10 +118,21 @@ class TaskRunner:
             if on_approval:
                 return await on_approval(event)
 
+            details = f"[bold yellow]Tool:[/bold yellow] {event.tool_name}\n"
+            if event.tool_name == "run_command":
+                details += f"[bold green]Command:[/bold green] {event.args.get('command')}\n"
+                if "cwd" in event.args:
+                    details += f"[dim]Directory: {event.args.get('cwd')}[/dim]"
+            elif event.tool_name in ("write_file", "read_file"):
+                details += f"[bold magenta]Path:[/bold magenta] {event.args.get('path')}\n"
+                if "bytes" in event.args:
+                    details += f"[dim]Size: {event.args.get('bytes')} bytes[/dim]"
+            else:
+                details += f"[bold yellow]Arguments:[/bold yellow] {event.args}"
+
             console.print(
                 Panel(
-                    f"[bold yellow]Tool:[/bold yellow] {event.tool_name}\n"
-                    f"[bold yellow]Arguments:[/bold yellow] {event.args}",
+                    details.strip(),
                     title="⚠️  Approval Required (HITL)",
                     border_style="yellow",
                 )

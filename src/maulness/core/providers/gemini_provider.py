@@ -16,7 +16,7 @@ from maulness.core.models import (
 )
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
-from maulness.core.tools import TOOL_DEFINITIONS, execute_tool_call
+from maulness.core.tools import TOOL_DEFINITIONS, execute_tool_call, format_lean_tool_breadcrumb
 from maulness.storage.db import StorageManager
 
 logger = logging.getLogger("maulness.providers.gemini")
@@ -117,7 +117,7 @@ class GeminiProvider(BaseProvider):
 
         # Retrieve conversation history
         history_turns = await self.storage.get_conversation_messages(conv_id, limit=20)
-        contents = []
+        contents: list[types.Content] = []
         for turn in history_turns:
             role = "model" if turn["role"] == "assistant" else "user"
             contents.append(
@@ -135,99 +135,127 @@ class GeminiProvider(BaseProvider):
 
         accumulated = []
         init_timeout = min(float(config.stream_idle_timeout_seconds), 20.0)
-
-        try:
-            response_stream = await asyncio.wait_for(
-                client.aio.models.generate_content_stream(
-                    model=model_name,
-                    contents=contents,
-                    config=gen_config,
-                ),
-                timeout=init_timeout,
-            )
-        except asyncio.TimeoutError:
-            raise TimeoutError(
-                f"Gemini API connection handshake timed out after {int(init_timeout)}s (model '{model_name}' overloaded)"
-            )
-
         idle_timeout = config.stream_idle_timeout_seconds
-        stream_iter = response_stream.__aiter__()
-        is_first_chunk = True
 
-        while True:
+        max_tool_turns = 5
+        turn_count = 0
+
+        while turn_count < max_tool_turns:
+            turn_count += 1
+            has_tool_call = False
+            model_parts: list[types.Part] = []
+            tool_response_parts: list[types.Part] = []
+
             try:
-                chunk_timeout = 25.0 if is_first_chunk else idle_timeout
-                chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=chunk_timeout)
-                is_first_chunk = False
-            except StopAsyncIteration:
-                break
+                response_stream = await asyncio.wait_for(
+                    client.aio.models.generate_content_stream(
+                        model=model_name,
+                        contents=contents,
+                        config=gen_config,
+                    ),
+                    timeout=init_timeout,
+                )
             except asyncio.TimeoutError:
-                if is_first_chunk:
-                    raise TimeoutError(
-                        f"Gemini model '{model_name}' timed out waiting for first token response after 25s"
-                    )
                 raise TimeoutError(
-                    f"Gemini stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
+                    f"Gemini API connection handshake timed out after {int(init_timeout)}s (model '{model_name}' overloaded)"
                 )
 
-            # Process candidate parts for thought, tool calls, and text content
-            has_parts = False
-            if hasattr(chunk, "candidates") and chunk.candidates:
-                for cand in chunk.candidates:
-                    if hasattr(cand, "content") and cand.content:
-                        for part in cand.content.parts:
-                            # Handle tool/function calls if returned
-                            if getattr(part, "function_call", None):
-                                fn = part.function_call
-                                has_parts = True
-                                call_name = fn.name
-                                call_args = dict(fn.args) if fn.args else {}
-                                if on_tool_call:
-                                    await on_tool_call(
-                                        AgentToolCallEvent(
-                                            call_id=f"call_{call_name}",
-                                            tool_name=call_name,
-                                            args=call_args,
-                                            session_id=session_id,
+            stream_iter = response_stream.__aiter__()
+            is_first_chunk = True
+
+            while True:
+                try:
+                    chunk_timeout = 25.0 if is_first_chunk else idle_timeout
+                    chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=chunk_timeout)
+                    is_first_chunk = False
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    if is_first_chunk:
+                        raise TimeoutError(
+                            f"Gemini model '{model_name}' timed out waiting for first token response after 25s"
+                        )
+                    raise TimeoutError(
+                        f"Gemini stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
+                    )
+
+                # Process candidate parts for thought, tool calls, and text content
+                has_parts = False
+                if hasattr(chunk, "candidates") and chunk.candidates:
+                    for cand in chunk.candidates:
+                        if hasattr(cand, "content") and cand.content:
+                            for part in cand.content.parts:
+                                # Handle tool/function calls if returned
+                                if getattr(part, "function_call", None):
+                                    fn = part.function_call
+                                    has_parts = True
+                                    has_tool_call = True
+                                    model_parts.append(part)
+                                    call_name = fn.name
+                                    call_args = dict(fn.args) if fn.args else {}
+                                    if on_tool_call:
+                                        await on_tool_call(
+                                            AgentToolCallEvent(
+                                                call_id=f"call_{call_name}",
+                                                tool_name=call_name,
+                                                args=call_args,
+                                                session_id=session_id,
+                                            )
+                                        )
+                                    # Execute the tool with HITL gating
+                                    tool_result = await execute_tool_call(
+                                        name=call_name,
+                                        args=call_args,
+                                        workspace_path=workspace_path,
+                                        session_id=session_id,
+                                        on_approval=on_approval,
+                                    )
+                                    tool_desc = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
+                                    accumulated.append(tool_desc)
+                                    if on_message:
+                                        await on_message(
+                                            AgentMessageEvent(delta=tool_desc, session_id=session_id)
+                                        )
+                                    tool_response_parts.append(
+                                        types.Part.from_function_response(
+                                            name=call_name,
+                                            response={"result": tool_result},
                                         )
                                     )
-                                # Execute the tool with HITL gating
-                                tool_result = await execute_tool_call(
-                                    name=call_name,
-                                    args=call_args,
-                                    workspace_path=workspace_path,
-                                    session_id=session_id,
-                                    on_approval=on_approval,
-                                )
-                                tool_desc = f"\n\n⚡ **Tool Result (`{call_name}`):**\n```\n{tool_result}\n```\n"
-                                accumulated.append(tool_desc)
-                                if on_message:
-                                    await on_message(
-                                        AgentMessageEvent(delta=tool_desc, session_id=session_id)
-                                    )
 
-                            part_text = getattr(part, "text", None)
-                            if not part_text:
-                                continue
-                            has_parts = True
-                            if getattr(part, "thought", None):
-                                if on_thought:
-                                    await on_thought(
-                                        AgentThoughtEvent(delta=part_text, session_id=session_id)
-                                    )
-                            else:
-                                accumulated.append(part_text)
-                                if on_message:
-                                    await on_message(
-                                        AgentMessageEvent(delta=part_text, session_id=session_id)
-                                    )
+                                part_text = getattr(part, "text", None)
+                                if not part_text:
+                                    continue
+                                has_parts = True
+                                model_parts.append(part)
+                                if getattr(part, "thought", None):
+                                    if on_thought:
+                                        await on_thought(
+                                            AgentThoughtEvent(delta=part_text, session_id=session_id)
+                                        )
+                                else:
+                                    accumulated.append(part_text)
+                                    if on_message:
+                                        await on_message(
+                                            AgentMessageEvent(delta=part_text, session_id=session_id)
+                                        )
 
-            if not has_parts and getattr(chunk, "text", None):
-                accumulated.append(chunk.text)
-                if on_message:
-                    await on_message(
-                        AgentMessageEvent(delta=chunk.text, session_id=session_id)
-                    )
+                if not has_parts and getattr(chunk, "text", None):
+                    accumulated.append(chunk.text)
+                    model_parts.append(types.Part.from_text(text=chunk.text))
+                    if on_message:
+                        await on_message(
+                            AgentMessageEvent(delta=chunk.text, session_id=session_id)
+                        )
+
+            # If tool calls were made during this turn, feed response back to model for synthesis
+            if has_tool_call and tool_response_parts:
+                contents.append(types.Content(role="model", parts=model_parts))
+                contents.append(types.Content(role="user", parts=tool_response_parts))
+                logger.info("[%s] Tool executed; continuing turn loop for model answer synthesis (step %d)", self.profile.name, turn_count)
+                continue
+            else:
+                break
 
         result_text = "".join(accumulated).strip()
         if not result_text:

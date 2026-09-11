@@ -15,7 +15,7 @@ from maulness.core.models import (
 )
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
-from maulness.core.tools import TOOL_DEFINITIONS, execute_tool_call
+from maulness.core.tools import TOOL_DEFINITIONS, execute_tool_call, format_lean_tool_breadcrumb
 from maulness.storage.db import StorageManager
 
 logger = logging.getLogger("maulness.providers.api")
@@ -166,115 +166,147 @@ class UnifiedApiProvider(BaseProvider):
 
         idle_timeout = float(config.stream_idle_timeout_seconds)
         accumulated: list[str] = []
-        captured_tool_calls: list[dict[str, Any]] = []
-        is_first_chunk = True
 
-        timeout = httpx.Timeout(120.0, connect=20.0, read=idle_timeout)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                stream_ctx = client.stream("POST", url, headers=headers, json=payload)
-            except Exception as e:
-                raise RuntimeError(f"Failed to initiate stream with {provider_type} ({url}): {e}")
+        max_tool_turns = 5
+        turn_count = 0
 
-            async with stream_ctx as response:
-                if response.is_error:
-                    err_body = await response.aread()
-                    err_msg = err_body.decode(errors="replace")
-                    raise RuntimeError(
-                        f"Provider '{provider_type}' ({self.profile.model}) returned HTTP {response.status_code}: {err_msg[:500]}"
-                    )
+        while turn_count < max_tool_turns:
+            turn_count += 1
+            captured_tool_calls: list[dict[str, Any]] = []
+            is_first_chunk = True
 
-                lines_iter = response.aiter_lines().__aiter__()
-                while True:
-                    try:
-                        chunk_timeout = 60.0 if (is_first_chunk and provider_type == "ollama") else (30.0 if is_first_chunk else idle_timeout)
-                        line = await asyncio.wait_for(lines_iter.__anext__(), timeout=chunk_timeout)
-                        is_first_chunk = False
-                    except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError:
-                        if is_first_chunk:
-                            raise TimeoutError(
-                                f"Stream from {provider_type} ({self.profile.model}) timed out waiting for first token after {int(chunk_timeout)}s"
-                            )
-                        raise TimeoutError(
-                            f"Stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
-                        )
-
-                    if not line.startswith("data: ") or line == "data: [DONE]":
-                        continue
-                    try:
-                        data = json.loads(line[6:])
-                    except json.JSONDecodeError:
-                        continue
-
-                    choice = data.get("choices", [{}])[0]
-                    delta = choice.get("delta", {})
-
-                    # 1. Capture reasoning / thoughts (Ollama, DeepSeek, OpenCode)
-                    reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content")
-                    if reasoning_delta and on_thought:
-                        await on_thought(
-                            AgentThoughtEvent(delta=reasoning_delta, session_id=session_id)
-                        )
-
-                    # 2. Capture tool calls (OpenAI format)
-                    tool_calls_delta = delta.get("tool_calls")
-                    if tool_calls_delta:
-                        for tc in tool_calls_delta:
-                            idx = tc.get("index", 0)
-                            while len(captured_tool_calls) <= idx:
-                                captured_tool_calls.append({"name": "", "arguments": ""})
-                            fn = tc.get("function", {})
-                            if "name" in fn:
-                                captured_tool_calls[idx]["name"] += fn["name"]
-                            if "arguments" in fn:
-                                captured_tool_calls[idx]["arguments"] += fn["arguments"]
-
-                    # 3. Capture visible text content
-                    text_delta = delta.get("content", "")
-                    if text_delta:
-                        accumulated.append(text_delta)
-                        if on_message:
-                            await on_message(
-                                AgentMessageEvent(delta=text_delta, session_id=session_id)
-                            )
-
-        # Process captured tool calls if any
-        if captured_tool_calls:
-            for tc in captured_tool_calls:
-                call_name = tc.get("name", "").strip()
-                call_args_str = tc.get("arguments", "").strip()
-                if not call_name:
-                    continue
+            timeout = httpx.Timeout(120.0, connect=20.0, read=idle_timeout)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 try:
-                    call_args = json.loads(call_args_str) if call_args_str else {}
-                except Exception:
-                    call_args = {"raw": call_args_str}
+                    stream_ctx = client.stream("POST", url, headers=headers, json=payload)
+                except Exception as e:
+                    raise RuntimeError(f"Failed to initiate stream with {provider_type} ({url}): {e}")
 
-                if on_tool_call:
-                    await on_tool_call(
-                        AgentToolCallEvent(
-                            call_id=f"call_{call_name}",
-                            tool_name=call_name,
-                            args=call_args,
-                            session_id=session_id,
+                async with stream_ctx as response:
+                    if response.is_error:
+                        err_body = await response.aread()
+                        err_msg = err_body.decode(errors="replace")
+                        raise RuntimeError(
+                            f"Provider '{provider_type}' ({self.profile.model}) returned HTTP {response.status_code}: {err_msg[:500]}"
                         )
-                    )
 
-                tool_result = await execute_tool_call(
-                    name=call_name,
-                    args=call_args,
-                    workspace_path=workspace_path,
-                    session_id=session_id,
-                    on_approval=on_approval,
-                )
-                tool_msg = f"\n\n⚡ **Tool Result (`{call_name}`):**\n```\n{tool_result}\n```\n"
-                accumulated.append(tool_msg)
-                if on_message:
-                    await on_message(
-                        AgentMessageEvent(delta=tool_msg, session_id=session_id)
+                    lines_iter = response.aiter_lines().__aiter__()
+                    while True:
+                        try:
+                            chunk_timeout = 60.0 if (is_first_chunk and provider_type == "ollama") else (30.0 if is_first_chunk else idle_timeout)
+                            line = await asyncio.wait_for(lines_iter.__anext__(), timeout=chunk_timeout)
+                            is_first_chunk = False
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            if is_first_chunk:
+                                raise TimeoutError(
+                                    f"Stream from {provider_type} ({self.profile.model}) timed out waiting for first token after {int(chunk_timeout)}s"
+                                )
+                            raise TimeoutError(
+                                f"Stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
+                            )
+
+                        if not line.startswith("data: ") or line == "data: [DONE]":
+                            continue
+                        try:
+                            data = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue
+
+                        choice = data.get("choices", [{}])[0]
+                        delta = choice.get("delta", {})
+
+                        # 1. Capture reasoning / thoughts (Ollama, DeepSeek, OpenCode)
+                        reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content")
+                        if reasoning_delta and on_thought:
+                            await on_thought(
+                                AgentThoughtEvent(delta=reasoning_delta, session_id=session_id)
+                            )
+
+                        # 2. Capture tool calls (OpenAI format)
+                        tool_calls_delta = delta.get("tool_calls")
+                        if tool_calls_delta:
+                            for tc in tool_calls_delta:
+                                idx = tc.get("index", 0)
+                                while len(captured_tool_calls) <= idx:
+                                    captured_tool_calls.append({"name": "", "arguments": ""})
+                                fn = tc.get("function", {})
+                                if "name" in fn:
+                                    captured_tool_calls[idx]["name"] += fn["name"]
+                                if "arguments" in fn:
+                                    captured_tool_calls[idx]["arguments"] += fn["arguments"]
+
+                        # 3. Capture visible text content
+                        text_delta = delta.get("content", "")
+                        if text_delta:
+                            accumulated.append(text_delta)
+                            if on_message:
+                                await on_message(
+                                    AgentMessageEvent(delta=text_delta, session_id=session_id)
+                                )
+
+            # Process captured tool calls if any and loop back for synthesized response
+            if captured_tool_calls:
+                asst_tool_calls = []
+                tool_results = []
+                for i, tc in enumerate(captured_tool_calls):
+                    call_name = tc.get("name", "").strip()
+                    call_args_str = tc.get("arguments", "").strip()
+                    if not call_name:
+                        continue
+                    try:
+                        call_args = json.loads(call_args_str) if call_args_str else {}
+                    except Exception:
+                        call_args = {"raw": call_args_str}
+
+                    call_id = f"call_{turn_count}_{i}_{call_name}"
+                    asst_tool_calls.append({
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": call_name, "arguments": call_args_str or "{}"},
+                    })
+
+                    if on_tool_call:
+                        await on_tool_call(
+                            AgentToolCallEvent(
+                                call_id=call_id,
+                                tool_name=call_name,
+                                args=call_args,
+                                session_id=session_id,
+                            )
+                        )
+
+                    tool_result = await execute_tool_call(
+                        name=call_name,
+                        args=call_args,
+                        workspace_path=workspace_path,
+                        session_id=session_id,
+                        on_approval=on_approval,
                     )
+                    breadcrumb = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
+                    accumulated.append(breadcrumb)
+                    if on_message:
+                        await on_message(
+                            AgentMessageEvent(delta=breadcrumb, session_id=session_id)
+                        )
+
+                    tool_results.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": tool_result,
+                    })
+
+                if asst_tool_calls:
+                    messages.append({"role": "assistant", "tool_calls": asst_tool_calls})
+                    messages.extend(tool_results)
+                    payload["messages"] = messages
+                    logger.info("[%s] Tool executed; continuing turn loop for model answer synthesis (step %d)", provider_type, turn_count)
+                    continue
+                else:
+                    break
+            else:
+                break
 
         result_text = "".join(accumulated).strip()
         if not result_text:

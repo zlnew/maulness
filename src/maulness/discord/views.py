@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 from typing import Optional
 import discord
 
@@ -26,10 +27,20 @@ class ApprovalView(discord.ui.View):
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.decision = True
         self._disable_all_buttons()
-        await interaction.response.edit_message(
-            content=f"{interaction.message.content}\n\n**Decision:** [green]Approved by Maul[/green] ✓",
-            view=self,
-        )
+        approver = interaction.user.display_name
+        if interaction.message.embeds:
+            embed = interaction.message.embeds[0]
+            embed.color = 0x10B981  # Emerald Green
+            embed.title = "✅ Action Approved (HITL)"
+            embed.add_field(name="Decision", value=f"Approved by **{approver}**", inline=False)
+            embed.timestamp = datetime.datetime.now()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            clean_content = interaction.message.content.replace("[green]Approved by Maul[/green] ✓", "").strip()
+            await interaction.response.edit_message(
+                content=clean_content + "\n\n**Decision:** ✅ Approved by **" + approver + "**",
+                view=self,
+            )
         if not self.future.done():
             self.future.set_result(True)
 
@@ -37,10 +48,20 @@ class ApprovalView(discord.ui.View):
     async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.decision = False
         self._disable_all_buttons()
-        await interaction.response.edit_message(
-            content=f"{interaction.message.content}\n\n**Decision:** [red]Denied by Maul[/red] ✗",
-            view=self,
-        )
+        denier = interaction.user.display_name
+        if interaction.message.embeds:
+            embed = interaction.message.embeds[0]
+            embed.color = 0xEF4444  # Red
+            embed.title = "❌ Action Rejected (HITL)"
+            embed.add_field(name="Decision", value=f"Rejected by **{denier}**", inline=False)
+            embed.timestamp = datetime.datetime.now()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            clean_content = interaction.message.content.replace("[red]Denied by Maul[/red] ✗", "").strip()
+            await interaction.response.edit_message(
+                content=clean_content + "\n\n**Decision:** ❌ Rejected by **" + denier + "**",
+                view=self,
+            )
         if not self.future.done():
             self.future.set_result(False)
 

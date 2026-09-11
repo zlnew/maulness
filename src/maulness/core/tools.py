@@ -234,3 +234,32 @@ async def execute_tool_call(
             return f"Error running git status in '{target}': {e}"
 
     return f"Error: Unknown tool '{name}'."
+
+
+def format_lean_tool_breadcrumb(name: str, args: dict[str, Any], result: str) -> str:
+    """Format a compact, elegant breadcrumb for tool execution in chat streams."""
+    clean_res = result.strip()
+    summary_arg = ""
+    if name == "run_command":
+        summary_arg = args.get("command", "")
+    elif name in ("read_file", "write_file"):
+        summary_arg = args.get("path", "")
+    elif name == "list_dir":
+        summary_arg = args.get("path", "") or "."
+    elif name == "git_status":
+        summary_arg = args.get("repo_path", "") or "status"
+
+    label = f"{name}: {summary_arg}" if summary_arg else name
+
+    # If single-line or brief output (<= 120 chars, no newlines)
+    if "\n" not in clean_res and len(clean_res) <= 120:
+        return f"> ⚡ **`{label}`** ➔ `{clean_res}`\n\n"
+
+    # Multiline output: compact preview
+    preview_lines = clean_res.splitlines()
+    if len(preview_lines) > 8:
+        preview = "\n".join(preview_lines[:6]) + f"\n... (+{len(preview_lines)-6} more lines)"
+    else:
+        preview = clean_res
+    return f"> ⚡ **`{label}`**:\n```\n{preview}\n```\n\n"
+

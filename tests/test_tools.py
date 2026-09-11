@@ -92,3 +92,17 @@ async def test_execute_unknown_tool():
         args={},
     )
     assert "Error: Unknown tool" in res
+
+
+def test_format_lean_tool_breadcrumb():
+    from maulness.core.tools import format_lean_tool_breadcrumb
+
+    # Single-line output
+    b1 = format_lean_tool_breadcrumb("run_command", {"command": "uname -srm"}, "Linux 6.18.48-1-cachyos-lts x86_64")
+    assert "> ⚡ **`run_command: uname -srm`** ➔ `Linux 6.18.48-1-cachyos-lts x86_64`" in b1
+
+    # Multiline output
+    b2 = format_lean_tool_breadcrumb("git_status", {"repo_path": "/tmp"}, "M file1.py\n?? file2.py")
+    assert "> ⚡ **`git_status: /tmp`**:" in b2
+    assert "M file1.py" in b2
+

@@ -329,10 +329,15 @@ class MaulnessBot(commands.Bot):
 
         async def on_tool_call(event: AgentToolCallEvent):
             logger.info("[%s] Tool call in channel %s: %s", target_profile.name, channel_id, event.tool_name)
+            tool_summary = event.tool_name
+            if event.tool_name == "run_command" and "command" in event.args:
+                tool_summary = f"`{event.args['command'][:60]}`"
+            elif event.tool_name in ("read_file", "write_file") and "path" in event.args:
+                tool_summary = f"{event.tool_name} `{event.args['path'][:50]}`"
             if not debouncer.full_text.strip():
                 try:
                     await current_msg.edit(
-                        content=f"💭 **{target_profile.name}** is thinking... `[{provider_tag}]`\n> {prompt[:100]}\n\n> ⚡ *Executing tool: `{event.tool_name}`...*"
+                        content=f"💭 **{target_profile.name}** is thinking... `[{provider_tag}]`\n> {prompt[:100]}\n\n> ⚡ *Running {tool_summary}...*"
                     )
                 except Exception as e:
                     logger.debug("Failed to edit Discord thinking message with tool call: %s", e)
@@ -350,12 +355,27 @@ class MaulnessBot(commands.Bot):
             loop = asyncio.get_running_loop()
             fut = loop.create_future()
             view = ApprovalView(future=fut)
-            await channel.send(
-                f"⚠️ **Approval Required (HITL)**\n"
-                f"**Tool:** `{event.tool_name}`\n"
-                f"**Args:** ```json\n{event.args}\n```",
-                view=view,
+
+            embed = discord.Embed(
+                title="🛡️ Approval Required (HITL)",
+                description=f"**{target_profile.name}** requests permission to execute an action.",
+                color=0xF59E0B,
             )
+            embed.add_field(name="Tool", value=f"`{event.tool_name}`", inline=True)
+            if event.tool_name == "run_command":
+                cmd = event.args.get("command", "")
+                embed.add_field(name="Command", value=f"```bash\n{cmd}\n```", inline=False)
+                if "cwd" in event.args:
+                    embed.add_field(name="Directory", value=f"`{event.args['cwd']}`", inline=True)
+            elif event.tool_name == "write_file":
+                embed.add_field(name="Target File", value=f"`{event.args.get('path')}`", inline=True)
+                embed.add_field(name="Size", value=f"{event.args.get('bytes', 0)} bytes", inline=True)
+            else:
+                formatted_args = json.dumps(event.args, indent=2)
+                embed.add_field(name="Arguments", value=f"```json\n{formatted_args[:1000]}\n```", inline=False)
+
+            embed.set_footer(text="Maulness Security Gate • 10m timeout")
+            await channel.send(embed=embed, view=view)
             try:
                 return await asyncio.wait_for(fut, timeout=600.0)
             except asyncio.TimeoutError:

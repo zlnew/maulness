@@ -172,4 +172,82 @@ async def test_fallback_provider_chain_rejects_empty_response():
     mock2.run.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_unified_api_provider_tool_loop(tmp_path):
+    import json
+    from unittest.mock import patch, MagicMock, AsyncMock
+    from maulness.core.providers.api_provider import UnifiedApiProvider
+    from maulness.storage.db import StorageManager
+
+    storage = StorageManager(db_path=tmp_path / "test.db")
+    await storage.initialize()
+
+    profile = Profile(
+        identity={"name": "tool_tester"},
+        agent={"provider": "ollama", "model": "llama3", "base_url": "http://localhost:11434/v1"},
+    )
+    provider = UnifiedApiProvider(profile, storage=storage)
+
+    # Mock tool call in turn 1 and final text in turn 2
+    turn_1_lines = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {"name": "run_command", "arguments": '{"command": "echo 42"}'}
+                    }]
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    turn_2_lines = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": "The answer is 42."
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    calls = [turn_1_lines, turn_2_lines]
+
+    class MockStreamCtx:
+        def __init__(self, lines):
+            self.lines = lines
+
+        async def __aenter__(self):
+            resp = MagicMock()
+            resp.is_error = False
+
+            async def aiter_lines():
+                for l in self.lines:
+                    yield l
+
+            resp.aiter_lines = aiter_lines
+            return resp
+
+        async def __aexit__(self, *args):
+            pass
+
+    def mock_stream(method, url, headers=None, json=None):
+        lines = calls.pop(0) if calls else ['data: [DONE]']
+        return MockStreamCtx(lines)
+
+    with patch("httpx.AsyncClient.stream", side_effect=mock_stream):
+        result = await provider.run(
+            session_id="test_sess",
+            prompt="What is the answer?",
+            yolo=True,
+        )
+
+    assert "run_command: echo 42" in result
+    assert "The answer is 42." in result
+
+
+
 
