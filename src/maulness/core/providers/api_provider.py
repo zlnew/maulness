@@ -176,10 +176,12 @@ class UnifiedApiProvider(BaseProvider):
         idle_timeout = float(config.stream_idle_timeout_seconds)
         accumulated: list[str] = []
 
-        max_tool_turns = 5
+        max_tool_turns = getattr(self.profile, "max_tool_turns", config.max_tool_turns)
         turn_count = 0
+        forcing_synthesis = False
+        model_produced_text = False
 
-        while turn_count < max_tool_turns:
+        while turn_count <= max_tool_turns:
             turn_count += 1
             captured_tool_calls: list[dict[str, Any]] = []
             streamed_text_chunks: list[str] = []
@@ -236,7 +238,7 @@ class UnifiedApiProvider(BaseProvider):
 
                         # 2. Capture tool calls (OpenAI format)
                         tool_calls_delta = delta.get("tool_calls")
-                        if tool_calls_delta:
+                        if tool_calls_delta and not forcing_synthesis:
                             for tc in tool_calls_delta:
                                 idx = tc.get("index", 0)
                                 while len(captured_tool_calls) <= idx:
@@ -252,6 +254,8 @@ class UnifiedApiProvider(BaseProvider):
                         if text_delta:
                             streamed_text_chunks.append(text_delta)
                             accumulated.append(text_delta)
+                            if text_delta.strip():
+                                model_produced_text = True
                             if on_message:
                                 await on_message(
                                     AgentMessageEvent(delta=text_delta, session_id=session_id)
@@ -259,6 +263,10 @@ class UnifiedApiProvider(BaseProvider):
 
             # Process captured tool calls if any and loop back for synthesized response
             if captured_tool_calls:
+                if forcing_synthesis:
+                    logger.warning("[%s] Model emitted tool call during forced synthesis; halting tool loop", provider_type)
+                    break
+
                 asst_tool_calls = []
                 tool_results = []
                 for i, tc in enumerate(captured_tool_calls):
@@ -314,6 +322,25 @@ class UnifiedApiProvider(BaseProvider):
                     messages.append({"role": "assistant", "tool_calls": asst_tool_calls})
                     messages.extend(tool_results)
                     payload["messages"] = messages
+
+                    if turn_count >= max_tool_turns:
+                        logger.info(
+                            "[%s] Reached max tool turns (%d); requesting final answer synthesis without tools",
+                            provider_type,
+                            max_tool_turns,
+                        )
+                        forcing_synthesis = True
+                        payload.pop("tools", None)
+                        payload["messages"].append({
+                            "role": "user",
+                            "content": (
+                                "[SYSTEM NOTE: You have reached the maximum allowed tool execution limit for this turn. "
+                                "Formulate and output your final, comprehensive answer to the user now based on all information and tool results above. "
+                                "Do not attempt to call any more tools.]"
+                            ),
+                        })
+                        continue
+
                     logger.info("[%s] Tool executed; continuing turn loop for model answer synthesis (step %d)", provider_type, turn_count)
                     continue
                 else:
@@ -322,7 +349,7 @@ class UnifiedApiProvider(BaseProvider):
                 # Fail-safe: Detect if model simulated tool breadcrumbs in its own streamed text instead of tool calling
                 current_turn_text = "".join(streamed_text_chunks).strip()
                 simulated = detect_simulated_tool_call(current_turn_text)
-                if simulated:
+                if simulated and not forcing_synthesis:
                     call_name, call_args = simulated
                     logger.warning(
                         "[%s] Intercepted simulated tool call in model text: %s with args %s",
@@ -369,6 +396,25 @@ class UnifiedApiProvider(BaseProvider):
                         "content": tool_result,
                     })
                     payload["messages"] = messages
+
+                    if turn_count >= max_tool_turns:
+                        logger.info(
+                            "[%s] Reached max tool turns (%d); requesting final answer synthesis without tools",
+                            provider_type,
+                            max_tool_turns,
+                        )
+                        forcing_synthesis = True
+                        payload.pop("tools", None)
+                        payload["messages"].append({
+                            "role": "user",
+                            "content": (
+                                "[SYSTEM NOTE: You have reached the maximum allowed tool execution limit for this turn. "
+                                "Formulate and output your final, comprehensive answer to the user now based on all information and tool results above. "
+                                "Do not attempt to call any more tools.]"
+                            ),
+                        })
+                        continue
+
                     logger.info("[%s] Intercepted tool executed; continuing turn loop for model answer synthesis (step %d)", provider_type, turn_count)
                     continue
                 break
@@ -378,6 +424,12 @@ class UnifiedApiProvider(BaseProvider):
             raise RuntimeError(
                 f"Provider '{provider_type}' ({self.profile.model}) returned an empty response"
             )
+
+        if not model_produced_text:
+            fallback_note = "\n\n*(Agent completed tool executions but did not produce a final textual summary.)*"
+            result_text += fallback_note
+            if on_message:
+                await on_message(AgentMessageEvent(delta=fallback_note, session_id=session_id))
 
         # Persist conversation turn
         try:

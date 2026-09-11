@@ -142,3 +142,23 @@ def test_clean_history_message():
     assert "[list_dir yodu]" in cleaned2
     assert "app" not in cleaned2
 
+
+def test_resolve_path_resilient(tmp_path: Path):
+    www_dir = tmp_path / "www"
+    personal_dir = www_dir / "personal"
+    personal_dir.mkdir(parents=True)
+
+    # 1. Normal relative path
+    assert resolve_path("personal", workspace_path=www_dir) == personal_dir
+
+    # 2. Overlapping root segment (e.g. target is www/personal when cwd is /.../www)
+    assert resolve_path("www/personal", workspace_path=www_dir) == personal_dir
+
+    # 3. Absolute path
+    assert resolve_path(str(personal_dir), workspace_path=www_dir) == personal_dir
+
+    # 4. Fallback for non-existent target
+    missing = resolve_path("missing/file.txt", workspace_path=www_dir)
+    assert missing == (www_dir / "missing/file.txt").resolve()
+
+

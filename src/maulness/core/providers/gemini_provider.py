@@ -144,10 +144,12 @@ class GeminiProvider(BaseProvider):
         idle_timeout = float(config.stream_idle_timeout_seconds)
         first_chunk_timeout = 60.0 if effort else 30.0
 
-        max_tool_turns = 5
+        max_tool_turns = getattr(self.profile, "max_tool_turns", config.max_tool_turns)
         turn_count = 0
+        forcing_synthesis = False
+        model_produced_text = False
 
-        while turn_count < max_tool_turns:
+        while turn_count <= max_tool_turns:
             turn_count += 1
             has_tool_call = False
             model_parts: list[types.Part] = []
@@ -194,7 +196,7 @@ class GeminiProvider(BaseProvider):
                         if hasattr(cand, "content") and cand.content:
                             for part in cand.content.parts:
                                 # Handle tool/function calls if returned
-                                if getattr(part, "function_call", None):
+                                if getattr(part, "function_call", None) and not forcing_synthesis:
                                     fn = part.function_call
                                     call_name = fn.name
                                     call_args = dict(fn.args) if fn.args else {}
@@ -249,6 +251,8 @@ class GeminiProvider(BaseProvider):
                                             AgentThoughtEvent(delta=part_text, session_id=session_id)
                                         )
                                 else:
+                                    if part_text.strip():
+                                        model_produced_text = True
                                     accumulated.append(part_text)
                                     if on_message:
                                         await on_message(
@@ -256,17 +260,49 @@ class GeminiProvider(BaseProvider):
                                         )
 
                 if not has_parts and getattr(chunk, "text", None):
-                    accumulated.append(chunk.text)
-                    model_parts.append(types.Part.from_text(text=chunk.text))
+                    text_cand = chunk.text
+                    if text_cand.strip():
+                        model_produced_text = True
+                    accumulated.append(text_cand)
+                    model_parts.append(types.Part.from_text(text=text_cand))
                     if on_message:
                         await on_message(
-                            AgentMessageEvent(delta=chunk.text, session_id=session_id)
+                            AgentMessageEvent(delta=text_cand, session_id=session_id)
                         )
 
             # If tool calls were made during this turn, feed response back to model for synthesis
             if has_tool_call and tool_response_parts:
+                if forcing_synthesis:
+                    logger.warning("[%s] Model emitted tool call during forced synthesis; halting tool loop", self.profile.name)
+                    break
+
                 contents.append(types.Content(role="model", parts=model_parts))
                 contents.append(types.Content(role="user", parts=tool_response_parts))
+
+                if turn_count >= max_tool_turns:
+                    logger.info(
+                        "[%s] Reached max tool turns (%d); requesting final answer synthesis without tools",
+                        self.profile.name,
+                        max_tool_turns,
+                    )
+                    forcing_synthesis = True
+                    gen_config = types.GenerateContentConfig(
+                        temperature=self.profile.temperature,
+                        max_output_tokens=self.profile.max_tokens,
+                        system_instruction=self.profile.effective_system_prompt(),
+                    )
+                    contents.append(types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(
+                            text=(
+                                "[SYSTEM NOTE: You have reached the maximum allowed tool execution limit for this turn. "
+                                "Formulate and output your final, comprehensive answer to the user now based on all information and tool results above. "
+                                "Do not attempt to call any more tools.]"
+                            )
+                        )],
+                    ))
+                    continue
+
                 logger.info("[%s] Tool executed; continuing turn loop for model answer synthesis (step %d)", self.profile.name, turn_count)
                 continue
             else:
@@ -275,6 +311,12 @@ class GeminiProvider(BaseProvider):
         result_text = "".join(accumulated).strip()
         if not result_text:
             raise RuntimeError(f"Gemini model '{model_name}' completed stream but returned an empty response")
+
+        if not model_produced_text:
+            fallback_note = "\n\n*(Agent completed tool executions but did not produce a final textual summary.)*"
+            result_text += fallback_note
+            if on_message:
+                await on_message(AgentMessageEvent(delta=fallback_note, session_id=session_id))
 
         # Persist conversation turn
         try:

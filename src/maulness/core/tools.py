@@ -106,10 +106,31 @@ TOOL_DEFINITIONS = [
 def resolve_path(target_path: str, workspace_path: Optional[Path]) -> Path:
     """Resolve relative or absolute path against the workspace."""
     p = Path(target_path).expanduser()
-    if not p.is_absolute():
-        base = workspace_path or Path.cwd()
-        p = (base / p).resolve()
-    return p
+    if p.is_absolute():
+        return p
+
+    base = (workspace_path or Path.cwd()).resolve()
+    candidate = (base / p).resolve()
+    if candidate.exists():
+        return candidate
+
+    # Resilient resolution for overlapping path queries (e.g. cwd=/home/.../www, target=www/personal)
+    if p.parts and p.parts[0] == base.name:
+        sub_candidate = (base / Path(*p.parts[1:])).resolve()
+        if sub_candidate.exists():
+            return sub_candidate
+
+    # Check relative to base.parent (e.g. target includes base folder name)
+    parent_candidate = (base.parent / p).resolve()
+    if parent_candidate.exists():
+        return parent_candidate
+
+    # Check relative to home
+    home_candidate = (Path.home() / p).resolve()
+    if home_candidate.exists():
+        return home_candidate
+
+    return candidate
 
 
 _ACTIVE_TURN_CACHE: dict[str, dict[str, str]] = {}

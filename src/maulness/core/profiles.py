@@ -63,6 +63,7 @@ class ExecutionConfig(BaseModel):
     system_prompt_mode: str = "prepend"
     default_policy: PolicyAction = PolicyAction.ASK
     rules: ExecutionRulesConfig = Field(default_factory=ExecutionRulesConfig)
+    max_tool_turns: Optional[int] = None
 
 
 class FallbackItem(BaseModel):
@@ -192,6 +193,12 @@ class Profile(BaseModel):
     @property
     def worktree(self) -> bool:
         return self.execution.worktree
+
+    @property
+    def max_tool_turns(self) -> int:
+        if self.execution and self.execution.max_tool_turns is not None:
+            return self.execution.max_tool_turns
+        return config.max_tool_turns
 
     @property
     def fallbacks(self) -> list[dict[str, Any]]:

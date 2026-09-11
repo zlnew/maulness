@@ -328,5 +328,113 @@ async def test_unified_api_provider_intercepts_simulated_tool_call(tmp_path):
     assert "Done executing intercepted command." in result
 
 
+@pytest.mark.asyncio
+async def test_unified_api_provider_max_tool_turns_forces_synthesis(tmp_path):
+    import json
+    from unittest.mock import patch, MagicMock
+    from maulness.core.providers.api_provider import UnifiedApiProvider
+    from maulness.storage.db import StorageManager
+
+    storage = StorageManager(db_path=tmp_path / "test.db")
+    await storage.initialize()
+
+    # Profile capped at 2 tool turns
+    profile = Profile(
+        identity={"name": "cap_tester"},
+        agent={"provider": "ollama", "model": "llama3", "base_url": "http://localhost:11434/v1"},
+        execution={"max_tool_turns": 2},
+    )
+    provider = UnifiedApiProvider(profile, storage=storage)
+
+    turn_1_lines = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {"name": "run_command", "arguments": '{"command": "echo step1"}'}
+                    }]
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    turn_2_lines = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {"name": "run_command", "arguments": '{"command": "echo step2"}'}
+                    }]
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    turn_3_forced_synthesis_lines = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": "Synthesized final answer after 2 tool turns."
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    calls = [turn_1_lines, turn_2_lines, turn_3_forced_synthesis_lines]
+    payloads_captured = []
+
+    class MockStreamCtx:
+        def __init__(self, lines):
+            self.lines = lines
+
+        async def __aenter__(self):
+            resp = MagicMock()
+            resp.is_error = False
+
+            async def aiter_lines():
+                for l in self.lines:
+                    yield l
+
+            resp.aiter_lines = aiter_lines
+            return resp
+
+        async def __aexit__(self, *args):
+            pass
+
+    def mock_stream(method, url, headers=None, json=None):
+        payloads_captured.append(dict(json) if json else {})
+        lines = calls.pop(0) if calls else ['data: [DONE]']
+        return MockStreamCtx(lines)
+
+    with patch("httpx.AsyncClient.stream", side_effect=mock_stream):
+        result = await provider.run(
+            session_id="capped_sess",
+            prompt="Perform multi-step exploration",
+            workspace_path=tmp_path,
+            yolo=True,
+        )
+
+    # 1. Turn 1 and 2 should have had tools in payload
+    assert "tools" in payloads_captured[0]
+    assert "tools" in payloads_captured[1]
+
+    # 2. Turn 3 (forced synthesis) must NOT have tools in payload
+    assert "tools" not in payloads_captured[2]
+    # And must have the system prompt requesting final synthesis
+    last_msg = payloads_captured[2]["messages"][-1]
+    assert "Maximum allowed tool execution limit" in last_msg["content"] or "maximum allowed tool" in last_msg["content"].lower()
+
+    # 3. Output must contain both breadcrumbs AND the synthesized final answer
+    assert "run_command: echo step1" in result
+    assert "run_command: echo step2" in result
+    assert "Synthesized final answer after 2 tool turns." in result
+
+
+
 
 
