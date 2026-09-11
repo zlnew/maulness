@@ -2,8 +2,10 @@ import asyncio
 import pytest
 from pathlib import Path
 
-from maulness.core.kernel.models import KernelEventType, StepResult
+from maulness.core.kernel.loop import DurableAgentKernel
+from maulness.core.kernel.models import KernelEventType, ModelTurnOutput, StepResult
 from maulness.core.kernel.step_runner import DurableStepRunner, canonical_json
+from maulness.core.profiles import Profile
 from maulness.storage.db import StorageManager
 
 
@@ -180,3 +182,121 @@ async def test_crash_recovery_resumption_flow(temp_storage: StorageManager):
     events = await runner.get_stage_events(task_id="task_recovery", stage="building")
     assert len(events) == 5
     assert [e.step_index for e in events] == [0, 1, 2, 3, 4]
+
+
+async def test_durable_agent_kernel_turn_memoization(temp_storage: StorageManager, tmp_path: Path):
+    profile = Profile(
+        identity={"name": "kernel_memo_tester"},
+        agent={"provider": "ollama", "model": "llama3"},
+        execution={"yolo": True},
+    )
+    kernel = DurableAgentKernel(profile, storage=temp_storage)
+
+    generator_call_count = 0
+
+    async def mock_turn_generator(messages, tools, session_id, **kwargs) -> ModelTurnOutput:
+        nonlocal generator_call_count
+        generator_call_count += 1
+        if generator_call_count == 1:
+            return ModelTurnOutput(
+                tool_calls=[{
+                    "id": "call_echo_1",
+                    "name": "run_command",
+                    "arguments": {"command": "echo memo_test_output"},
+                }]
+            )
+        return ModelTurnOutput(content="Task completed successfully.")
+
+    # First run: invokes generator twice (turn 1 tool call, turn 2 synthesis)
+    res1 = await kernel.run(
+        turn_generator_fn=mock_turn_generator,
+        session_id="task_k1_building",
+        prompt="Execute echo",
+        workspace_path=tmp_path,
+    )
+    assert generator_call_count == 2
+    assert "echo memo_test_output" in res1
+    assert "Task completed successfully." in res1
+
+    # Second run with same session_id and prompt: all steps memoized from SQLite
+    res2 = await kernel.run(
+        turn_generator_fn=mock_turn_generator,
+        session_id="task_k1_building",
+        prompt="Execute echo",
+        workspace_path=tmp_path,
+    )
+    # Generator was NOT called again
+    assert generator_call_count == 2
+    assert res2 == res1
+
+    # Check recorded events
+    events = await temp_storage.get_agent_events(task_id="task_k1", stage="building")
+    assert len(events) >= 4
+    event_types = [e["event_type"] for e in events]
+    assert "prompt" in event_types
+    assert "model_turn" in event_types
+    assert "tool_result" in event_types
+    assert "final_response" in event_types
+
+
+async def test_durable_agent_kernel_crash_resumption_mid_session(temp_storage: StorageManager, tmp_path: Path):
+    profile = Profile(
+        identity={"name": "crash_tester"},
+        agent={"provider": "ollama", "model": "llama3"},
+        execution={"yolo": True},
+    )
+    kernel = DurableAgentKernel(profile, storage=temp_storage)
+
+    generator_invocations = []
+
+    async def crashing_turn_generator(messages, tools, session_id, **kwargs) -> ModelTurnOutput:
+        generator_invocations.append(len(generator_invocations) + 1)
+        if len(generator_invocations) == 1:
+            return ModelTurnOutput(
+                tool_calls=[{
+                    "id": "call_crash_1",
+                    "name": "run_command",
+                    "arguments": {"command": "echo survived_crash"},
+                }]
+            )
+        elif len(generator_invocations) == 2:
+            raise RuntimeError("Simulated process crash mid-session")
+        return ModelTurnOutput(content="Resumed after crash and finished.")
+
+    # Phase 1: Run fails on turn 2
+    with pytest.raises(RuntimeError, match="Simulated process crash mid-session"):
+        await kernel.run(
+            turn_generator_fn=crashing_turn_generator,
+            session_id="task_crash_building",
+            prompt="Run with crash",
+            workspace_path=tmp_path,
+        )
+
+    assert generator_invocations == [1, 2]
+
+    # Verify that Turn 1 and its tool result were committed
+    events = await temp_storage.get_agent_events(task_id="task_crash", stage="building")
+    recorded_types = [e["event_type"] for e in events]
+    assert "prompt" in recorded_types
+    assert "model_turn" in recorded_types
+    assert "tool_result" in recorded_types
+
+    # Phase 2: Restart agent on same session with recovering generator
+    generator_invocations.clear()
+
+    async def recovered_turn_generator(messages, tools, session_id, **kwargs) -> ModelTurnOutput:
+        generator_invocations.append("called")
+        return ModelTurnOutput(content="Resumed after crash and finished.")
+
+    final_result = await kernel.run(
+        turn_generator_fn=recovered_turn_generator,
+        session_id="task_crash_building",
+        prompt="Run with crash",
+        workspace_path=tmp_path,
+    )
+
+    # Only 1 generator call occurred (turn 2 synthesis), turn 1 was replayed from SQLite cache
+    assert len(generator_invocations) == 1
+    assert "echo survived_crash" in final_result
+    assert "Resumed after crash and finished." in final_result
+

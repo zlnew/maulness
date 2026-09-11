@@ -23,7 +23,11 @@ class StorageManager:
     """Async SQLite storage manager for Maulness tasks, sessions, and approvals."""
 
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or DEFAULT_DB_PATH
+        if db_path:
+            self.db_path = db_path
+        else:
+            env_p = os.getenv("MAULNESS_DB_PATH")
+            self.db_path = Path(env_p) if env_p else DEFAULT_DB_PATH
 
     @asynccontextmanager
     async def _connect(self):

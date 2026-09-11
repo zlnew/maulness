@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
@@ -35,3 +35,31 @@ class AgentEventRecord:
     payload: Any
     idempotency_key: Optional[str]
     created_at: str
+
+
+@dataclass
+class ModelTurnOutput:
+    content: str = ""
+    thought: Optional[str] = None
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    finish_reason: Optional[str] = None
+    simulated_tool_call: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "content": self.content,
+            "thought": self.thought,
+            "tool_calls": self.tool_calls,
+            "finish_reason": self.finish_reason,
+            "simulated_tool_call": self.simulated_tool_call,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ModelTurnOutput":
+        return cls(
+            content=data.get("content", ""),
+            thought=data.get("thought"),
+            tool_calls=data.get("tool_calls", []),
+            finish_reason=data.get("finish_reason"),
+            simulated_tool_call=bool(data.get("simulated_tool_call", False)),
+        )
