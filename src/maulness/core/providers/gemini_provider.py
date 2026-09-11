@@ -16,7 +16,12 @@ from maulness.core.models import (
 )
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
-from maulness.core.tools import TOOL_DEFINITIONS, execute_tool_call, format_lean_tool_breadcrumb
+from maulness.core.tools import (
+    TOOL_DEFINITIONS,
+    clean_history_message,
+    execute_tool_call,
+    format_lean_tool_breadcrumb,
+)
 from maulness.storage.db import StorageManager
 
 logger = logging.getLogger("maulness.providers.gemini")
@@ -115,15 +120,16 @@ class GeminiProvider(BaseProvider):
 
         gen_config = types.GenerateContentConfig(**gen_config_kwargs)
 
-        # Retrieve conversation history
+        # Retrieve conversation history (sanitized)
         history_turns = await self.storage.get_conversation_messages(conv_id, limit=20)
         contents: list[types.Content] = []
         for turn in history_turns:
             role = "model" if turn["role"] == "assistant" else "user"
+            cleaned_content = clean_history_message(turn["content"])
             contents.append(
                 types.Content(
                     role=role,
-                    parts=[types.Part.from_text(text=turn["content"])],
+                    parts=[types.Part.from_text(text=cleaned_content)],
                 )
             )
         contents.append(

@@ -249,5 +249,84 @@ async def test_unified_api_provider_tool_loop(tmp_path):
     assert "The answer is 42." in result
 
 
+@pytest.mark.asyncio
+async def test_unified_api_provider_intercepts_simulated_tool_call(tmp_path):
+    import json
+    from unittest.mock import patch, MagicMock
+    from maulness.core.providers.api_provider import UnifiedApiProvider
+    from maulness.storage.db import StorageManager
+
+    storage = StorageManager(db_path=tmp_path / "test.db")
+    await storage.initialize()
+
+    profile = Profile(
+        identity={"name": "sim_tester"},
+        agent={"provider": "ollama", "model": "gemma", "base_url": "http://localhost:11434/v1"},
+    )
+    provider = UnifiedApiProvider(profile, storage=storage)
+
+    # Turn 1: Model attempts to hallucinate markdown tool call in plain text instead of function calling
+    turn_1_lines = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": "> **`run_command: echo 'real_intercepted'`**:\n```\nfake markdown output\n```"
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    # Turn 2: Synthesized answer
+    turn_2_lines = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": "Done executing intercepted command."
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    calls = [turn_1_lines, turn_2_lines]
+
+    class MockStreamCtx:
+        def __init__(self, lines):
+            self.lines = lines
+
+        async def __aenter__(self):
+            resp = MagicMock()
+            resp.is_error = False
+
+            async def aiter_lines():
+                for l in self.lines:
+                    yield l
+
+            resp.aiter_lines = aiter_lines
+            return resp
+
+        async def __aexit__(self, *args):
+            pass
+
+    def mock_stream(method, url, headers=None, json=None):
+        lines = calls.pop(0) if calls else ['data: [DONE]']
+        return MockStreamCtx(lines)
+
+    with patch("httpx.AsyncClient.stream", side_effect=mock_stream):
+        result = await provider.run(
+            session_id="sim_sess",
+            prompt="Run echo intercepted",
+            workspace_path=tmp_path,
+            yolo=True,
+        )
+
+    # Verify real tool execution occurred and replaced the fake output
+    assert "run_command: echo 'real_intercepted'" in result
+    assert "real_intercepted" in result
+    assert "fake markdown output" not in result
+    assert "Done executing intercepted command." in result
+
+
 
 

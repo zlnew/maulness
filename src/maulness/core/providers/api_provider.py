@@ -15,7 +15,13 @@ from maulness.core.models import (
 )
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
-from maulness.core.tools import TOOL_DEFINITIONS, execute_tool_call, format_lean_tool_breadcrumb
+from maulness.core.tools import (
+    TOOL_DEFINITIONS,
+    clean_history_message,
+    detect_simulated_tool_call,
+    execute_tool_call,
+    format_lean_tool_breadcrumb,
+)
 from maulness.storage.db import StorageManager
 
 logger = logging.getLogger("maulness.providers.api")
@@ -143,13 +149,16 @@ class UnifiedApiProvider(BaseProvider):
         elif provider_type.startswith("opencode") or provider_type == "deepseek":
             default_model = "deepseek-ai/deepseek-coder-v3"
 
-        # Multi-turn history retrieval
+        # Multi-turn history retrieval (sanitized to remove simulated tool syntax)
         history = await self.storage.get_conversation_messages(conv_id, limit=20)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.profile.effective_system_prompt()}
         ]
         for turn in history:
-            messages.append({"role": turn["role"], "content": turn["content"]})
+            messages.append({
+                "role": turn["role"],
+                "content": clean_history_message(turn["content"]),
+            })
         messages.append({"role": "user", "content": prompt})
 
         payload: dict[str, Any] = {
@@ -173,6 +182,7 @@ class UnifiedApiProvider(BaseProvider):
         while turn_count < max_tool_turns:
             turn_count += 1
             captured_tool_calls: list[dict[str, Any]] = []
+            streamed_text_chunks: list[str] = []
             is_first_chunk = True
 
             timeout = httpx.Timeout(120.0, connect=20.0, read=idle_timeout)
@@ -240,6 +250,7 @@ class UnifiedApiProvider(BaseProvider):
                         # 3. Capture visible text content
                         text_delta = delta.get("content", "")
                         if text_delta:
+                            streamed_text_chunks.append(text_delta)
                             accumulated.append(text_delta)
                             if on_message:
                                 await on_message(
@@ -308,6 +319,58 @@ class UnifiedApiProvider(BaseProvider):
                 else:
                     break
             else:
+                # Fail-safe: Detect if model simulated tool breadcrumbs in its own streamed text instead of tool calling
+                current_turn_text = "".join(streamed_text_chunks).strip()
+                simulated = detect_simulated_tool_call(current_turn_text)
+                if simulated:
+                    call_name, call_args = simulated
+                    logger.warning(
+                        "[%s] Intercepted simulated tool call in model text: %s with args %s",
+                        provider_type,
+                        call_name,
+                        call_args,
+                    )
+                    call_id = f"call_intercepted_{turn_count}_{call_name}"
+                    asst_tool_calls = [{
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": call_name, "arguments": json.dumps(call_args)},
+                    }]
+                    if on_tool_call:
+                        await on_tool_call(
+                            AgentToolCallEvent(
+                                call_id=call_id,
+                                tool_name=call_name,
+                                args=call_args,
+                                session_id=session_id,
+                            )
+                        )
+                    tool_result = await execute_tool_call(
+                        name=call_name,
+                        args=call_args,
+                        workspace_path=workspace_path,
+                        session_id=session_id,
+                        on_approval=on_approval,
+                        yolo=self.profile.execution.yolo,
+                        rule_engine=self.profile.get_rule_engine(),
+                    )
+                    real_breadcrumb = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
+                    if streamed_text_chunks:
+                        accumulated = accumulated[:-len(streamed_text_chunks)]
+                    accumulated.append(real_breadcrumb)
+                    if on_message:
+                        await on_message(
+                            AgentMessageEvent(delta=real_breadcrumb, session_id=session_id)
+                        )
+                    messages.append({"role": "assistant", "tool_calls": asst_tool_calls})
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": tool_result,
+                    })
+                    payload["messages"] = messages
+                    logger.info("[%s] Intercepted tool executed; continuing turn loop for model answer synthesis (step %d)", provider_type, turn_count)
+                    continue
                 break
 
         result_text = "".join(accumulated).strip()
@@ -343,12 +406,12 @@ class UnifiedApiProvider(BaseProvider):
             "content-type": "application/json",
         }
 
-        # Multi-turn history retrieval
+        # Multi-turn history retrieval (sanitized)
         history = await self.storage.get_conversation_messages(conv_id, limit=20)
         messages: list[dict[str, Any]] = []
         for turn in history:
             role = "assistant" if turn["role"] == "assistant" else "user"
-            messages.append({"role": role, "content": turn["content"]})
+            messages.append({"role": role, "content": clean_history_message(turn["content"])})
         messages.append({"role": "user", "content": prompt})
 
         payload = {

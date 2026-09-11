@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
@@ -343,4 +344,67 @@ def format_lean_tool_breadcrumb(name: str, args: dict[str, Any], result: str) ->
     else:
         preview = clean_res
     return f"> **`{label}`**:\n```\n{preview}\n```\n\n"
+
+
+_TOOL_SIMULATION_PATTERN = re.compile(
+    r"^>\s*(?:⚡\s*)?\*\*`?([a-zA-Z_]+)(?::\s*([^`*\n]+))?`?\*\*",
+    re.MULTILINE,
+)
+
+
+def detect_simulated_tool_call(text: str) -> Optional[tuple[str, dict[str, Any]]]:
+    """Detect if a model generated markdown simulating a tool call in text instead of function calling."""
+    if not text:
+        return None
+    match = _TOOL_SIMULATION_PATTERN.search(text)
+    if not match:
+        return None
+    tool_name = match.group(1).strip()
+    raw_arg = (match.group(2) or "").strip()
+
+    known_tools = {"run_command", "read_file", "write_file", "list_dir", "git_status"}
+    if tool_name not in known_tools:
+        return None
+
+    args: dict[str, Any] = {}
+    if tool_name == "run_command":
+        args = {"command": raw_arg}
+    elif tool_name in ("list_dir", "read_file"):
+        args = {"path": raw_arg}
+    elif tool_name == "git_status":
+        args = {"repo_path": raw_arg}
+    elif tool_name == "write_file":
+        args = {"path": raw_arg}
+
+    return tool_name, args
+
+
+def clean_history_message(content: str) -> str:
+    """Sanitize message history to prevent LLMs from mimicking markdown tool breadcrumbs as plain text."""
+    if not content:
+        return ""
+    # Strip multiline tool breadcrumbs: > **...**: or > **...** ➔ followed by code block
+    cleaned = re.sub(
+        r">\s*(?:⚡\s*)?\*\*`?[a-zA-Z_]+(?::\s*[^`*\n]+)?`?\*\*\s*(?::|->|➔)?\s*\n```[\s\S]*?```\s*",
+        "",
+        content,
+    )
+    # Strip single-line tool breadcrumbs: > **`name: arg`** -> `...`\n\n
+    cleaned = re.sub(
+        r">\s*(?:⚡\s*)?\*\*`?[a-zA-Z_]+(?::\s*[^`*\n]+)?`?\*\*\s*(?:->|➔)\s*`?[^\n]+`?\s*",
+        "",
+        cleaned,
+    )
+    # Strip legacy "⚡ **Tool Result (`name`):**\n```...```"
+    cleaned = re.sub(
+        r"⚡\s*\*\*Tool Result\s*\(`[a-zA-Z_]+`\):\*\*\s*\n```[\s\S]*?```\s*",
+        "",
+        cleaned,
+    )
+    cleaned = cleaned.strip()
+    if not cleaned:
+        first_line = content.strip().splitlines()[0]
+        sanitized = re.sub(r"[>⚡*`➔:]", "", first_line).strip()
+        return f"[{sanitized}]" if sanitized else "[Tool execution]"
+    return cleaned
 

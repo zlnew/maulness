@@ -294,6 +294,15 @@ class Profile(BaseModel):
         if skills_summary:
             parts.append(skills_summary)
 
+        # Tool Calling Doctrine (strictly enforces real function calling over simulated markdown)
+        parts.append(
+            "---\n## Tool Calling Doctrine\n"
+            "- You have real workspace tools available via function calling: "
+            "`run_command`, `read_file`, `write_file`, `list_dir`, `git_status`.\n"
+            "- NEVER simulate, fabricate, or hallucinate tool execution syntax (such as `> **tool_name**` or markdown breadcrumbs) in plain text.\n"
+            "- When you need to inspect files, execute shell commands, or check git status, you MUST call the appropriate function tool. Never guess, assume, or invent filesystem contents."
+        )
+
         return "\n\n".join(parts)
 
 

@@ -106,3 +106,39 @@ def test_format_lean_tool_breadcrumb():
     assert "> **`git_status: /tmp`**:" in b2
     assert "M file1.py" in b2
 
+
+def test_detect_simulated_tool_call():
+    from maulness.core.tools import detect_simulated_tool_call
+
+    # Detected cases
+    sim1 = detect_simulated_tool_call("> ⚡ **`list_dir: yodu`** ➔\n```\n[dir] app\n```")
+    assert sim1 == ("list_dir", {"path": "yodu"})
+
+    sim2 = detect_simulated_tool_call("> **`run_command: ls -la /home/zlnew/www/yodu`**:\n```\ntotal 44\n```")
+    assert sim2 == ("run_command", {"command": "ls -la /home/zlnew/www/yodu"})
+
+    sim3 = detect_simulated_tool_call("> **`git_status`** -> clean")
+    assert sim3 == ("git_status", {"repo_path": ""})
+
+    # Non-simulated regular text
+    assert detect_simulated_tool_call("Here is what you need to know about git_status.") is None
+    assert detect_simulated_tool_call("") is None
+
+
+def test_clean_history_message():
+    from maulness.core.tools import clean_history_message
+
+    # Message with tool breadcrumb and final narrative
+    msg_with_narrative = (
+        "> **`run_command: date`** -> `Jum 11 Sep 2026 07:38:49 WIB`\n\n"
+        "07:38:49 WIB (Jum, 11 Sep 2026)"
+    )
+    cleaned1 = clean_history_message(msg_with_narrative)
+    assert cleaned1 == "07:38:49 WIB (Jum, 11 Sep 2026)"
+
+    # Message with only tool breadcrumb
+    msg_only_crumb = "> ⚡ **`list_dir: yodu`** ➔\n```\n[dir] .git\n[dir] app\n```"
+    cleaned2 = clean_history_message(msg_only_crumb)
+    assert "[list_dir yodu]" in cleaned2
+    assert "app" not in cleaned2
+
