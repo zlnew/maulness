@@ -757,6 +757,265 @@ async def test_gemini_multi_relay_continuation_and_compaction(tmp_path):
     assert "Gemini completed all relays successfully." in result
 
 
+@pytest.mark.asyncio
+async def test_unified_api_provider_natural_progress_map_auto_advances(tmp_path):
+    import json
+    from unittest.mock import MagicMock, patch
+    from maulness.core.profiles import Profile
+    from maulness.core.providers.api_provider import UnifiedApiProvider
+
+    profile = Profile(
+        identity={"name": "natural_progress_agent"},
+        agent={"provider": "openrouter", "model": "test-model"},
+        execution={"max_tool_turns": 1, "max_relays": 2, "yolo": True},
+        env_vars={"OPENROUTER_API_KEY": "dummy_key"},
+    )
+    provider = UnifiedApiProvider(profile)
+
+    # Turn 1: Relay 1, tool call
+    turn_1 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "name": "run_command",
+                            "arguments": json.dumps({"command": "echo domain_inspected"}),
+                        }
+                    }]
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    # Turn 2: Natural progress map without literal [STATUS: IN_PROGRESS] tag
+    turn_2 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": (
+                        "I have inspected the domain layer.\n\n"
+                        "Current Status:\n"
+                        "- [x] internal/domain -> COMPLETE\n"
+                        "- [ ] internal/application -> NEXT\n"
+                        "- [ ] internal/adapters -> PENDING\n\n"
+                        "Next Step: I am diving into internal/application to inspect services."
+                    )
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    # Turn 3: Relay 2, tool call
+    turn_3 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "name": "run_command",
+                            "arguments": json.dumps({"command": "echo app_inspected"}),
+                        }
+                    }]
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    # Turn 4: Relay 2, final answer
+    turn_4 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": "All packages read and analyzed 100%."
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    calls = [turn_1, turn_2, turn_3, turn_4]
+
+    class MockStreamContext:
+        def __init__(self, lines):
+            self.lines = lines
+
+        async def __aenter__(self):
+            mock_resp = MagicMock()
+            mock_resp.is_error = False
+
+            async def aiter_lines():
+                for line in self.lines:
+                    yield line
+
+            mock_resp.aiter_lines = aiter_lines
+            return mock_resp
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    def mock_stream(method, url, headers=None, json=None):
+        lines = calls.pop(0) if calls else ['data: [DONE]']
+        return MockStreamContext(lines)
+
+    mock_client = MagicMock()
+    mock_client.stream = mock_stream
+
+    class MockAsyncClientConstructor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return mock_client
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    with patch("httpx.AsyncClient", MockAsyncClientConstructor):
+        result = await provider.run(
+            session_id="natural_prog_sess",
+            prompt="Read 100% of horizonx",
+            workspace_path=tmp_path,
+        )
+
+    assert "[Relay Checkpoint 1/2]" in result
+    assert "diving into internal/application to inspect services" in result
+    assert "echo app_inspected" in result
+    assert "All packages read and analyzed 100%." in result
+
+
+@pytest.mark.asyncio
+async def test_unified_api_provider_unlimited_tool_turns(tmp_path):
+    import json
+    from unittest.mock import MagicMock, patch
+    from maulness.core.profiles import Profile
+    from maulness.core.providers.api_provider import UnifiedApiProvider
+
+    # max_tool_turns=0 signifies unlimited turns
+    profile = Profile(
+        identity={"name": "unlimited_agent"},
+        agent={"provider": "openrouter", "model": "test-model"},
+        execution={"max_tool_turns": 0, "max_relays": 1, "yolo": True},
+        env_vars={"OPENROUTER_API_KEY": "dummy_key"},
+    )
+    provider = UnifiedApiProvider(profile)
+
+    # 3 consecutive tool turns without forcing synthesis
+    turn_1 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "name": "run_command",
+                            "arguments": json.dumps({"command": "echo step_1"}),
+                        }
+                    }]
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+    turn_2 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "name": "run_command",
+                            "arguments": json.dumps({"command": "echo step_2"}),
+                        }
+                    }]
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+    turn_3 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "name": "run_command",
+                            "arguments": json.dumps({"command": "echo step_3"}),
+                        }
+                    }]
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+    turn_4 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": "Completed all steps in a single unbounded session."
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    calls = [turn_1, turn_2, turn_3, turn_4]
+
+    class MockStreamContext:
+        def __init__(self, lines):
+            self.lines = lines
+
+        async def __aenter__(self):
+            mock_resp = MagicMock()
+            mock_resp.is_error = False
+
+            async def aiter_lines():
+                for line in self.lines:
+                    yield line
+
+            mock_resp.aiter_lines = aiter_lines
+            return mock_resp
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    def mock_stream(method, url, headers=None, json=None):
+        lines = calls.pop(0) if calls else ['data: [DONE]']
+        return MockStreamContext(lines)
+
+    mock_client = MagicMock()
+    mock_client.stream = mock_stream
+
+    class MockAsyncClientConstructor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return mock_client
+
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    with patch("httpx.AsyncClient", MockAsyncClientConstructor):
+        result = await provider.run(
+            session_id="unlimited_sess",
+            prompt="Run unbounded tool calls",
+            workspace_path=tmp_path,
+        )
+
+    assert "echo step_1" in result
+    assert "echo step_2" in result
+    assert "echo step_3" in result
+    assert "Completed all steps in a single unbounded session." in result
+    assert "[Relay Checkpoint" not in result
+
+
 
 
 

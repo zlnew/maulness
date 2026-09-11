@@ -203,7 +203,20 @@ def test_extract_checkpoint_info():
     assert is_prog4 is True
     assert step4 == "Continuing task execution"
 
-    # 5. Negative cases
+    # 5. Natural progress map with unchecked checkboxes and Next Step (no literal [STATUS: IN_PROGRESS] tag)
+    text5 = (
+        "I have read internal/domain.\n\n"
+        "Current Status:\n"
+        "- [x] internal/domain -> COMPLETE\n"
+        "- [ ] internal/application -> NEXT\n"
+        "- [ ] internal/adapters -> PENDING\n\n"
+        "Next Step: I am diving into internal/application to inspect services."
+    )
+    is_prog5, _, step5 = extract_checkpoint_info(text5)
+    assert is_prog5 is True
+    assert "diving into internal/application" in step5
+
+    # 6. Negative cases
     assert extract_checkpoint_info("")[0] is False
     assert extract_checkpoint_info("Everything is finished! [STATUS: COMPLETE]")[0] is False
     assert extract_checkpoint_info("Here is your answer: 42")[0] is False

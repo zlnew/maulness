@@ -191,7 +191,7 @@ class UnifiedApiProvider(BaseProvider):
             if effort:
                 payload["reasoning_effort"] = effort
 
-            while turn_count <= max_tool_turns:
+            while max_tool_turns <= 0 or turn_count <= max_tool_turns:
                 turn_count += 1
                 captured_tool_calls: list[dict[str, Any]] = []
                 streamed_text_chunks: list[str] = []
@@ -336,7 +336,7 @@ class UnifiedApiProvider(BaseProvider):
                         current_messages.extend(tool_results)
                         payload["messages"] = current_messages
 
-                        if turn_count >= max_tool_turns:
+                        if max_tool_turns > 0 and turn_count >= max_tool_turns:
                             forcing_synthesis = True
                             payload.pop("tools", None)
                             if relay_count < max_relays:
@@ -351,12 +351,8 @@ class UnifiedApiProvider(BaseProvider):
                                     f"[SYSTEM NOTE: Execution burst limit reached ({max_tool_turns} tool actions in Relay {relay_count}/{max_relays}). "
                                     "Maximum allowed tool actions for this burst reached. "
                                     "If the task is fully finished, output your complete final answer to the user now. "
-                                    "If the task is STILL IN PROGRESS, output exactly:\n"
-                                    "[STATUS: IN_PROGRESS]\n"
-                                    "Accomplished: <1-2 sentences on what was completed in this burst>\n"
-                                    "Key Findings: <key facts, file paths, or test results discovered>\n"
-                                    "Next Step: <exact action to take in the next burst>\n"
-                                    "Do not attempt to call any tools.]"
+                                    "If the task is STILL IN PROGRESS, output your current progress and Next Step: <exact action to take in the next burst>. "
+                                    "Tools will be automatically re-enabled for the next burst. Do not attempt to call any tools in this turn.]"
                                 )
                             else:
                                 logger.info(
@@ -436,7 +432,7 @@ class UnifiedApiProvider(BaseProvider):
                         })
                         payload["messages"] = current_messages
 
-                        if turn_count >= max_tool_turns:
+                        if max_tool_turns > 0 and turn_count >= max_tool_turns:
                             forcing_synthesis = True
                             payload.pop("tools", None)
                             if relay_count < max_relays:
@@ -451,12 +447,8 @@ class UnifiedApiProvider(BaseProvider):
                                     f"[SYSTEM NOTE: Execution burst limit reached ({max_tool_turns} tool actions in Relay {relay_count}/{max_relays}). "
                                     "Maximum allowed tool actions for this burst reached. "
                                     "If the task is fully finished, output your complete final answer to the user now. "
-                                    "If the task is STILL IN PROGRESS, output exactly:\n"
-                                    "[STATUS: IN_PROGRESS]\n"
-                                    "Accomplished: <1-2 sentences on what was completed in this burst>\n"
-                                    "Key Findings: <key facts, file paths, or test results discovered>\n"
-                                    "Next Step: <exact action to take in the next burst>\n"
-                                    "Do not attempt to call any tools.]"
+                                    "If the task is STILL IN PROGRESS, output your current progress and Next Step: <exact action to take in the next burst>. "
+                                    "Tools will be automatically re-enabled for the next burst. Do not attempt to call any tools in this turn.]"
                                 )
                             else:
                                 logger.info(

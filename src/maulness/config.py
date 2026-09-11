@@ -47,8 +47,8 @@ class Config:
             os.getenv("STREAM_IDLE_TIMEOUT_SECONDS", "180.0")
         )
 
-        # Tool Execution Turn Limit & Long-Horizon Relay Budget
-        self.max_tool_turns: int = int(os.getenv("MAX_TOOL_TURNS", "15"))
+        # Tool Execution Turn Limit & Long-Horizon Relay Budget (0 for unlimited)
+        self.max_tool_turns: int = int(os.getenv("MAX_TOOL_TURNS", "50"))
         self.max_relays: int = int(os.getenv("MAX_RELAYS", "5"))
 
         # Process Sandboxing (auto, bwrap, none)

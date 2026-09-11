@@ -500,38 +500,70 @@ def extract_checkpoint_info(text: str) -> tuple[bool, str, str]:
     if not text:
         return False, "", ""
 
-    upper = text.upper()
-    if "[STATUS: IN_PROGRESS]" not in upper:
+    # Explicit completion markers take precedence
+    if re.search(r"\[STATUS:\s*(?:COMPLETE|FINISHED)\]", text, re.IGNORECASE):
         return False, "", ""
+
+    upper = text.upper()
+
+    # Positive signals that a task is still in progress
+    explicit_in_progress = (
+        "[STATUS: IN_PROGRESS]" in upper
+        or "STATUS: IN_PROGRESS" in upper
+        or "STATUS: IN PROGRESS" in upper
+    )
+
+    has_unchecked_checkboxes = bool(re.search(r"(?:^|\n)\s*[-*]\s*\[\s*\]", text))
+    has_next_markers = bool(
+        re.search(
+            r"\b(?:NEXT\s+STEP|NEXT|CONTINUING\s+WITH|MOVING\s+TO|DIVING\s+INTO)\s*:",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    has_pending_items = bool(re.search(r"->\s*(?:NEXT|PENDING|IN_PROGRESS)", text, re.IGNORECASE))
+
+    is_in_progress = (
+        explicit_in_progress
+        or has_unchecked_checkboxes
+        or has_next_markers
+        or has_pending_items
+    )
 
     checkpoint_body = text.strip()
     next_step = "Continuing task execution"
 
     for line in checkpoint_body.splitlines():
         clean = line.strip()
-        lower = clean.lower()
-        if lower.startswith("next step:"):
-            val = clean[10:].strip()
-            if val:
-                next_step = val
-            break
-        elif lower.startswith("- next step:"):
-            val = clean[12:].strip()
-            if val:
-                next_step = val
-            break
-        elif lower.startswith("**next step:**"):
-            val = clean[14:].strip()
-            if val:
-                next_step = val
-            break
-        elif lower.startswith("*next step:*"):
-            val = clean[12:].strip()
-            if val:
-                next_step = val
-            break
+        clean_no_bullets = re.sub(r"^[-*\d\.]+\s*", "", clean)
+        clean_normalized = re.sub(r"[\*`]", "", clean_no_bullets).strip()
+        lower = clean_normalized.lower()
 
-    return True, checkpoint_body, next_step
+        if lower.startswith("next step:"):
+            val = clean_normalized[10:].strip()
+            if val:
+                next_step = val
+                is_in_progress = True
+                break
+        elif lower.startswith("next:"):
+            val = clean_normalized[5:].strip()
+            if val:
+                next_step = val
+                is_in_progress = True
+                break
+
+    # Second pass: If next_step is still fallback, check for items marked "-> next"
+    if next_step == "Continuing task execution":
+        for line in checkpoint_body.splitlines():
+            clean = line.strip()
+            clean_no_bullets = re.sub(r"^[-*\d\.]+\s*", "", clean)
+            clean_normalized = re.sub(r"[\*`]", "", clean_no_bullets).strip()
+            if "-> next" in clean_normalized.lower():
+                next_step = clean_normalized
+                is_in_progress = True
+                break
+
+    return is_in_progress, checkpoint_body, next_step
 
 
 def clean_relay_completion_tags(text: str) -> str:
