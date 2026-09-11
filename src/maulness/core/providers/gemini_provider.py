@@ -134,8 +134,9 @@ class GeminiProvider(BaseProvider):
         )
 
         accumulated = []
-        init_timeout = min(float(config.stream_idle_timeout_seconds), 20.0)
-        idle_timeout = config.stream_idle_timeout_seconds
+        init_timeout = max(float(config.stream_idle_timeout_seconds), 60.0)
+        idle_timeout = float(config.stream_idle_timeout_seconds)
+        first_chunk_timeout = 60.0 if effort else 30.0
 
         max_tool_turns = 5
         turn_count = 0
@@ -145,6 +146,7 @@ class GeminiProvider(BaseProvider):
             has_tool_call = False
             model_parts: list[types.Part] = []
             tool_response_parts: list[types.Part] = []
+            executed_in_turn: set[str] = set()
 
             try:
                 response_stream = await asyncio.wait_for(
@@ -165,7 +167,7 @@ class GeminiProvider(BaseProvider):
 
             while True:
                 try:
-                    chunk_timeout = 25.0 if is_first_chunk else idle_timeout
+                    chunk_timeout = first_chunk_timeout if is_first_chunk else idle_timeout
                     chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=chunk_timeout)
                     is_first_chunk = False
                 except StopAsyncIteration:
@@ -173,7 +175,7 @@ class GeminiProvider(BaseProvider):
                 except asyncio.TimeoutError:
                     if is_first_chunk:
                         raise TimeoutError(
-                            f"Gemini model '{model_name}' timed out waiting for first token response after 25s"
+                            f"Gemini model '{model_name}' timed out waiting for first token response after {int(first_chunk_timeout)}s"
                         )
                     raise TimeoutError(
                         f"Gemini stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
@@ -188,11 +190,16 @@ class GeminiProvider(BaseProvider):
                                 # Handle tool/function calls if returned
                                 if getattr(part, "function_call", None):
                                     fn = part.function_call
+                                    call_name = fn.name
+                                    call_args = dict(fn.args) if fn.args else {}
+                                    call_sig = f"{call_name}::{json.dumps(call_args, sort_keys=True)}"
+                                    if call_sig in executed_in_turn:
+                                        continue
+                                    executed_in_turn.add(call_sig)
+
                                     has_parts = True
                                     has_tool_call = True
                                     model_parts.append(part)
-                                    call_name = fn.name
-                                    call_args = dict(fn.args) if fn.args else {}
                                     if on_tool_call:
                                         await on_tool_call(
                                             AgentToolCallEvent(

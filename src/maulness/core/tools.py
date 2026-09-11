@@ -111,6 +111,21 @@ def resolve_path(target_path: str, workspace_path: Optional[Path]) -> Path:
     return p
 
 
+_ACTIVE_TURN_CACHE: dict[str, dict[str, str]] = {}
+_ACTIVE_TURN_HISTORY: dict[str, list[dict[str, Any]]] = {}
+
+
+def get_turn_executed_tools(session_id: str) -> list[dict[str, Any]]:
+    """Return list of executed tools in the current prompt turn."""
+    return list(_ACTIVE_TURN_HISTORY.get(session_id, []))
+
+
+def clear_turn_tools(session_id: str) -> None:
+    """Clear executed tool cache for the given session turn."""
+    _ACTIVE_TURN_CACHE.pop(session_id, None)
+    _ACTIVE_TURN_HISTORY.pop(session_id, None)
+
+
 async def execute_tool_call(
     name: str,
     args: dict[str, Any],
@@ -123,6 +138,14 @@ async def execute_tool_call(
     """Execute a supported tool action with execution rules and HITL approval gating."""
     cwd = workspace_path or Path.cwd()
     logger.info("Executing tool '%s' with args: %s (cwd: %s)", name, args, cwd)
+
+    # Check turn-scoped tool cache to avoid duplicate execution on provider failover
+    canonical_args = json.dumps(args, sort_keys=True)
+    cache_key = f"{name}::{canonical_args}"
+    if session_id and session_id in _ACTIVE_TURN_CACHE and cache_key in _ACTIVE_TURN_CACHE[session_id]:
+        cached_res = _ACTIVE_TURN_CACHE[session_id][cache_key]
+        logger.info("Tool '%s' already executed during this turn for session '%s', reusing result", name, session_id)
+        return cached_res
 
     engine = rule_engine or RuleEngine()
     policy, reason = engine.evaluate(name, args, cwd=cwd, yolo=yolo)
@@ -144,6 +167,41 @@ async def execute_tool_call(
             approved = await on_approval(req)
             if not approved:
                 return f"Execution cancelled: User rejected tool '{name}'."
+
+    res = await _execute_tool_action(
+        name=name,
+        args=args,
+        cwd=cwd,
+        session_id=session_id,
+        policy=policy,
+        on_approval=on_approval,
+        yolo=yolo,
+    )
+
+    if session_id and not res.startswith("Execution cancelled"):
+        if session_id not in _ACTIVE_TURN_CACHE:
+            _ACTIVE_TURN_CACHE[session_id] = {}
+            _ACTIVE_TURN_HISTORY[session_id] = []
+        _ACTIVE_TURN_CACHE[session_id][cache_key] = res
+        _ACTIVE_TURN_HISTORY[session_id].append({
+            "name": name,
+            "args": args,
+            "result": res,
+        })
+
+    return res
+
+
+async def _execute_tool_action(
+    name: str,
+    args: dict[str, Any],
+    cwd: Path,
+    session_id: str,
+    policy: PolicyAction,
+    on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]],
+    yolo: bool,
+) -> str:
+    """Internal tool action dispatcher."""
 
     # 1. run_command
     if name == "run_command":

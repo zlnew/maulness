@@ -44,6 +44,13 @@ class MessageStreamDebouncer:
     def full_text(self) -> str:
         return self._current_text + "".join(self._buffer)
 
+    def reset(self):
+        """Reset internal text buffer to start streaming into a fresh message container."""
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+        self._buffer.clear()
+        self._current_text = ""
+
     async def write(self, delta: str):
         """Append text delta to the active buffer and schedule a throttled flush."""
         if not self._is_active:

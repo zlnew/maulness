@@ -10,6 +10,7 @@ from maulness.core.models import (
 )
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
+from maulness.core.tools import clear_turn_tools, get_turn_executed_tools
 
 logger = logging.getLogger("maulness.providers.fallback")
 
@@ -76,73 +77,90 @@ class FallbackProviderChain(BaseProvider):
         self.chain_errors = []
         last_error: Optional[Exception] = None
 
-        for idx, provider in enumerate(chain):
-            prov_name = provider.profile.name
-            prov_type = provider.profile.provider
-            prov_model = provider.profile.model or provider.profile.command or "default"
-            try:
-                if idx > 0:
+        try:
+            for idx, provider in enumerate(chain):
+                prov_name = provider.profile.name
+                prov_type = provider.profile.provider
+                prov_model = provider.profile.model or provider.profile.command or "default"
+                try:
+                    effective_prompt = prompt
+                    if idx > 0:
+                        logger.warning(
+                            "Attempting fallback provider %s (%s:%s) for session %s after failure",
+                            prov_name,
+                            prov_type,
+                            prov_model,
+                            session_id,
+                        )
+                        completed_tools = get_turn_executed_tools(session_id)
+                        if completed_tools:
+                            tools_summary = "\n".join(
+                                f"- Tool `{t['name']}` with arguments `{t['args']}` returned:\n```\n{t['result'][:1500]}\n```"
+                                for t in completed_tools
+                            )
+                            effective_prompt = (
+                                f"{prompt}\n\n"
+                                f"[SYSTEM NOTE: The following tool(s) were already executed during this request:\n"
+                                f"{tools_summary}\n"
+                                f"Do NOT re-execute these tools. Formulate your final response directly using the output above.]"
+                            )
+
+                    res = await provider.run(
+                        session_id=session_id,
+                        prompt=effective_prompt,
+                        workspace_path=workspace_path,
+                        conversation_id=conversation_id,
+                        on_init=on_init,
+                        on_thought=on_thought,
+                        on_message=on_message,
+                        on_tool_call=on_tool_call,
+                        on_approval=on_approval,
+                    )
+                    if not res or not res.strip():
+                        raise RuntimeError(f"Provider {prov_type}:{prov_model} completed but returned an empty response")
+                    self.last_used_provider = provider
+                    return res
+                except Exception as e:
+                    last_error = e
+                    friendly_msg = format_user_friendly_error(e)
+                    self.chain_errors.append({
+                        "profile": prov_name,
+                        "provider": prov_type,
+                        "model": prov_model,
+                        "error": friendly_msg,
+                        "raw_error": str(e),
+                    })
                     logger.warning(
-                        "Attempting fallback provider %s (%s:%s) for session %s after failure",
+                        "Provider %s (%s:%s) failed for session %s: %s",
                         prov_name,
                         prov_type,
                         prov_model,
                         session_id,
+                        friendly_msg,
                     )
-                res = await provider.run(
-                    session_id=session_id,
-                    prompt=prompt,
-                    workspace_path=workspace_path,
-                    conversation_id=conversation_id,
-                    on_init=on_init,
-                    on_thought=on_thought,
-                    on_message=on_message,
-                    on_tool_call=on_tool_call,
-                    on_approval=on_approval,
-                )
-                if not res or not res.strip():
-                    raise RuntimeError(f"Provider {prov_type}:{prov_model} completed but returned an empty response")
-                self.last_used_provider = provider
-                return res
-            except Exception as e:
-                last_error = e
-                friendly_msg = format_user_friendly_error(e)
-                self.chain_errors.append({
-                    "profile": prov_name,
-                    "provider": prov_type,
-                    "model": prov_model,
-                    "error": friendly_msg,
-                    "raw_error": str(e),
-                })
-                logger.warning(
-                    "Provider %s (%s:%s) failed for session %s: %s",
-                    prov_name,
-                    prov_type,
-                    prov_model,
-                    session_id,
-                    friendly_msg,
-                )
 
-                # Emit user-facing fallback thought notice if there is another provider in chain
-                if idx < len(chain) - 1:
-                    next_p = chain[idx + 1]
-                    next_tag = f"{next_p.profile.provider}:{next_p.profile.model or next_p.profile.command or 'default'}"
-                    notice = (
-                        f"Provider [{prov_type}:{prov_model}] failed ({friendly_msg}). "
-                        f"Switching to fallback [{next_tag}]..."
-                    )
-                    if on_thought:
-                        await on_thought(
-                            AgentThoughtEvent(delta=f"{notice}\n", session_id=session_id)
+                    # Emit user-facing fallback thought notice if there is another provider in chain
+                    if idx < len(chain) - 1:
+                        next_p = chain[idx + 1]
+                        next_tag = f"{next_p.profile.provider}:{next_p.profile.model or next_p.profile.command or 'default'}"
+                        notice = (
+                            f"Provider [{prov_type}:{prov_model}] failed ({friendly_msg}). "
+                            f"Switching to fallback [{next_tag}]..."
                         )
+                        if on_thought:
+                            await on_thought(
+                                AgentThoughtEvent(delta=f"{notice}\n", session_id=session_id)
+                            )
 
-                if idx == len(chain) - 1:
-                    summary = "\n".join(
-                        f"- {item['provider']}:{item['model']} -> {item['error']}"
-                        for item in self.chain_errors
-                    )
-                    raise RuntimeError(f"All configured providers failed:\n{summary}") from last_error
+                    if idx == len(chain) - 1:
+                        summary = "\n".join(
+                            f"- {item['provider']}:{item['model']} -> {item['error']}"
+                            for item in self.chain_errors
+                        )
+                        raise RuntimeError(f"All configured providers failed:\n{summary}") from last_error
 
-        if last_error:
-            raise last_error
-        return ""
+            if last_error:
+                raise last_error
+            return ""
+        finally:
+            clear_turn_tools(session_id)

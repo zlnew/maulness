@@ -377,21 +377,41 @@ class MaulnessBot(commands.Bot):
 
             embed.set_footer(text="Maulness Security Gate • 10m timeout")
             await channel.send(embed=embed, view=view)
+            is_timeout = False
             try:
                 approved = await asyncio.wait_for(fut, timeout=600.0)
-                if approved:
-                    # Clean up old thinking placeholder if empty
-                    if not debouncer.full_text.strip():
-                        try:
-                            await current_msg.delete()
-                        except Exception:
-                            pass
-                    # Spawn fresh message below approval card so stream appears sequentially
-                    current_msg = await channel.send(f"**{target_profile.name}** is running `{event.tool_name}`...")
-                    active_msgs.append(current_msg)
-                return approved
             except asyncio.TimeoutError:
-                return False
+                approved = False
+                is_timeout = True
+
+            # Clean up old thinking placeholder if empty
+            if not debouncer.full_text.strip():
+                try:
+                    await current_msg.delete()
+                except Exception:
+                    pass
+            else:
+                try:
+                    await debouncer.close()
+                except Exception:
+                    pass
+                debouncer.reset()
+
+            # Always spawn fresh message below approval card so all subsequent text streams sequentially
+            if approved:
+                status_text = f"**{target_profile.name}** is running `{event.tool_name}`..."
+            elif is_timeout:
+                status_text = f"**{target_profile.name}** action `{event.tool_name}` timed out."
+            else:
+                status_text = f"**{target_profile.name}** action `{event.tool_name}` was rejected by Maul."
+
+            try:
+                current_msg = await channel.send(status_text)
+                active_msgs.append(current_msg)
+            except Exception as e:
+                logger.error("Failed to spawn sequential message after approval decision: %s", e)
+
+            return approved
 
         provider = get_provider_for_profile(target_profile)
         workspace = self.profile_manager.resolve_workspace_for_profile(target_profile, config.workspace_root)
