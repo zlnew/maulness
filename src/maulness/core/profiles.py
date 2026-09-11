@@ -7,6 +7,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from maulness.config import config
+from maulness.core.rules import ExecutionRulesConfig, PolicyAction, RuleEngine
 from maulness.core.skills import SkillManager
 from maulness.core.soul import get_soul_content
 
@@ -60,6 +61,8 @@ class ExecutionConfig(BaseModel):
     yolo: bool = False
     rate_limit_per_minute: int = 20
     system_prompt_mode: str = "prepend"
+    default_policy: PolicyAction = PolicyAction.ASK
+    rules: ExecutionRulesConfig = Field(default_factory=ExecutionRulesConfig)
 
 
 class FallbackItem(BaseModel):
@@ -232,6 +235,12 @@ class Profile(BaseModel):
             return self.env_vars.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
         return None
+
+    def get_rule_engine(self) -> RuleEngine:
+        """Construct a RuleEngine merging global rules with profile-specific execution rules."""
+        global_rules = config.global_rules
+        merged = global_rules.merge(self.execution.rules)
+        return RuleEngine(merged)
 
     def interpolate_soul_text(self, text: str) -> str:
         """Substitute {param} and {{param}} placeholders with soul_params and runtime context."""

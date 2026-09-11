@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 
 from maulness.core.models import ApprovalRequestEvent
+from maulness.core.rules import PolicyAction, RuleEngine
 
 logger = logging.getLogger("maulness.tools")
 
@@ -117,10 +118,32 @@ async def execute_tool_call(
     session_id: str = "default",
     on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
     yolo: bool = False,
+    rule_engine: Optional[RuleEngine] = None,
 ) -> str:
-    """Execute a supported tool action with HITL approval gating."""
+    """Execute a supported tool action with execution rules and HITL approval gating."""
     cwd = workspace_path or Path.cwd()
     logger.info("Executing tool '%s' with args: %s (cwd: %s)", name, args, cwd)
+
+    engine = rule_engine or RuleEngine()
+    policy, reason = engine.evaluate(name, args, cwd=cwd, yolo=yolo)
+
+    if policy == PolicyAction.DENY:
+        logger.warning("Tool execution blocked by security policy: %s", reason)
+        return f"Execution blocked by security policy: {reason}"
+
+    # Generic HITL Gate for any tool explicitly configured to ASK
+    if policy == PolicyAction.ASK and name not in ("run_command", "write_file"):
+        if on_approval and not yolo:
+            req = ApprovalRequestEvent(
+                request_id=1,
+                call_id=f"call_{name}",
+                tool_name=name,
+                args=args,
+                session_id=session_id,
+            )
+            approved = await on_approval(req)
+            if not approved:
+                return f"Execution cancelled: User rejected tool '{name}'."
 
     # 1. run_command
     if name == "run_command":
@@ -128,8 +151,8 @@ async def execute_tool_call(
         if not cmd:
             return "Error: No command provided."
 
-        # HITL Gate for command execution unless YOLO
-        if on_approval and not yolo:
+        # HITL Gate for command execution if policy requires approval
+        if policy == PolicyAction.ASK and on_approval and not yolo:
             req = ApprovalRequestEvent(
                 request_id=1,
                 call_id=f"call_{name}",
@@ -183,7 +206,7 @@ async def execute_tool_call(
         target = resolve_path(args.get("path", ""), cwd)
         content = args.get("content", "")
 
-        if on_approval and not yolo:
+        if policy == PolicyAction.ASK and on_approval and not yolo:
             req = ApprovalRequestEvent(
                 request_id=1,
                 call_id=f"call_{name}",

@@ -14,6 +14,7 @@ from maulness.core.models import (
 )
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
+from maulness.core.rules import PolicyAction
 
 logger = logging.getLogger("maulness.providers.acp")
 
@@ -229,7 +230,26 @@ class AcpProvider(BaseProvider):
         client = await AcpClient.spawn(command=cmd, cwd=cwd)
         client.on_thought = on_thought
         client.on_tool_call = on_tool_call
-        client.on_approval_request = on_approval
+
+        rule_engine = self.profile.get_rule_engine()
+
+        async def gated_approval(event: ApprovalRequestEvent) -> bool:
+            action, reason = rule_engine.evaluate(
+                event.tool_name,
+                event.args,
+                cwd=Path(cwd),
+                yolo=self.profile.execution.yolo,
+            )
+            if action == PolicyAction.DENY:
+                logger.warning("ACP tool '%s' blocked by security rule: %s", event.tool_name, reason)
+                return False
+            if action == PolicyAction.ALLOW:
+                return True
+            if on_approval:
+                return await on_approval(event)
+            return False
+
+        client.on_approval_request = gated_approval
 
         accumulated_text: list[str] = []
 

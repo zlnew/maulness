@@ -15,6 +15,63 @@ execution:
   # Universal stream idle watchdog timeout (seconds) across all providers
   stream_idle_timeout_seconds: 180.0
 
+  # Default policy for unmatched tool calls ('ask', 'allow', or 'deny')
+  default_policy: ask
+
+  # Execution rules engine (allow, deny, ask)
+  rules:
+    tools:
+      read_file: allow
+      list_dir: allow
+      git_status: allow
+      write_file: ask
+      run_command: ask
+
+    commands:
+      # Hard-blocked commands (never executed, even in YOLO mode)
+      deny:
+        - "rm -rf /"
+        - "rm -rf /*"
+        - "sudo *"
+        - "dd *"
+        - "mkfs*"
+        - "*--force*"
+        - "shutdown*"
+        - "reboot*"
+
+      # Auto-approved commands (run without prompting)
+      allow:
+        - "pwd"
+        - "whoami"
+        - "uname*"
+        - "which *"
+        - "ls*"
+        - "git status*"
+        - "git diff*"
+        - "git log*"
+        - "pytest*"
+        - "cargo check*"
+        - "npm test*"
+
+      # Explicit commands requiring human sign-off
+      ask:
+        - "git push*"
+        - "git commit*"
+        - "rm *"
+        - "mv *"
+        - "systemctl *"
+
+    paths:
+      # Block access to credentials and sensitive directories
+      deny:
+        - "**/.env*"
+        - "**/id_rsa*"
+        - "**/.ssh/**"
+        - "**/*.pem"
+        - "/etc/**"
+        - "/root/**"
+
+
 gateway:
   # When true, the background daemon serves multiple profiles concurrently in a single process.
   # Each profile's Discord bot adapter is spawned using DISCORD_BOT_TOKEN from its profiles/<name>/.env.

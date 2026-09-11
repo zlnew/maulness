@@ -47,6 +47,10 @@ class Config:
             os.getenv("STREAM_IDLE_TIMEOUT_SECONDS", "180.0")
         )
 
+        # Execution Rules (allow, deny, ask)
+        from maulness.core.rules import ExecutionRulesConfig
+        self.global_rules: ExecutionRulesConfig = ExecutionRulesConfig()
+
         # Gateway Multiplexing (Hermes-style)
         self.gateway_multiplex_profiles: bool = False
         self.gateway_multiplex_profile_allowlist: list[str] = []
@@ -82,6 +86,16 @@ class Config:
                     if isinstance(exec_cfg, dict):
                         if "stream_idle_timeout_seconds" in exec_cfg:
                             self.stream_idle_timeout_seconds = float(exec_cfg["stream_idle_timeout_seconds"])
+                        rules_raw = exec_cfg.get("rules", {})
+                        default_policy = exec_cfg.get("default_policy")
+                        if isinstance(rules_raw, dict):
+                            rules_payload = dict(rules_raw)
+                            if default_policy and "default_policy" not in rules_payload:
+                                rules_payload["default_policy"] = default_policy
+                            try:
+                                self.global_rules = ExecutionRulesConfig.model_validate(rules_payload)
+                            except Exception:
+                                pass
 
                     # Gateway group
                     gw = data.get("gateway", {})

@@ -104,7 +104,7 @@ class TaskRunner:
         # Set task to BUILDING
         await self.storage.update_task_status(task_id, TaskStatus.BUILDING)
 
-        classifier = ApprovalClassifier(yolo_mode=yolo)
+        classifier = ApprovalClassifier(yolo_mode=yolo, rule_engine=profile.get_rule_engine())
 
         # Default terminal approval handler if none provided
         async def terminal_approval_handler(event: ApprovalRequestEvent) -> bool:

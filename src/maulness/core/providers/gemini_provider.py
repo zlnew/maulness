@@ -202,13 +202,15 @@ class GeminiProvider(BaseProvider):
                                                 session_id=session_id,
                                             )
                                         )
-                                    # Execute the tool with HITL gating
+                                    # Execute the tool with execution rules & HITL gating
                                     tool_result = await execute_tool_call(
                                         name=call_name,
                                         args=call_args,
                                         workspace_path=workspace_path,
                                         session_id=session_id,
                                         on_approval=on_approval,
+                                        yolo=self.profile.execution.yolo,
+                                        rule_engine=self.profile.get_rule_engine(),
                                     )
                                     tool_desc = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
                                     accumulated.append(tool_desc)

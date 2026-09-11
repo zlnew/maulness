@@ -283,6 +283,8 @@ class UnifiedApiProvider(BaseProvider):
                         workspace_path=workspace_path,
                         session_id=session_id,
                         on_approval=on_approval,
+                        yolo=self.profile.execution.yolo,
+                        rule_engine=self.profile.get_rule_engine(),
                     )
                     breadcrumb = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
                     accumulated.append(breadcrumb)
