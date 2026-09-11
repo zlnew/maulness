@@ -435,6 +435,328 @@ async def test_unified_api_provider_max_tool_turns_forces_synthesis(tmp_path):
     assert "Synthesized final answer after 2 tool turns." in result
 
 
+@pytest.mark.asyncio
+async def test_openai_compatible_multi_relay_continuation_and_compaction(tmp_path):
+    import json
+    from unittest.mock import MagicMock, patch
+    from maulness.core.profiles import Profile
+    from maulness.core.providers.api_provider import UnifiedApiProvider
+
+    profile = Profile(
+        identity={"name": "relay_agent"},
+        agent={"provider": "openrouter", "model": "test-model"},
+        execution={"max_tool_turns": 1, "max_relays": 2, "yolo": True},
+        env_vars={"OPENROUTER_API_KEY": "dummy_key"},
+    )
+    provider = UnifiedApiProvider(profile)
+
+    # Turn 1: Relay 1, tool call
+    turn_1 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "name": "run_command",
+                            "arguments": json.dumps({"command": "echo relay_1_action"}),
+                        }
+                    }]
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    # Turn 2: Relay 1, forced checkpoint evaluation -> outputs [STATUS: IN_PROGRESS]
+    turn_2 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": (
+                        "[STATUS: IN_PROGRESS]\n"
+                        "Accomplished: Ran initial inspection.\n"
+                        "Key Findings: Environment is ready.\n"
+                        "Next Step: Execute build step."
+                    )
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    # Turn 3: Relay 2, tool call (tools re-enabled, context compacted)
+    turn_3 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "name": "run_command",
+                            "arguments": json.dumps({"command": "echo relay_2_action"}),
+                        }
+                    }]
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    # Turn 4: Relay 2, final synthesis
+    turn_4 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": "All tasks completed successfully across both relays. [STATUS: COMPLETE]"
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    calls = [turn_1, turn_2, turn_3, turn_4]
+    payloads_captured = []
+
+    class MockStreamCtx:
+        def __init__(self, lines):
+            self.lines = lines
+
+        async def __aenter__(self):
+            resp = MagicMock()
+            resp.is_error = False
+
+            async def aiter_lines():
+                for l in self.lines:
+                    yield l
+
+            resp.aiter_lines = aiter_lines
+            return resp
+
+        async def __aexit__(self, *args):
+            pass
+
+    def mock_stream(method, url, headers=None, json=None):
+        payloads_captured.append(dict(json) if json else {})
+        lines = calls.pop(0) if calls else ['data: [DONE]']
+        return MockStreamCtx(lines)
+
+    with patch("httpx.AsyncClient.stream", side_effect=mock_stream):
+        result = await provider.run(
+            session_id="relay_sess",
+            prompt="Build and verify long-horizon project",
+            workspace_path=tmp_path,
+            yolo=True,
+        )
+
+    # 1. Verify 4 HTTP turns occurred (2 per relay)
+    assert len(payloads_captured) == 4
+
+    # 2. Relay 1 turn 1 had tools; turn 2 had tools disabled for evaluation
+    assert "tools" in payloads_captured[0]
+    assert "tools" not in payloads_captured[1]
+
+    # 3. Relay 2 turn 1 had tools RE-ENABLED and context COMPACTED
+    assert "tools" in payloads_captured[2]
+    relay_2_msgs = payloads_captured[2]["messages"]
+    # Should have assistant checkpoint summary
+    asst_checkpoint = next((m for m in relay_2_msgs if m.get("role") == "assistant" and "[AUTONOMOUS RELAY CHECKPOINTS]" in m.get("content", "")), None)
+    assert asst_checkpoint is not None
+    assert "Accomplished: Ran initial inspection" in asst_checkpoint["content"]
+    assert "Key Findings: Environment is ready" in asst_checkpoint["content"]
+
+    # Bulky raw tool result from Relay 1 should NOT be in Relay 2 messages
+    assert not any(m.get("role") == "tool" and "relay_1_action" in m.get("content", "") for m in relay_2_msgs)
+
+    # 4. Result contains breadcrumbs from both relays, checkpoint notice, and final cleaned text
+    assert "run_command: echo relay_1_action" in result
+    assert "[Relay Checkpoint 1/2]" in result
+    assert "Auto-advancing with: *Execute build step.*" in result
+    assert "run_command: echo relay_2_action" in result
+    assert "All tasks completed successfully across both relays." in result
+    # Protocol tags must be cleaned from final text
+    assert "[STATUS: COMPLETE]" not in result
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_max_relay_ceiling(tmp_path):
+    import json
+    from unittest.mock import MagicMock, patch
+    from maulness.core.profiles import Profile
+    from maulness.core.providers.api_provider import UnifiedApiProvider
+
+    # Only 1 relay allowed
+    profile = Profile(
+        identity={"name": "ceiling_agent"},
+        agent={"provider": "openrouter", "model": "test-model"},
+        execution={"max_tool_turns": 1, "max_relays": 1, "yolo": True},
+        env_vars={"OPENROUTER_API_KEY": "dummy_key"},
+    )
+    provider = UnifiedApiProvider(profile)
+
+    turn_1 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "name": "run_command",
+                            "arguments": json.dumps({"command": "echo step1"}),
+                        }
+                    }]
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    # Turn 2: Model attempts to continue with IN_PROGRESS even though ceiling is reached
+    turn_2 = [
+        'data: ' + json.dumps({
+            "choices": [{
+                "delta": {
+                    "content": (
+                        "[STATUS: IN_PROGRESS]\n"
+                        "Accomplished: Finished step 1.\n"
+                        "Next Step: Would like to continue step 2."
+                    )
+                }
+            }]
+        }),
+        'data: [DONE]'
+    ]
+
+    calls = [turn_1, turn_2]
+    payloads_captured = []
+
+    class MockStreamCtx:
+        def __init__(self, lines):
+            self.lines = lines
+
+        async def __aenter__(self):
+            resp = MagicMock()
+            resp.is_error = False
+
+            async def aiter_lines():
+                for l in self.lines:
+                    yield l
+
+            resp.aiter_lines = aiter_lines
+            return resp
+
+        async def __aexit__(self, *args):
+            pass
+
+    def mock_stream(method, url, headers=None, json=None):
+        payloads_captured.append(dict(json) if json else {})
+        lines = calls.pop(0) if calls else ['data: [DONE]']
+        return MockStreamCtx(lines)
+
+    with patch("httpx.AsyncClient.stream", side_effect=mock_stream):
+        result = await provider.run(
+            session_id="ceiling_sess",
+            prompt="Run task with ceiling",
+            workspace_path=tmp_path,
+            yolo=True,
+        )
+
+    # Must stop after turn 2 without looping further
+    assert len(payloads_captured) == 2
+    assert "Maximum relay budget of 1 relays reached. Task paused at checkpoint." in result
+
+
+@pytest.mark.asyncio
+async def test_gemini_multi_relay_continuation_and_compaction(tmp_path):
+    from unittest.mock import MagicMock, patch
+    from maulness.core.profiles import Profile
+    from maulness.core.providers.gemini_provider import GeminiProvider
+
+    profile = Profile(
+        identity={"name": "gemini_relay_agent"},
+        agent={"provider": "gemini", "model": "gemini-2.5-flash"},
+        execution={"max_tool_turns": 1, "max_relays": 2, "yolo": True},
+        env_vars={"GEMINI_API_KEY": "dummy_gemini_key"},
+    )
+    provider = GeminiProvider(profile)
+
+    from google.genai import types
+
+    # Chunk 1: Tool call run_command echo g_step1
+    part_1 = types.Part.from_function_call(name="run_command", args={"command": "echo g_step1"})
+    cand_1 = MagicMock()
+    cand_1.content.parts = [part_1]
+    chunk_1 = MagicMock()
+    chunk_1.candidates = [cand_1]
+    chunk_1.text = None
+
+    # Chunk 2: Checkpoint response [STATUS: IN_PROGRESS]
+    part_2 = types.Part.from_text(text=(
+        "[STATUS: IN_PROGRESS]\n"
+        "Accomplished: Completed Gemini step 1.\n"
+        "Next Step: Execute Gemini step 2."
+    ))
+    cand_2 = MagicMock()
+    cand_2.content.parts = [part_2]
+    chunk_2 = MagicMock()
+    chunk_2.candidates = [cand_2]
+    chunk_2.text = part_2.text
+
+    # Chunk 3: Final answer in Relay 2
+    part_3 = types.Part.from_text(text="Gemini completed all relays successfully.")
+    cand_3 = MagicMock()
+    cand_3.content.parts = [part_3]
+    chunk_3 = MagicMock()
+    chunk_3.candidates = [cand_3]
+    chunk_3.text = part_3.text
+
+    async def stream_gen(chunks):
+        for c in chunks:
+            yield c
+
+    stream_calls = [
+        stream_gen([chunk_1]),
+        stream_gen([chunk_2]),
+        stream_gen([chunk_3]),
+    ]
+
+    recorded_contents = []
+
+    async def mock_generate_stream(*args, **kwargs):
+        recorded_contents.append(list(kwargs.get("contents", [])))
+        if stream_calls:
+            return stream_calls.pop(0)
+        return stream_gen([])
+
+    mock_client = MagicMock()
+    mock_client.aio.models.generate_content_stream = mock_generate_stream
+
+    with patch("google.genai.Client", return_value=mock_client):
+        result = await provider.run(
+            session_id="gemini_relay_sess",
+            prompt="Run multi-step Gemini task",
+            workspace_path=tmp_path,
+        )
+
+    # 3 turns executed across 2 relays
+    assert len(recorded_contents) == 3
+
+    # Turn 3 (Relay 2 start) must have context compacted with checkpoint ledger
+    relay_2_contents = recorded_contents[2]
+    checkpoint_content = next(
+        (c for c in relay_2_contents if any("[AUTONOMOUS RELAY CHECKPOINTS]" in getattr(p, "text", "") for p in c.parts)),
+        None
+    )
+    assert checkpoint_content is not None
+    assert any("Completed Gemini step 1" in getattr(p, "text", "") for p in checkpoint_content.parts)
+
+    # Output verification
+    assert "run_command: echo g_step1" in result
+    assert "[Relay Checkpoint 1/2]" in result
+    assert "Auto-advancing with: *Execute Gemini step 2.*" in result
+    assert "Gemini completed all relays successfully." in result
+
+
 
 
 

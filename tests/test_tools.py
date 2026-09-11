@@ -162,3 +162,59 @@ def test_resolve_path_resilient(tmp_path: Path):
     assert missing == (www_dir / "missing/file.txt").resolve()
 
 
+def test_extract_checkpoint_info():
+    from maulness.core.tools import extract_checkpoint_info
+
+    # 1. Standard format
+    text1 = (
+        "[STATUS: IN_PROGRESS]\n"
+        "Accomplished: Inspected directory structure.\n"
+        "Key Findings: Found config and profiles.\n"
+        "Next Step: Edit api_provider.py to add relay loop."
+    )
+    is_prog1, body1, step1 = extract_checkpoint_info(text1)
+    assert is_prog1 is True
+    assert step1 == "Edit api_provider.py to add relay loop."
+    assert "Inspected directory" in body1
+
+    # 2. Markdown bold format
+    text2 = (
+        "Here is the status:\n"
+        "[status: in_progress]\n"
+        "**Accomplished:** Step 1\n"
+        "**Next Step:** Run unit tests with pytest"
+    )
+    is_prog2, body2, step2 = extract_checkpoint_info(text2)
+    assert is_prog2 is True
+    assert step2 == "Run unit tests with pytest"
+
+    # 3. List bullet format
+    text3 = (
+        "[STATUS: IN_PROGRESS]\n"
+        "- Next Step: Deploy service and check logs"
+    )
+    is_prog3, _, step3 = extract_checkpoint_info(text3)
+    assert is_prog3 is True
+    assert step3 == "Deploy service and check logs"
+
+    # 4. No next step specified -> fallback
+    text4 = "[STATUS: IN_PROGRESS]\nWork in progress..."
+    is_prog4, _, step4 = extract_checkpoint_info(text4)
+    assert is_prog4 is True
+    assert step4 == "Continuing task execution"
+
+    # 5. Negative cases
+    assert extract_checkpoint_info("")[0] is False
+    assert extract_checkpoint_info("Everything is finished! [STATUS: COMPLETE]")[0] is False
+    assert extract_checkpoint_info("Here is your answer: 42")[0] is False
+
+
+def test_clean_relay_completion_tags():
+    from maulness.core.tools import clean_relay_completion_tags
+
+    text = "Here is the final report.\n\n[STATUS: COMPLETE]"
+    cleaned = clean_relay_completion_tags(text)
+    assert cleaned == "Here is the final report."
+    assert "[STATUS: COMPLETE]" not in cleaned
+
+

@@ -429,3 +429,54 @@ def clean_history_message(content: str) -> str:
         return f"[{sanitized}]" if sanitized else "[Tool execution]"
     return cleaned
 
+
+def extract_checkpoint_info(text: str) -> tuple[bool, str, str]:
+    """Check if model response indicates an in-progress long-horizon task.
+
+    Returns:
+        (is_in_progress, checkpoint_body, next_step)
+    """
+    if not text:
+        return False, "", ""
+
+    upper = text.upper()
+    if "[STATUS: IN_PROGRESS]" not in upper:
+        return False, "", ""
+
+    checkpoint_body = text.strip()
+    next_step = "Continuing task execution"
+
+    for line in checkpoint_body.splitlines():
+        clean = line.strip()
+        lower = clean.lower()
+        if lower.startswith("next step:"):
+            val = clean[10:].strip()
+            if val:
+                next_step = val
+            break
+        elif lower.startswith("- next step:"):
+            val = clean[12:].strip()
+            if val:
+                next_step = val
+            break
+        elif lower.startswith("**next step:**"):
+            val = clean[14:].strip()
+            if val:
+                next_step = val
+            break
+        elif lower.startswith("*next step:*"):
+            val = clean[12:].strip()
+            if val:
+                next_step = val
+            break
+
+    return True, checkpoint_body, next_step
+
+
+def clean_relay_completion_tags(text: str) -> str:
+    """Clean internal relay protocol markers from final user output."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"\[STATUS:\s*(?:COMPLETE|FINISHED)\]", "", text, flags=re.IGNORECASE)
+    return cleaned.strip()
+

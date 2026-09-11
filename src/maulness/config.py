@@ -47,8 +47,9 @@ class Config:
             os.getenv("STREAM_IDLE_TIMEOUT_SECONDS", "180.0")
         )
 
-        # Tool Execution Turn Limit
+        # Tool Execution Turn Limit & Long-Horizon Relay Budget
         self.max_tool_turns: int = int(os.getenv("MAX_TOOL_TURNS", "15"))
+        self.max_relays: int = int(os.getenv("MAX_RELAYS", "5"))
 
         # Execution Rules (allow, deny, ask)
         from maulness.core.rules import ExecutionRulesConfig
@@ -91,6 +92,8 @@ class Config:
                             self.stream_idle_timeout_seconds = float(exec_cfg["stream_idle_timeout_seconds"])
                         if "max_tool_turns" in exec_cfg:
                             self.max_tool_turns = int(exec_cfg["max_tool_turns"])
+                        if "max_relays" in exec_cfg:
+                            self.max_relays = int(exec_cfg["max_relays"])
                         rules_raw = exec_cfg.get("rules", {})
                         default_policy = exec_cfg.get("default_policy")
                         if isinstance(rules_raw, dict):

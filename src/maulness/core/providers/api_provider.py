@@ -18,8 +18,10 @@ from maulness.core.providers.base import BaseProvider
 from maulness.core.tools import (
     TOOL_DEFINITIONS,
     clean_history_message,
+    clean_relay_completion_tags,
     detect_simulated_tool_call,
     execute_tool_call,
+    extract_checkpoint_info,
     format_lean_tool_breadcrumb,
 )
 from maulness.storage.db import StorageManager
@@ -151,275 +153,394 @@ class UnifiedApiProvider(BaseProvider):
 
         # Multi-turn history retrieval (sanitized to remove simulated tool syntax)
         history = await self.storage.get_conversation_messages(conv_id, limit=20)
-        messages: list[dict[str, Any]] = [
+        base_messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.profile.effective_system_prompt()}
         ]
         for turn in history:
-            messages.append({
+            base_messages.append({
                 "role": turn["role"],
                 "content": clean_history_message(turn["content"]),
             })
-        messages.append({"role": "user", "content": prompt})
+        base_messages.append({"role": "user", "content": prompt})
 
-        payload: dict[str, Any] = {
-            "model": self.profile.model or default_model,
-            "messages": messages,
-            "temperature": self.profile.temperature,
-            "max_tokens": self.profile.max_tokens,
-            "stream": True,
-            "tools": TOOL_DEFINITIONS,
-        }
-        effort = self.profile.reasoning_effort
-        if effort:
-            payload["reasoning_effort"] = effort
-
-        idle_timeout = float(config.stream_idle_timeout_seconds)
-        accumulated: list[str] = []
-
+        max_relays = getattr(self.profile, "max_relays", config.max_relays)
         max_tool_turns = getattr(self.profile, "max_tool_turns", config.max_tool_turns)
-        turn_count = 0
-        forcing_synthesis = False
+        idle_timeout = float(config.stream_idle_timeout_seconds)
+
+        accumulated: list[str] = []
         model_produced_text = False
+        relay_count = 0
+        relay_checkpoints: list[str] = []
+        current_messages = list(base_messages)
 
-        while turn_count <= max_tool_turns:
-            turn_count += 1
-            captured_tool_calls: list[dict[str, Any]] = []
-            streamed_text_chunks: list[str] = []
-            is_first_chunk = True
+        while relay_count < max_relays:
+            relay_count += 1
+            turn_count = 0
+            forcing_synthesis = False
+            last_streamed_turn_text = ""
 
-            timeout = httpx.Timeout(120.0, connect=20.0, read=idle_timeout)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                try:
-                    stream_ctx = client.stream("POST", url, headers=headers, json=payload)
-                except Exception as e:
-                    raise RuntimeError(f"Failed to initiate stream with {provider_type} ({url}): {e}")
+            payload: dict[str, Any] = {
+                "model": self.profile.model or default_model,
+                "messages": current_messages,
+                "temperature": self.profile.temperature,
+                "max_tokens": self.profile.max_tokens,
+                "stream": True,
+                "tools": TOOL_DEFINITIONS,
+            }
+            effort = self.profile.reasoning_effort
+            if effort:
+                payload["reasoning_effort"] = effort
 
-                async with stream_ctx as response:
-                    if response.is_error:
-                        err_body = await response.aread()
-                        err_msg = err_body.decode(errors="replace")
-                        raise RuntimeError(
-                            f"Provider '{provider_type}' ({self.profile.model}) returned HTTP {response.status_code}: {err_msg[:500]}"
-                        )
+            while turn_count <= max_tool_turns:
+                turn_count += 1
+                captured_tool_calls: list[dict[str, Any]] = []
+                streamed_text_chunks: list[str] = []
+                is_first_chunk = True
 
-                    lines_iter = response.aiter_lines().__aiter__()
-                    while True:
-                        try:
-                            chunk_timeout = 60.0 if (is_first_chunk and provider_type == "ollama") else (30.0 if is_first_chunk else idle_timeout)
-                            line = await asyncio.wait_for(lines_iter.__anext__(), timeout=chunk_timeout)
-                            is_first_chunk = False
-                        except StopAsyncIteration:
-                            break
-                        except asyncio.TimeoutError:
-                            if is_first_chunk:
-                                raise TimeoutError(
-                                    f"Stream from {provider_type} ({self.profile.model}) timed out waiting for first token after {int(chunk_timeout)}s"
-                                )
-                            raise TimeoutError(
-                                f"Stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
-                            )
-
-                        if not line.startswith("data: ") or line == "data: [DONE]":
-                            continue
-                        try:
-                            data = json.loads(line[6:])
-                        except json.JSONDecodeError:
-                            continue
-
-                        choice = data.get("choices", [{}])[0]
-                        delta = choice.get("delta", {})
-
-                        # 1. Capture reasoning / thoughts (Ollama, DeepSeek, OpenCode)
-                        reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content")
-                        if reasoning_delta and on_thought:
-                            await on_thought(
-                                AgentThoughtEvent(delta=reasoning_delta, session_id=session_id)
-                            )
-
-                        # 2. Capture tool calls (OpenAI format)
-                        tool_calls_delta = delta.get("tool_calls")
-                        if tool_calls_delta and not forcing_synthesis:
-                            for tc in tool_calls_delta:
-                                idx = tc.get("index", 0)
-                                while len(captured_tool_calls) <= idx:
-                                    captured_tool_calls.append({"name": "", "arguments": ""})
-                                fn = tc.get("function", {})
-                                if "name" in fn:
-                                    captured_tool_calls[idx]["name"] += fn["name"]
-                                if "arguments" in fn:
-                                    captured_tool_calls[idx]["arguments"] += fn["arguments"]
-
-                        # 3. Capture visible text content
-                        text_delta = delta.get("content", "")
-                        if text_delta:
-                            streamed_text_chunks.append(text_delta)
-                            accumulated.append(text_delta)
-                            if text_delta.strip():
-                                model_produced_text = True
-                            if on_message:
-                                await on_message(
-                                    AgentMessageEvent(delta=text_delta, session_id=session_id)
-                                )
-
-            # Process captured tool calls if any and loop back for synthesized response
-            if captured_tool_calls:
-                if forcing_synthesis:
-                    logger.warning("[%s] Model emitted tool call during forced synthesis; halting tool loop", provider_type)
-                    break
-
-                asst_tool_calls = []
-                tool_results = []
-                for i, tc in enumerate(captured_tool_calls):
-                    call_name = tc.get("name", "").strip()
-                    call_args_str = tc.get("arguments", "").strip()
-                    if not call_name:
-                        continue
+                timeout = httpx.Timeout(120.0, connect=20.0, read=idle_timeout)
+                async with httpx.AsyncClient(timeout=timeout) as client:
                     try:
-                        call_args = json.loads(call_args_str) if call_args_str else {}
-                    except Exception:
-                        call_args = {"raw": call_args_str}
+                        stream_ctx = client.stream("POST", url, headers=headers, json=payload)
+                    except Exception as e:
+                        raise RuntimeError(f"Failed to initiate stream with {provider_type} ({url}): {e}")
 
-                    call_id = f"call_{turn_count}_{i}_{call_name}"
-                    asst_tool_calls.append({
-                        "id": call_id,
-                        "type": "function",
-                        "function": {"name": call_name, "arguments": call_args_str or "{}"},
-                    })
-
-                    if on_tool_call:
-                        await on_tool_call(
-                            AgentToolCallEvent(
-                                call_id=call_id,
-                                tool_name=call_name,
-                                args=call_args,
-                                session_id=session_id,
+                    async with stream_ctx as response:
+                        if response.is_error:
+                            err_body = await response.aread()
+                            err_msg = err_body.decode(errors="replace")
+                            raise RuntimeError(
+                                f"Provider '{provider_type}' ({self.profile.model}) returned HTTP {response.status_code}: {err_msg[:500]}"
                             )
-                        )
 
-                    tool_result = await execute_tool_call(
-                        name=call_name,
-                        args=call_args,
-                        workspace_path=workspace_path,
-                        session_id=session_id,
-                        on_approval=on_approval,
-                        yolo=self.profile.execution.yolo,
-                        rule_engine=self.profile.get_rule_engine(),
-                    )
-                    breadcrumb = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
-                    accumulated.append(breadcrumb)
-                    if on_message:
-                        await on_message(
-                            AgentMessageEvent(delta=breadcrumb, session_id=session_id)
-                        )
+                        lines_iter = response.aiter_lines().__aiter__()
+                        while True:
+                            try:
+                                chunk_timeout = 60.0 if (is_first_chunk and provider_type == "ollama") else (30.0 if is_first_chunk else idle_timeout)
+                                line = await asyncio.wait_for(lines_iter.__anext__(), timeout=chunk_timeout)
+                                is_first_chunk = False
+                            except StopAsyncIteration:
+                                break
+                            except asyncio.TimeoutError:
+                                if is_first_chunk:
+                                    raise TimeoutError(
+                                        f"Stream from {provider_type} ({self.profile.model}) timed out waiting for first token after {int(chunk_timeout)}s"
+                                    )
+                                raise TimeoutError(
+                                    f"Stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
+                                )
 
-                    tool_results.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": tool_result,
-                    })
+                            if not line.startswith("data: ") or line == "data: [DONE]":
+                                continue
+                            try:
+                                data = json.loads(line[6:])
+                            except json.JSONDecodeError:
+                                continue
 
-                if asst_tool_calls:
-                    messages.append({"role": "assistant", "tool_calls": asst_tool_calls})
-                    messages.extend(tool_results)
-                    payload["messages"] = messages
+                            choice = data.get("choices", [{}])[0]
+                            delta = choice.get("delta", {})
 
-                    if turn_count >= max_tool_turns:
-                        logger.info(
-                            "[%s] Reached max tool turns (%d); requesting final answer synthesis without tools",
-                            provider_type,
-                            max_tool_turns,
-                        )
-                        forcing_synthesis = True
-                        payload.pop("tools", None)
-                        payload["messages"].append({
-                            "role": "user",
-                            "content": (
-                                "[SYSTEM NOTE: You have reached the maximum allowed tool execution limit for this turn. "
-                                "Formulate and output your final, comprehensive answer to the user now based on all information and tool results above. "
-                                "Do not attempt to call any more tools.]"
-                            ),
+                            # 1. Capture reasoning / thoughts (Ollama, DeepSeek, OpenCode)
+                            reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content")
+                            if reasoning_delta and on_thought:
+                                await on_thought(
+                                    AgentThoughtEvent(delta=reasoning_delta, session_id=session_id)
+                                )
+
+                            # 2. Capture tool calls (OpenAI format)
+                            tool_calls_delta = delta.get("tool_calls")
+                            if tool_calls_delta and not forcing_synthesis:
+                                for tc in tool_calls_delta:
+                                    idx = tc.get("index", 0)
+                                    while len(captured_tool_calls) <= idx:
+                                        captured_tool_calls.append({"name": "", "arguments": ""})
+                                    fn = tc.get("function", {})
+                                    if "name" in fn:
+                                        captured_tool_calls[idx]["name"] += fn["name"]
+                                    if "arguments" in fn:
+                                        captured_tool_calls[idx]["arguments"] += fn["arguments"]
+
+                            # 3. Capture visible text content
+                            text_delta = delta.get("content", "")
+                            if text_delta:
+                                streamed_text_chunks.append(text_delta)
+                                accumulated.append(text_delta)
+                                if text_delta.strip():
+                                    model_produced_text = True
+                                if on_message:
+                                    await on_message(
+                                        AgentMessageEvent(delta=text_delta, session_id=session_id)
+                                    )
+
+                last_streamed_turn_text = "".join(streamed_text_chunks).strip()
+
+                # Process captured tool calls if any and loop back for synthesized response
+                if captured_tool_calls:
+                    if forcing_synthesis:
+                        logger.warning("[%s] Model emitted tool call during forced synthesis; halting tool loop", provider_type)
+                        break
+
+                    asst_tool_calls = []
+                    tool_results = []
+                    for i, tc in enumerate(captured_tool_calls):
+                        call_name = tc.get("name", "").strip()
+                        call_args_str = tc.get("arguments", "").strip()
+                        if not call_name:
+                            continue
+                        try:
+                            call_args = json.loads(call_args_str) if call_args_str else {}
+                        except Exception:
+                            call_args = {"raw": call_args_str}
+
+                        call_id = f"call_{turn_count}_{i}_{call_name}"
+                        asst_tool_calls.append({
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": call_name, "arguments": call_args_str or "{}"},
                         })
-                        continue
 
-                    logger.info("[%s] Tool executed; continuing turn loop for model answer synthesis (step %d)", provider_type, turn_count)
-                    continue
+                        if on_tool_call:
+                            await on_tool_call(
+                                AgentToolCallEvent(
+                                    call_id=call_id,
+                                    tool_name=call_name,
+                                    args=call_args,
+                                    session_id=session_id,
+                                )
+                            )
+
+                        tool_result = await execute_tool_call(
+                            name=call_name,
+                            args=call_args,
+                            workspace_path=workspace_path,
+                            session_id=session_id,
+                            on_approval=on_approval,
+                            yolo=self.profile.execution.yolo,
+                            rule_engine=self.profile.get_rule_engine(),
+                        )
+                        breadcrumb = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
+                        accumulated.append(breadcrumb)
+                        if on_message:
+                            await on_message(
+                                AgentMessageEvent(delta=breadcrumb, session_id=session_id)
+                            )
+
+                        tool_results.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": tool_result,
+                        })
+
+                    if asst_tool_calls:
+                        current_messages.append({"role": "assistant", "tool_calls": asst_tool_calls})
+                        current_messages.extend(tool_results)
+                        payload["messages"] = current_messages
+
+                        if turn_count >= max_tool_turns:
+                            forcing_synthesis = True
+                            payload.pop("tools", None)
+                            if relay_count < max_relays:
+                                logger.info(
+                                    "[%s] Reached burst turn limit (%d) in relay %d/%d; requesting status checkpoint",
+                                    provider_type,
+                                    max_tool_turns,
+                                    relay_count,
+                                    max_relays,
+                                )
+                                eval_prompt = (
+                                    f"[SYSTEM NOTE: Execution burst limit reached ({max_tool_turns} tool actions in Relay {relay_count}/{max_relays}). "
+                                    "Maximum allowed tool actions for this burst reached. "
+                                    "If the task is fully finished, output your complete final answer to the user now. "
+                                    "If the task is STILL IN PROGRESS, output exactly:\n"
+                                    "[STATUS: IN_PROGRESS]\n"
+                                    "Accomplished: <1-2 sentences on what was completed in this burst>\n"
+                                    "Key Findings: <key facts, file paths, or test results discovered>\n"
+                                    "Next Step: <exact action to take in the next burst>\n"
+                                    "Do not attempt to call any tools.]"
+                                )
+                            else:
+                                logger.info(
+                                    "[%s] Reached burst turn limit (%d) in final relay %d/%d; requesting final answer synthesis",
+                                    provider_type,
+                                    max_tool_turns,
+                                    relay_count,
+                                    max_relays,
+                                )
+                                eval_prompt = (
+                                    f"[SYSTEM NOTE: You have reached the maximum allowed execution budget across all relays (Relay {relay_count}/{max_relays}). "
+                                    "Maximum allowed tool actions reached. "
+                                    "Formulate and output your final, comprehensive answer to the user now based on all information and tool results above. "
+                                    "Do not attempt to call any more tools.]"
+                                )
+                            current_messages.append({
+                                "role": "user",
+                                "content": eval_prompt,
+                            })
+                            payload["messages"] = current_messages
+                            continue
+
+                        logger.info("[%s] Tool executed; continuing turn loop for model answer synthesis (step %d)", provider_type, turn_count)
+                        continue
+                    else:
+                        break
                 else:
-                    break
-            else:
-                # Fail-safe: Detect if model simulated tool breadcrumbs in its own streamed text instead of tool calling
-                current_turn_text = "".join(streamed_text_chunks).strip()
-                simulated = detect_simulated_tool_call(current_turn_text)
-                if simulated and not forcing_synthesis:
-                    call_name, call_args = simulated
-                    logger.warning(
-                        "[%s] Intercepted simulated tool call in model text: %s with args %s",
-                        provider_type,
-                        call_name,
-                        call_args,
-                    )
-                    call_id = f"call_intercepted_{turn_count}_{call_name}"
-                    asst_tool_calls = [{
-                        "id": call_id,
-                        "type": "function",
-                        "function": {"name": call_name, "arguments": json.dumps(call_args)},
-                    }]
-                    if on_tool_call:
-                        await on_tool_call(
-                            AgentToolCallEvent(
-                                call_id=call_id,
-                                tool_name=call_name,
-                                args=call_args,
-                                session_id=session_id,
-                            )
-                        )
-                    tool_result = await execute_tool_call(
-                        name=call_name,
-                        args=call_args,
-                        workspace_path=workspace_path,
-                        session_id=session_id,
-                        on_approval=on_approval,
-                        yolo=self.profile.execution.yolo,
-                        rule_engine=self.profile.get_rule_engine(),
-                    )
-                    real_breadcrumb = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
-                    if streamed_text_chunks:
-                        accumulated = accumulated[:-len(streamed_text_chunks)]
-                    accumulated.append(real_breadcrumb)
-                    if on_message:
-                        await on_message(
-                            AgentMessageEvent(delta=real_breadcrumb, session_id=session_id)
-                        )
-                    messages.append({"role": "assistant", "tool_calls": asst_tool_calls})
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": tool_result,
-                    })
-                    payload["messages"] = messages
-
-                    if turn_count >= max_tool_turns:
-                        logger.info(
-                            "[%s] Reached max tool turns (%d); requesting final answer synthesis without tools",
+                    # Fail-safe: Detect if model simulated tool breadcrumbs in its own streamed text instead of tool calling
+                    current_turn_text = "".join(streamed_text_chunks).strip()
+                    simulated = detect_simulated_tool_call(current_turn_text)
+                    if simulated and not forcing_synthesis:
+                        call_name, call_args = simulated
+                        logger.warning(
+                            "[%s] Intercepted simulated tool call in model text: %s with args %s",
                             provider_type,
-                            max_tool_turns,
+                            call_name,
+                            call_args,
                         )
-                        forcing_synthesis = True
-                        payload.pop("tools", None)
-                        payload["messages"].append({
-                            "role": "user",
-                            "content": (
-                                "[SYSTEM NOTE: You have reached the maximum allowed tool execution limit for this turn. "
-                                "Formulate and output your final, comprehensive answer to the user now based on all information and tool results above. "
-                                "Do not attempt to call any more tools.]"
-                            ),
+                        call_id = f"call_intercepted_{turn_count}_{call_name}"
+                        asst_tool_calls = [{
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": call_name, "arguments": json.dumps(call_args)},
+                        }]
+                        if on_tool_call:
+                            await on_tool_call(
+                                AgentToolCallEvent(
+                                    call_id=call_id,
+                                    tool_name=call_name,
+                                    args=call_args,
+                                    session_id=session_id,
+                                )
+                            )
+                        tool_result = await execute_tool_call(
+                            name=call_name,
+                            args=call_args,
+                            workspace_path=workspace_path,
+                            session_id=session_id,
+                            on_approval=on_approval,
+                            yolo=self.profile.execution.yolo,
+                            rule_engine=self.profile.get_rule_engine(),
+                        )
+                        real_breadcrumb = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
+                        if streamed_text_chunks:
+                            accumulated = accumulated[:-len(streamed_text_chunks)]
+                        accumulated.append(real_breadcrumb)
+                        if on_message:
+                            await on_message(
+                                AgentMessageEvent(delta=real_breadcrumb, session_id=session_id)
+                            )
+                        current_messages.append({"role": "assistant", "tool_calls": asst_tool_calls})
+                        current_messages.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": tool_result,
                         })
-                        continue
+                        payload["messages"] = current_messages
 
-                    logger.info("[%s] Intercepted tool executed; continuing turn loop for model answer synthesis (step %d)", provider_type, turn_count)
+                        if turn_count >= max_tool_turns:
+                            forcing_synthesis = True
+                            payload.pop("tools", None)
+                            if relay_count < max_relays:
+                                logger.info(
+                                    "[%s] Reached burst turn limit (%d) in relay %d/%d; requesting status checkpoint",
+                                    provider_type,
+                                    max_tool_turns,
+                                    relay_count,
+                                    max_relays,
+                                )
+                                eval_prompt = (
+                                    f"[SYSTEM NOTE: Execution burst limit reached ({max_tool_turns} tool actions in Relay {relay_count}/{max_relays}). "
+                                    "Maximum allowed tool actions for this burst reached. "
+                                    "If the task is fully finished, output your complete final answer to the user now. "
+                                    "If the task is STILL IN PROGRESS, output exactly:\n"
+                                    "[STATUS: IN_PROGRESS]\n"
+                                    "Accomplished: <1-2 sentences on what was completed in this burst>\n"
+                                    "Key Findings: <key facts, file paths, or test results discovered>\n"
+                                    "Next Step: <exact action to take in the next burst>\n"
+                                    "Do not attempt to call any tools.]"
+                                )
+                            else:
+                                logger.info(
+                                    "[%s] Reached burst turn limit (%d) in final relay %d/%d; requesting final answer synthesis",
+                                    provider_type,
+                                    max_tool_turns,
+                                    relay_count,
+                                    max_relays,
+                                )
+                                eval_prompt = (
+                                    f"[SYSTEM NOTE: You have reached the maximum allowed execution budget across all relays (Relay {relay_count}/{max_relays}). "
+                                    "Maximum allowed tool actions reached. "
+                                    "Formulate and output your final, comprehensive answer to the user now based on all information and tool results above. "
+                                    "Do not attempt to call any more tools.]"
+                                )
+                            current_messages.append({
+                                "role": "user",
+                                "content": eval_prompt,
+                            })
+                            payload["messages"] = current_messages
+                            continue
+
+                        logger.info("[%s] Intercepted tool executed; continuing turn loop for model answer synthesis (step %d)", provider_type, turn_count)
+                        continue
+                    break
+
+            # Burst completed. Check if model requested autonomous relay continuation
+            if forcing_synthesis and relay_count < max_relays:
+                is_in_progress, checkpoint_body, next_step = extract_checkpoint_info(last_streamed_turn_text)
+                if is_in_progress:
+                    logger.info(
+                        "[%s] Relay %d/%d produced IN_PROGRESS checkpoint: %s. Auto-advancing to next relay.",
+                        provider_type,
+                        relay_count,
+                        max_relays,
+                        next_step,
+                    )
+                    checkpoint_notice = (
+                        f"\n\n> **[Relay Checkpoint {relay_count}/{max_relays}]** "
+                        f"Auto-advancing with: *{next_step}*\n\n"
+                    )
+                    accumulated.append(checkpoint_notice)
+                    if on_message:
+                        await on_message(AgentMessageEvent(delta=checkpoint_notice, session_id=session_id))
+                    if on_thought:
+                        await on_thought(AgentThoughtEvent(
+                            delta=f"Relay Checkpoint {relay_count}/{max_relays}: {next_step}",
+                            session_id=session_id,
+                        ))
+
+                    relay_checkpoints.append(
+                        f"### Relay {relay_count} Checkpoint\n{checkpoint_body}"
+                    )
+                    checkpoints_summary = "\n\n".join(relay_checkpoints)
+
+                    # Compact context: prune bulky prior tool payloads, preserve doctrine, history, and checkpoint ledger
+                    current_messages = list(base_messages)
+                    current_messages.append({
+                        "role": "assistant",
+                        "content": f"[AUTONOMOUS RELAY CHECKPOINTS]\n{checkpoints_summary}",
+                    })
+                    current_messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[SYSTEM NOTE: Autonomous relay {relay_count + 1} of {max_relays} initiated.\n"
+                            f"Original user task: {prompt}\n"
+                            f"Target for this burst: {next_step}\n"
+                            "Prior bulky tool outputs have been compacted to retain focus. "
+                            "Tools are re-enabled. Continue executing the task now.]"
+                        ),
+                    })
                     continue
-                break
+
+            # Task finished or maximum relay ceiling reached
+            break
+
+        if relay_count >= max_relays and forcing_synthesis:
+            is_in_progress, _, _ = extract_checkpoint_info(last_streamed_turn_text)
+            if is_in_progress:
+                pause_note = f"\n\n*(Maximum relay budget of {max_relays} relays reached. Task paused at checkpoint.)*"
+                accumulated.append(pause_note)
+                if on_message:
+                    await on_message(AgentMessageEvent(delta=pause_note, session_id=session_id))
 
         result_text = "".join(accumulated).strip()
+        result_text = clean_relay_completion_tags(result_text)
         if not result_text:
             raise RuntimeError(
                 f"Provider '{provider_type}' ({self.profile.model}) returned an empty response"

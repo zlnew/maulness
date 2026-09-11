@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -19,7 +20,9 @@ from maulness.core.providers.base import BaseProvider
 from maulness.core.tools import (
     TOOL_DEFINITIONS,
     clean_history_message,
+    clean_relay_completion_tags,
     execute_tool_call,
+    extract_checkpoint_info,
     format_lean_tool_breadcrumb,
 )
 from maulness.storage.db import StorageManager
@@ -122,193 +125,298 @@ class GeminiProvider(BaseProvider):
 
         # Retrieve conversation history (sanitized)
         history_turns = await self.storage.get_conversation_messages(conv_id, limit=20)
-        contents: list[types.Content] = []
+        base_contents: list[types.Content] = []
         for turn in history_turns:
             role = "model" if turn["role"] == "assistant" else "user"
             cleaned_content = clean_history_message(turn["content"])
-            contents.append(
+            base_contents.append(
                 types.Content(
                     role=role,
                     parts=[types.Part.from_text(text=cleaned_content)],
                 )
             )
-        contents.append(
+        base_contents.append(
             types.Content(
                 role="user",
                 parts=[types.Part.from_text(text=prompt)],
             )
         )
 
-        accumulated = []
+        max_relays = getattr(self.profile, "max_relays", config.max_relays)
+        max_tool_turns = getattr(self.profile, "max_tool_turns", config.max_tool_turns)
         init_timeout = max(float(config.stream_idle_timeout_seconds), 60.0)
         idle_timeout = float(config.stream_idle_timeout_seconds)
         first_chunk_timeout = 60.0 if effort else 30.0
 
-        max_tool_turns = getattr(self.profile, "max_tool_turns", config.max_tool_turns)
-        turn_count = 0
-        forcing_synthesis = False
+        accumulated = []
         model_produced_text = False
+        relay_count = 0
+        relay_checkpoints: list[str] = []
+        current_contents = list(base_contents)
 
-        while turn_count <= max_tool_turns:
-            turn_count += 1
-            has_tool_call = False
-            model_parts: list[types.Part] = []
-            tool_response_parts: list[types.Part] = []
-            executed_in_turn: set[str] = set()
+        while relay_count < max_relays:
+            relay_count += 1
+            turn_count = 0
+            forcing_synthesis = False
+            last_streamed_turn_text = ""
 
-            try:
-                response_stream = await asyncio.wait_for(
-                    client.aio.models.generate_content_stream(
-                        model=model_name,
-                        contents=contents,
-                        config=gen_config,
-                    ),
-                    timeout=init_timeout,
-                )
-            except asyncio.TimeoutError:
-                raise TimeoutError(
-                    f"Gemini API connection handshake timed out after {int(init_timeout)}s (model '{model_name}' overloaded)"
-                )
+            # Ensure tools are active for new relay
+            gen_config = types.GenerateContentConfig(**gen_config_kwargs)
 
-            stream_iter = response_stream.__aiter__()
-            is_first_chunk = True
+            while turn_count <= max_tool_turns:
+                turn_count += 1
+                has_tool_call = False
+                model_parts: list[types.Part] = []
+                tool_response_parts: list[types.Part] = []
+                executed_in_turn: set[str] = set()
+                streamed_turn_chunks: list[str] = []
 
-            while True:
                 try:
-                    chunk_timeout = first_chunk_timeout if is_first_chunk else idle_timeout
-                    chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=chunk_timeout)
-                    is_first_chunk = False
-                except StopAsyncIteration:
-                    break
+                    response_stream = await asyncio.wait_for(
+                        client.aio.models.generate_content_stream(
+                            model=model_name,
+                            contents=current_contents,
+                            config=gen_config,
+                        ),
+                        timeout=init_timeout,
+                    )
                 except asyncio.TimeoutError:
-                    if is_first_chunk:
-                        raise TimeoutError(
-                            f"Gemini model '{model_name}' timed out waiting for first token response after {int(first_chunk_timeout)}s"
-                        )
                     raise TimeoutError(
-                        f"Gemini stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
+                        f"Gemini API connection handshake timed out after {int(init_timeout)}s (model '{model_name}' overloaded)"
                     )
 
-                # Process candidate parts for thought, tool calls, and text content
-                has_parts = False
-                if hasattr(chunk, "candidates") and chunk.candidates:
-                    for cand in chunk.candidates:
-                        if hasattr(cand, "content") and cand.content:
-                            for part in cand.content.parts:
-                                # Handle tool/function calls if returned
-                                if getattr(part, "function_call", None) and not forcing_synthesis:
-                                    fn = part.function_call
-                                    call_name = fn.name
-                                    call_args = dict(fn.args) if fn.args else {}
-                                    call_sig = f"{call_name}::{json.dumps(call_args, sort_keys=True)}"
-                                    if call_sig in executed_in_turn:
-                                        continue
-                                    executed_in_turn.add(call_sig)
+                stream_iter = response_stream.__aiter__()
+                is_first_chunk = True
 
-                                    has_parts = True
-                                    has_tool_call = True
-                                    model_parts.append(part)
-                                    if on_tool_call:
-                                        await on_tool_call(
-                                            AgentToolCallEvent(
-                                                call_id=f"call_{call_name}",
-                                                tool_name=call_name,
-                                                args=call_args,
-                                                session_id=session_id,
+                while True:
+                    try:
+                        chunk_timeout = first_chunk_timeout if is_first_chunk else idle_timeout
+                        chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=chunk_timeout)
+                        is_first_chunk = False
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        if is_first_chunk:
+                            raise TimeoutError(
+                                f"Gemini model '{model_name}' timed out waiting for first token response after {int(first_chunk_timeout)}s"
+                            )
+                        raise TimeoutError(
+                            f"Gemini stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
+                        )
+
+                    # Process candidate parts for thought, tool calls, and text content
+                    has_parts = False
+                    if hasattr(chunk, "candidates") and chunk.candidates:
+                        for cand in chunk.candidates:
+                            if hasattr(cand, "content") and cand.content:
+                                for part in cand.content.parts:
+                                    # Handle tool/function calls if returned
+                                    if getattr(part, "function_call", None) and not forcing_synthesis:
+                                        fn = part.function_call
+                                        call_name = fn.name
+                                        call_args = dict(fn.args) if fn.args else {}
+                                        call_sig = f"{call_name}::{json.dumps(call_args, sort_keys=True)}"
+                                        if call_sig in executed_in_turn:
+                                            continue
+                                        executed_in_turn.add(call_sig)
+
+                                        has_parts = True
+                                        has_tool_call = True
+                                        model_parts.append(part)
+                                        if on_tool_call:
+                                            await on_tool_call(
+                                                AgentToolCallEvent(
+                                                    call_id=f"call_{call_name}",
+                                                    tool_name=call_name,
+                                                    args=call_args,
+                                                    session_id=session_id,
+                                                )
+                                            )
+                                        # Execute the tool with execution rules & HITL gating
+                                        tool_result = await execute_tool_call(
+                                            name=call_name,
+                                            args=call_args,
+                                            workspace_path=workspace_path,
+                                            session_id=session_id,
+                                            on_approval=on_approval,
+                                            yolo=self.profile.execution.yolo,
+                                            rule_engine=self.profile.get_rule_engine(),
+                                        )
+                                        tool_desc = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
+                                        accumulated.append(tool_desc)
+                                        if on_message:
+                                            await on_message(
+                                                AgentMessageEvent(delta=tool_desc, session_id=session_id)
+                                            )
+                                        tool_response_parts.append(
+                                            types.Part.from_function_response(
+                                                name=call_name,
+                                                response={"result": tool_result},
                                             )
                                         )
-                                    # Execute the tool with execution rules & HITL gating
-                                    tool_result = await execute_tool_call(
-                                        name=call_name,
-                                        args=call_args,
-                                        workspace_path=workspace_path,
-                                        session_id=session_id,
-                                        on_approval=on_approval,
-                                        yolo=self.profile.execution.yolo,
-                                        rule_engine=self.profile.get_rule_engine(),
-                                    )
-                                    tool_desc = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
-                                    accumulated.append(tool_desc)
-                                    if on_message:
-                                        await on_message(
-                                            AgentMessageEvent(delta=tool_desc, session_id=session_id)
-                                        )
-                                    tool_response_parts.append(
-                                        types.Part.from_function_response(
-                                            name=call_name,
-                                            response={"result": tool_result},
-                                        )
-                                    )
 
-                                part_text = getattr(part, "text", None)
-                                if not part_text:
-                                    continue
-                                has_parts = True
-                                model_parts.append(part)
-                                if getattr(part, "thought", None):
-                                    if on_thought:
-                                        await on_thought(
-                                            AgentThoughtEvent(delta=part_text, session_id=session_id)
-                                        )
-                                else:
-                                    if part_text.strip():
-                                        model_produced_text = True
-                                    accumulated.append(part_text)
-                                    if on_message:
-                                        await on_message(
-                                            AgentMessageEvent(delta=part_text, session_id=session_id)
-                                        )
+                                    part_text = getattr(part, "text", None)
+                                    if not part_text:
+                                        continue
+                                    has_parts = True
+                                    model_parts.append(part)
+                                    if getattr(part, "thought", None):
+                                        if on_thought:
+                                            await on_thought(
+                                                AgentThoughtEvent(delta=part_text, session_id=session_id)
+                                            )
+                                    else:
+                                        if part_text.strip():
+                                            model_produced_text = True
+                                        streamed_turn_chunks.append(part_text)
+                                        accumulated.append(part_text)
+                                        if on_message:
+                                            await on_message(
+                                                AgentMessageEvent(delta=part_text, session_id=session_id)
+                                            )
 
-                if not has_parts and getattr(chunk, "text", None):
-                    text_cand = chunk.text
-                    if text_cand.strip():
-                        model_produced_text = True
-                    accumulated.append(text_cand)
-                    model_parts.append(types.Part.from_text(text=text_cand))
-                    if on_message:
-                        await on_message(
-                            AgentMessageEvent(delta=text_cand, session_id=session_id)
-                        )
+                    if not has_parts and getattr(chunk, "text", None):
+                        text_cand = chunk.text
+                        if text_cand.strip():
+                            model_produced_text = True
+                        streamed_turn_chunks.append(text_cand)
+                        accumulated.append(text_cand)
+                        model_parts.append(types.Part.from_text(text=text_cand))
+                        if on_message:
+                            await on_message(
+                                AgentMessageEvent(delta=text_cand, session_id=session_id)
+                            )
 
-            # If tool calls were made during this turn, feed response back to model for synthesis
-            if has_tool_call and tool_response_parts:
-                if forcing_synthesis:
-                    logger.warning("[%s] Model emitted tool call during forced synthesis; halting tool loop", self.profile.name)
+                last_streamed_turn_text = "".join(streamed_turn_chunks).strip()
+
+                # If tool calls were made during this turn, feed response back to model for synthesis
+                if has_tool_call and tool_response_parts:
+                    if forcing_synthesis:
+                        logger.warning("[%s] Model emitted tool call during forced synthesis; halting tool loop", self.profile.name)
+                        break
+
+                    current_contents.append(types.Content(role="model", parts=model_parts))
+                    current_contents.append(types.Content(role="user", parts=tool_response_parts))
+
+                    if turn_count >= max_tool_turns:
+                        forcing_synthesis = True
+                        no_tools_kwargs = {
+                            "temperature": self.profile.temperature,
+                            "max_output_tokens": self.profile.max_tokens,
+                            "system_instruction": self.profile.effective_system_prompt(),
+                        }
+                        if effort:
+                            no_tools_kwargs["thinking_config"] = types.ThinkingConfig(
+                                thinking_budget=int(self.EFFORT_BUDGET.get(effort.lower(), 4096))
+                            )
+                        gen_config = types.GenerateContentConfig(**no_tools_kwargs)
+
+                        if relay_count < max_relays:
+                            logger.info(
+                                "[%s] Reached burst turn limit (%d) in relay %d/%d; requesting status checkpoint",
+                                self.profile.name,
+                                max_tool_turns,
+                                relay_count,
+                                max_relays,
+                            )
+                            eval_prompt = (
+                                f"[SYSTEM NOTE: Execution burst limit reached ({max_tool_turns} tool actions in Relay {relay_count}/{max_relays}). "
+                                "Maximum allowed tool actions for this burst reached. "
+                                "If the task is fully finished, output your complete final answer to the user now. "
+                                "If the task is STILL IN PROGRESS, output exactly:\n"
+                                "[STATUS: IN_PROGRESS]\n"
+                                "Accomplished: <1-2 sentences on what was completed in this burst>\n"
+                                "Key Findings: <key facts, file paths, or test results discovered>\n"
+                                "Next Step: <exact action to take in the next burst>\n"
+                                "Do not attempt to call any tools.]"
+                            )
+                        else:
+                            logger.info(
+                                "[%s] Reached burst turn limit (%d) in final relay %d/%d; requesting final answer synthesis",
+                                self.profile.name,
+                                max_tool_turns,
+                                relay_count,
+                                max_relays,
+                            )
+                            eval_prompt = (
+                                f"[SYSTEM NOTE: You have reached the maximum allowed execution budget across all relays (Relay {relay_count}/{max_relays}). "
+                                "Maximum allowed tool actions reached. "
+                                "Formulate and output your final, comprehensive answer to the user now based on all information and tool results above. "
+                                "Do not attempt to call any tools.]"
+                            )
+                        current_contents.append(types.Content(
+                            role="user",
+                            parts=[types.Part.from_text(text=eval_prompt)],
+                        ))
+                        continue
+
+                    logger.info("[%s] Tool executed; continuing turn loop for model answer synthesis (step %d)", self.profile.name, turn_count)
+                    continue
+                else:
                     break
 
-                contents.append(types.Content(role="model", parts=model_parts))
-                contents.append(types.Content(role="user", parts=tool_response_parts))
-
-                if turn_count >= max_tool_turns:
+            # Burst completed. Check if model requested autonomous relay continuation
+            if forcing_synthesis and relay_count < max_relays:
+                is_in_progress, checkpoint_body, next_step = extract_checkpoint_info(last_streamed_turn_text)
+                if is_in_progress:
                     logger.info(
-                        "[%s] Reached max tool turns (%d); requesting final answer synthesis without tools",
+                        "[%s] Relay %d/%d produced IN_PROGRESS checkpoint: %s. Auto-advancing to next relay.",
                         self.profile.name,
-                        max_tool_turns,
+                        relay_count,
+                        max_relays,
+                        next_step,
                     )
-                    forcing_synthesis = True
-                    gen_config = types.GenerateContentConfig(
-                        temperature=self.profile.temperature,
-                        max_output_tokens=self.profile.max_tokens,
-                        system_instruction=self.profile.effective_system_prompt(),
+                    checkpoint_notice = (
+                        f"\n\n> **[Relay Checkpoint {relay_count}/{max_relays}]** "
+                        f"Auto-advancing with: *{next_step}*\n\n"
                     )
-                    contents.append(types.Content(
+                    accumulated.append(checkpoint_notice)
+                    if on_message:
+                        await on_message(AgentMessageEvent(delta=checkpoint_notice, session_id=session_id))
+                    if on_thought:
+                        await on_thought(AgentThoughtEvent(
+                            delta=f"Relay Checkpoint {relay_count}/{max_relays}: {next_step}",
+                            session_id=session_id,
+                        ))
+
+                    relay_checkpoints.append(
+                        f"### Relay {relay_count} Checkpoint\n{checkpoint_body}"
+                    )
+                    checkpoints_summary = "\n\n".join(relay_checkpoints)
+
+                    # Compact context: prune bulky prior tool payloads, preserve doctrine, history, and checkpoint ledger
+                    current_contents = list(base_contents)
+                    current_contents.append(types.Content(
+                        role="model",
+                        parts=[types.Part.from_text(text=f"[AUTONOMOUS RELAY CHECKPOINTS]\n{checkpoints_summary}")],
+                    ))
+                    current_contents.append(types.Content(
                         role="user",
                         parts=[types.Part.from_text(
                             text=(
-                                "[SYSTEM NOTE: You have reached the maximum allowed tool execution limit for this turn. "
-                                "Formulate and output your final, comprehensive answer to the user now based on all information and tool results above. "
-                                "Do not attempt to call any more tools.]"
+                                f"[SYSTEM NOTE: Autonomous relay {relay_count + 1} of {max_relays} initiated.\n"
+                                f"Original user task: {prompt}\n"
+                                f"Target for this burst: {next_step}\n"
+                                "Prior bulky tool outputs have been compacted to retain focus. "
+                                "Tools are re-enabled. Continue executing the task now.]"
                             )
                         )],
                     ))
                     continue
 
-                logger.info("[%s] Tool executed; continuing turn loop for model answer synthesis (step %d)", self.profile.name, turn_count)
-                continue
-            else:
-                break
+            # Task completed or max relays ceiling reached
+            break
+
+        if relay_count >= max_relays and forcing_synthesis:
+            is_in_progress, _, _ = extract_checkpoint_info(last_streamed_turn_text)
+            if is_in_progress:
+                pause_note = f"\n\n*(Maximum relay budget of {max_relays} relays reached. Task paused at checkpoint.)*"
+                accumulated.append(pause_note)
+                if on_message:
+                    await on_message(AgentMessageEvent(delta=pause_note, session_id=session_id))
 
         result_text = "".join(accumulated).strip()
+        result_text = clean_relay_completion_tags(result_text)
         if not result_text:
             raise RuntimeError(f"Gemini model '{model_name}' completed stream but returned an empty response")
 

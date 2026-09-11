@@ -64,6 +64,7 @@ class ExecutionConfig(BaseModel):
     default_policy: PolicyAction = PolicyAction.ASK
     rules: ExecutionRulesConfig = Field(default_factory=ExecutionRulesConfig)
     max_tool_turns: Optional[int] = None
+    max_relays: Optional[int] = None
 
 
 class FallbackItem(BaseModel):
@@ -199,6 +200,12 @@ class Profile(BaseModel):
         if self.execution and self.execution.max_tool_turns is not None:
             return self.execution.max_tool_turns
         return config.max_tool_turns
+
+    @property
+    def max_relays(self) -> int:
+        if self.execution and self.execution.max_relays is not None:
+            return self.execution.max_relays
+        return config.max_relays
 
     @property
     def fallbacks(self) -> list[dict[str, Any]]:
