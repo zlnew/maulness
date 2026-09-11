@@ -104,10 +104,16 @@ class SemanticErrorNormalizer:
             )
 
         cmd_lower = command.lower()
+        combined_lower = (stdout + "\n" + stderr).lower()
 
         # 1. Pytest
-        if "pytest" in cmd_lower:
+        if (
+            "pytest" in cmd_lower
+            or ("failed" in combined_lower and "failed in" in combined_lower)
+            or "short test summary info" in combined_lower
+        ):
             return cls._normalize_pytest(command, exit_code, stdout, stderr)
+
 
         # 2. Python unittest
         if "unittest" in cmd_lower:
