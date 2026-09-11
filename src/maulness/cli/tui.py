@@ -845,6 +845,7 @@ class MaulnessTUIApp(App):
             ("/queue ", "Queue a prompt to run after current task finishes (<prompt>)"),
             ("/usage", "Display token metrics and estimated cost for this session"),
             ("/context", "Display current workspace, git branch, and agent status"),
+            ("/providers", "Inspect provider circuit breaker health and cooldowns (/providers [reset])"),
             ("/compact", "Compact conversation history into SQLite memory"),
         ])
 
@@ -1023,6 +1024,7 @@ class MaulnessTUIApp(App):
             "/new",
             "/stop",
             "/context",
+            "/providers",
             "/compact",
             "/yolo",
             "/worktree",
@@ -1296,6 +1298,9 @@ class MaulnessTUIApp(App):
             target = prof.model or prof.command or "default"
             ws_cfg = prof.workspace or "inherit"
 
+            from maulness.core.providers.circuit import ProviderHealthRegistry
+            circuit_status = ProviderHealthRegistry.get_instance().format_status_text()
+
             context_content = (
                 f"• Active Workspace: [bold green]{self.workspace_path}[/bold green] (repo: [bold]{self.repo_name}[/bold])\n"
                 f"• Git Branch: [bold cyan]{branch}[/bold cyan] ({dirty_str})\n"
@@ -1306,10 +1311,26 @@ class MaulnessTUIApp(App):
                 f"• Soul Doctrine: [bold green]Enabled[/bold green] (~/.config/maulness/SOUL.md)\n"
                 f"• Storage DB: [dim]{config.db_path}[/dim]\n"
                 f"• Daemon Status: {get_daemon_status()}\n"
-                f"• Prompt Queue: {len(self.prompt_queue)} pending"
+                f"• Prompt Queue: {len(self.prompt_queue)} pending\n\n"
+                f"[bold]Circuit Breaker Status:[/bold]\n{circuit_status}"
             )
             chat_view = self.query_one("#chat-view", VerticalScroll)
             await chat_view.mount(SystemCard("Runtime & Workspace Context", context_content))
+            chat_view.scroll_end(animate=False)
+            return
+
+        # Providers command: inspect or reset circuit breaker health
+        if raw_text.startswith("/providers"):
+            from maulness.core.providers.circuit import ProviderHealthRegistry
+            registry = ProviderHealthRegistry.get_instance()
+            parts = raw_text.split()
+            if len(parts) > 1 and parts[1].lower() == "reset":
+                registry.reset_all()
+                msg = "[green]All provider circuit breakers reset to CLOSED (HEALTHY).[/green]"
+            else:
+                msg = registry.format_status_text()
+            chat_view = self.query_one("#chat-view", VerticalScroll)
+            await chat_view.mount(SystemCard("Provider Circuit Health", msg))
             chat_view.scroll_end(animate=False)
             return
 

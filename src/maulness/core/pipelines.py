@@ -11,21 +11,93 @@ USER_PIPELINES_DIR = config.config_dir / "pipelines"
 TEMPLATE_PIPELINES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "templates" / "pipelines"
 
 
+import re
+
 class PipelineGate(BaseModel):
     type: str = "confirm"  # "confirm" (requires explicit confirmation) or "none"
     prompt: str = "Proceed to next stage?"
 
 
+class VerificationGate(BaseModel):
+    """Deterministic command verification gate executed before transition or review."""
+    command: str
+    cwd: Optional[str] = None
+    timeout_seconds: int = 120
+    auto_rework_on_fail: bool = True
+    sandbox_mode: Optional[str] = None
+
+
+class StageTransitions(BaseModel):
+    pass_target: Optional[str] = None
+    rework_target: Optional[str] = None
+    fail_target: Optional[str] = None
+    max_reworks: int = 2
+    rollback_on_rework: bool = False
+
+
 class PipelineStage(BaseModel):
     name: str
-    profile: str
+    profile: str = "builder"
     status: str = "building"
     output_key: Optional[str] = None
     requires_diff: bool = False
     requires_approval: bool = False
     use_worktree: bool = False
-    prompt: str
+    checkpoint_before_stage: bool = False
+    is_gate_only: bool = False
+    prompt: str = ""
     gate: Optional[PipelineGate] = None
+    verification_gate: Optional[VerificationGate] = None
+    transitions: Optional[StageTransitions] = None
+
+
+
+def check_is_rework_verdict(text: str) -> bool:
+    """Check if output text requests rework."""
+    if not text:
+        return False
+    clean = re.sub(r"[\*_`#]", "", text)
+    if re.search(r"\[(?:DECISION|VERDICT)\s*:\s*REWORK\]", clean, re.IGNORECASE):
+        return True
+    if re.search(
+        r"\b(?:DECISION|VERDICT|AUDIT SCORECARD|SCORECARD)\s*:\s*REWORK\b",
+        clean,
+        re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
+def check_is_pass_verdict(text: str) -> bool:
+    """Check if output text indicates a passing verdict."""
+    if not text:
+        return False
+    clean = re.sub(r"[\*_`#]", "", text)
+    if re.search(r"\[(?:DECISION|VERDICT)\s*:\s*PASS\]", clean, re.IGNORECASE):
+        return True
+    if re.search(
+        r"\b(?:DECISION|VERDICT|AUDIT SCORECARD|SCORECARD)\s*:\s*PASS\b",
+        clean,
+        re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
+def check_is_fail_verdict(text: str) -> bool:
+    """Check if output text indicates an explicit failure verdict."""
+    if not text:
+        return False
+    clean = re.sub(r"[\*_`#]", "", text)
+    if re.search(r"\[(?:DECISION|VERDICT)\s*:\s*FAIL\]", clean, re.IGNORECASE):
+        return True
+    if re.search(
+        r"\b(?:DECISION|VERDICT|AUDIT SCORECARD|SCORECARD)\s*:\s*FAIL\b",
+        clean,
+        re.IGNORECASE,
+    ):
+        return True
+    return False
 
 
 class PipelineDefinition(BaseModel):

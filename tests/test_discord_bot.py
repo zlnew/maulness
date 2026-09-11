@@ -17,7 +17,7 @@ async def test_bot_slash_commands_registered(tmp_path: Path):
     registered_cmds = {cmd.name for cmd in bot.tree.get_commands()}
     expected_cmds = {
         "new", "stop", "interrupt", "queue", "context", "compact",
-        "pipeline", "profile", "yolo", "worktree", "usage", "help", "thread"
+        "pipeline", "profile", "yolo", "worktree", "usage", "help", "thread", "providers"
     }
     assert registered_cmds == expected_cmds, f"Slash command mismatch: {registered_cmds ^ expected_cmds}"
 
@@ -244,5 +244,22 @@ async def test_bot_on_message_text_commands(tmp_path: Path):
     assert 777 not in bot.channel_conversations
     assert await storage.get_channel_conversation(777) is None
     msg.channel.send.assert_called_once()
+
+
+def test_format_discord_markdown():
+    from maulness.discord.bot import format_discord_markdown
+
+    sample = "Discord $\\rightarrow$ maulness $\\rightarrow$ Antigravity $\\rightarrow$ Filesystem"
+    assert format_discord_markdown(sample) == "Discord -> maulness -> Antigravity -> Filesystem"
+
+    backticked = "`pipeline: git $\\rightarrow$ build`"
+    assert format_discord_markdown(backticked) == "`pipeline: git -> build`"
+
+    comparisons = "x $\\le$ 10 and y $\\ge$ 20, z $\\approx$ 5"
+    assert format_discord_markdown(comparisons) == "x <= 10 and y >= 20, z ~ 5"
+
+    math_symbols = "3 $\\times$ 4 $\\pm$ 0.1"
+    assert format_discord_markdown(math_symbols) == "3 * 4 +/- 0.1"
+
 
 

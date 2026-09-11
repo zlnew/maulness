@@ -15,6 +15,15 @@ execution:
   # Universal stream idle watchdog timeout (seconds) across all providers
   stream_idle_timeout_seconds: 180.0
 
+  # Max turns before forcing evaluation or autonomous relay compaction (0 for unlimited)
+  max_tool_turns: 50
+
+  # Max autonomous relays for long-horizon tasks before pausing for user steering
+  max_relays: 5
+
+  # Process sandboxing using rootless Bubblewrap ('auto', 'bwrap', or 'none')
+  sandbox: auto
+
   # Default policy for unmatched tool calls ('ask', 'allow', or 'deny')
   default_policy: ask
 

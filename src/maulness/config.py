@@ -47,6 +47,13 @@ class Config:
             os.getenv("STREAM_IDLE_TIMEOUT_SECONDS", "180.0")
         )
 
+        # Tool Execution Turn Limit & Long-Horizon Relay Budget (0 for unlimited)
+        self.max_tool_turns: int = int(os.getenv("MAX_TOOL_TURNS", "50"))
+        self.max_relays: int = int(os.getenv("MAX_RELAYS", "5"))
+
+        # Process Sandboxing (auto, bwrap, none)
+        self.sandbox_mode: str = os.getenv("SANDBOX_MODE", "auto").lower()
+
         # Execution Rules (allow, deny, ask)
         from maulness.core.rules import ExecutionRulesConfig
         self.global_rules: ExecutionRulesConfig = ExecutionRulesConfig()
@@ -86,6 +93,18 @@ class Config:
                     if isinstance(exec_cfg, dict):
                         if "stream_idle_timeout_seconds" in exec_cfg:
                             self.stream_idle_timeout_seconds = float(exec_cfg["stream_idle_timeout_seconds"])
+                        if "max_tool_turns" in exec_cfg:
+                            self.max_tool_turns = int(exec_cfg["max_tool_turns"])
+                        if "max_relays" in exec_cfg:
+                            self.max_relays = int(exec_cfg["max_relays"])
+                        if "sandbox" in exec_cfg:
+                            val = str(exec_cfg["sandbox"]).lower().strip()
+                            if val in ("true", "1", "bwrap", "auto"):
+                                self.sandbox_mode = "bwrap" if val == "bwrap" else "auto"
+                            elif val in ("false", "0", "none", "disabled"):
+                                self.sandbox_mode = "none"
+                        elif "sandbox_mode" in exec_cfg:
+                            self.sandbox_mode = str(exec_cfg["sandbox_mode"]).lower().strip()
                         rules_raw = exec_cfg.get("rules", {})
                         default_policy = exec_cfg.get("default_policy")
                         if isinstance(rules_raw, dict):

@@ -63,6 +63,9 @@ class ExecutionConfig(BaseModel):
     system_prompt_mode: str = "prepend"
     default_policy: PolicyAction = PolicyAction.ASK
     rules: ExecutionRulesConfig = Field(default_factory=ExecutionRulesConfig)
+    max_tool_turns: Optional[int] = None
+    max_relays: Optional[int] = None
+    sandbox: Optional[str] = None
 
 
 class FallbackItem(BaseModel):
@@ -194,6 +197,24 @@ class Profile(BaseModel):
         return self.execution.worktree
 
     @property
+    def max_tool_turns(self) -> int:
+        if self.execution and self.execution.max_tool_turns is not None:
+            return self.execution.max_tool_turns
+        return config.max_tool_turns
+
+    @property
+    def max_relays(self) -> int:
+        if self.execution and self.execution.max_relays is not None:
+            return self.execution.max_relays
+        return config.max_relays
+
+    @property
+    def sandbox_mode(self) -> str:
+        if self.execution and self.execution.sandbox is not None:
+            return str(self.execution.sandbox)
+        return config.sandbox_mode
+
+    @property
     def fallbacks(self) -> list[dict[str, Any]]:
         return [f.model_dump(exclude_none=True) for f in self.resilience.fallbacks]
 
@@ -293,6 +314,15 @@ class Profile(BaseModel):
         skills_summary = skill_mgr.format_skills_summary(skills)
         if skills_summary:
             parts.append(skills_summary)
+
+        # Tool Calling Doctrine (strictly enforces real function calling over simulated markdown)
+        parts.append(
+            "---\n## Tool Calling Doctrine\n"
+            "- You have real workspace tools available via function calling: "
+            "`run_command`, `read_file`, `write_file`, `list_dir`, `git_status`.\n"
+            "- NEVER simulate, fabricate, or hallucinate tool execution syntax (such as `> **tool_name**` or markdown breadcrumbs) in plain text.\n"
+            "- When you need to inspect files, execute shell commands, or check git status, you MUST call the appropriate function tool. Never guess, assume, or invent filesystem contents."
+        )
 
         return "\n\n".join(parts)
 

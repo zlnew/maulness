@@ -14,3 +14,16 @@ agent:
 
 execution:
   workspace: inherit
+
+resilience:
+  fallbacks:
+    - provider: gemini
+      model: gemini-3.5-flash
+    - provider: gemini
+      model: gemini-3.5-flash-lite
+    - provider: ollama
+      model: deepseek-v4-flash:cloud
+      base_url: http://localhost:11434/v1
+    - provider: ollama
+      model: gemma4:31b-cloud
+      base_url: http://localhost:11434/v1

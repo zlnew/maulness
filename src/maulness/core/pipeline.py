@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import subprocess
 import uuid
 from pathlib import Path
@@ -15,13 +16,74 @@ from maulness.core.models import (
     TaskRecord,
     TaskStatus,
 )
-from maulness.core.pipelines import PipelineDefinition, PipelineManager, PipelineStage
+from maulness.core.pipelines import (
+    PipelineDefinition,
+    PipelineManager,
+    PipelineStage,
+    check_is_fail_verdict,
+    check_is_pass_verdict,
+    check_is_rework_verdict,
+)
+from maulness.core.kernel.gates import DeterministicGateRunner
 from maulness.core.profiles import ProfileManager
 from maulness.core.providers.factory import get_provider_for_profile
 from maulness.core.worktree import WorktreeManager
 from maulness.storage.db import StorageManager
 
+logger = logging.getLogger("maulness.pipeline")
 console = Console()
+
+
+def sync_task_ledger(
+    workspace: Path,
+    task_id: str,
+    title: str,
+    definition: PipelineDefinition,
+    current_stage_idx: int,
+    rework_counts: dict[str, int],
+    context: dict[str, Any],
+) -> str:
+    """Create or update durable .maulness/task.md in target workspace."""
+    ledger_dir = workspace / ".maulness"
+    ledger_path = ledger_dir / "task.md"
+    try:
+        ledger_dir.mkdir(parents=True, exist_ok=True)
+        total_stages = len(definition.stages)
+        current_stage = definition.stages[current_stage_idx] if current_stage_idx < total_stages else None
+
+        stage_lines = []
+        for idx, s in enumerate(definition.stages):
+            if idx < current_stage_idx:
+                prefix = "- [x]"
+                state_str = "Passed"
+            elif idx == current_stage_idx:
+                prefix = "- [/]"
+                reworks = rework_counts.get(s.name, 0)
+                rework_str = f" (Rework {reworks})" if reworks > 0 else ""
+                state_str = f"Active{rework_str}"
+            else:
+                prefix = "- [ ]"
+                state_str = "Pending"
+            stage_lines.append(f"{prefix} **{s.name.title()}** (`{s.profile}`) - {state_str}")
+
+        stages_checklist = "\n".join(stage_lines)
+        notes = context.get("reviewer_feedback") or context.get("prompt") or "(No additional notes)"
+
+        content = (
+            f"# Task Ledger: {title}\n\n"
+            f"- **Task ID:** `{task_id}`\n"
+            f"- **Pipeline:** `{definition.name}`\n"
+            f"- **Active Stage:** `{current_stage.name if current_stage else 'Complete'}`\n\n"
+            f"## Pipeline Execution Progress\n"
+            f"{stages_checklist}\n\n"
+            f"## Active Objective & Feedback\n"
+            f"{notes}\n"
+        )
+        ledger_path.write_text(content, encoding="utf-8")
+        return content
+    except Exception as e:
+        logger.warning("Failed to sync task ledger to '%s': %s", ledger_path, e)
+        return ""
 
 
 class PipelineOrchestrator:
@@ -33,11 +95,14 @@ class PipelineOrchestrator:
         profile_manager: Optional[ProfileManager] = None,
         pipeline_manager: Optional[PipelineManager] = None,
         worktree_manager: Optional[WorktreeManager] = None,
+        gate_runner: Optional[DeterministicGateRunner] = None,
     ):
         self.storage = storage or StorageManager(db_path=config.db_path)
         self.profile_manager = profile_manager or ProfileManager()
         self.pipeline_manager = pipeline_manager or PipelineManager()
         self.worktree_manager = worktree_manager or WorktreeManager()
+        self.gate_runner = gate_runner or DeterministicGateRunner(storage=self.storage)
+
 
     async def run_pipeline(
         self,
@@ -93,11 +158,49 @@ class PipelineOrchestrator:
                 "prompt": prompt,
                 "git_diff": "",
                 "previous_output": "",
+                "rework_feedback_block": "",
+                "reviewer_feedback": "",
+                "task_ledger": "",
+                "gate_verification": "",
+                "gate_failures": "",
+                "last_gate_result": {},
             }
 
-            total_stages = len(definition.stages)
 
-            for idx, stage in enumerate(definition.stages, start=1):
+            total_stages = len(definition.stages)
+            stage_map = {s.name: i for i, s in enumerate(definition.stages)}
+            rework_counts: dict[str, int] = {}
+            stage_executions: dict[str, int] = {}
+            stage_checkpoints: dict[str, str] = {}
+
+            stage_index = 0
+            while stage_index < total_stages:
+                stage = definition.stages[stage_index]
+                display_idx = stage_index + 1
+
+                # Sync durable task ledger in workspace
+                context["task_ledger"] = sync_task_ledger(
+                    effective_workspace,
+                    task_id,
+                    title,
+                    definition,
+                    stage_index,
+                    rework_counts,
+                    context,
+                )
+
+                # Capture pre-stage git checkpoint if explicitly requested or rollback configured
+                should_checkpoint = (
+                    stage.checkpoint_before_stage
+                    or bool(stage.transitions and stage.transitions.rollback_on_rework)
+                )
+                if should_checkpoint and self.worktree_manager.is_git_repo(effective_workspace):
+                    exec_count = stage_executions.get(stage.name, 0)
+                    cp_label = f"{task_id}_{stage.name}_r{exec_count}"
+                    cp_hash = self.worktree_manager.create_checkpoint(effective_workspace, cp_label)
+                    if cp_hash:
+                        stage_checkpoints[stage.name] = cp_hash
+
                 # Check gate before stage begins if specified
                 if stage.gate and not effective_auto_proceed:
                     proceed = True
@@ -127,11 +230,11 @@ class PipelineOrchestrator:
 
                 if verbose:
                     console.print(
-                        f"\n[bold cyan]── Stage {idx}/{total_stages}: {stage.name.title()} ({stage.profile}) ──[/bold cyan]"
+                        f"\n[bold cyan]── Stage {display_idx}/{total_stages}: {stage.name.title()} ({stage.profile}) ──[/bold cyan]"
                     )
 
                 if on_stage_start:
-                    await on_stage_start(stage, idx, total_stages)
+                    await on_stage_start(stage, display_idx, total_stages)
 
                 # If stage requires git diff, refresh it now
                 if stage.requires_diff:
@@ -143,29 +246,133 @@ class PipelineOrchestrator:
                     )
                     context["git_diff"] = diff_res.stdout or "(No uncommitted diffs detected)"
 
-                # Render stage prompt
-                stage_prompt = self.pipeline_manager.render_stage_prompt(stage, context)
+                if stage.is_gate_only:
+                    stage_output = ""
+                else:
+                    # Render stage prompt
+                    stage_prompt = self.pipeline_manager.render_stage_prompt(stage, context)
 
-                profile = self.profile_manager.get_profile(stage.profile)
-                stage_workspace = self.profile_manager.resolve_workspace_for_profile(
-                    profile, effective_workspace
-                )
-                provider = get_provider_for_profile(profile)
-
-                try:
-                    stage_output = await provider.run(
-                        session_id=f"{task_id}_{stage.name}",
-                        prompt=stage_prompt,
-                        workspace_path=stage_workspace,
-                        on_thought=on_thought,
-                        on_message=on_message,
-                        on_approval=on_approval if stage.requires_approval else None,
+                    profile = self.profile_manager.get_profile(stage.profile)
+                    stage_workspace = self.profile_manager.resolve_workspace_for_profile(
+                        profile, effective_workspace
                     )
-                except Exception as e:
-                    if verbose:
-                        console.print(f"[red][x] Stage '{stage.name}' failed: {e}[/red]")
-                    await self.storage.update_task_status(task_id, TaskStatus.FAILED)
-                    raise
+                    provider = get_provider_for_profile(profile)
+
+                    exec_count = stage_executions.get(stage.name, 0)
+                    stage_executions[stage.name] = exec_count + 1
+                    session_suffix = f"_r{exec_count}" if exec_count > 0 else ""
+                    session_id = f"{task_id}_{stage.name}{session_suffix}"
+
+                    try:
+                        stage_output = await provider.run(
+                            session_id=session_id,
+                            prompt=stage_prompt,
+                            workspace_path=stage_workspace,
+                            on_thought=on_thought,
+                            on_message=on_message,
+                            on_approval=on_approval if stage.requires_approval else None,
+                        )
+                    except Exception as e:
+                        if verbose:
+                            console.print(f"[red][x] Stage '{stage.name}' failed: {e}[/red]")
+                        await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                        raise
+
+                # Execute deterministic verification gate if configured
+                if stage.verification_gate:
+                    gate_cfg = stage.verification_gate
+                    gate_cwd = (
+                        Path(gate_cfg.cwd).resolve()
+                        if gate_cfg.cwd
+                        else effective_workspace
+                    )
+                    step_idx = await self.storage.get_latest_agent_step_index(task_id, stage.name) + 1
+                    gate_res = await self.gate_runner.run_gate(
+                        task_id=task_id,
+                        stage=stage.name,
+                        step_index=step_idx,
+                        command=gate_cfg.command,
+                        workspace_path=gate_cwd,
+                        timeout_seconds=gate_cfg.timeout_seconds,
+                        sandbox_mode=gate_cfg.sandbox_mode,
+                    )
+                    context["last_gate_result"] = gate_res.to_dict()
+
+                    if not gate_res.passed:
+                        context["gate_failures"] = gate_res.to_feedback_prompt()
+                        if verbose:
+                            console.print(
+                                f"[bold red][!] Deterministic verification gate failed for stage '{stage.name}': "
+                                f"{gate_res.summary}[/bold red]"
+                            )
+
+                        if gate_cfg.auto_rework_on_fail:
+                            cur_reworks = rework_counts.get(stage.name, 0)
+                            max_reworks = stage.transitions.max_reworks if stage.transitions else 2
+                            rework_target = (
+                                stage.transitions.rework_target
+                                if stage.transitions and stage.transitions.rework_target
+                                else stage.name
+                            )
+
+                            if cur_reworks < max_reworks:
+                                rework_counts[stage.name] = cur_reworks + 1
+                                if verbose:
+                                    console.print(
+                                        f"[bold yellow][!] Deterministic verification triggered REWORK "
+                                        f"(Cycle {rework_counts[stage.name]}/{max_reworks}). "
+                                        f"Looping back to '{rework_target}'...[/bold yellow]"
+                                    )
+
+                                if stage.transitions and stage.transitions.rollback_on_rework:
+                                    target_cp = stage_checkpoints.get(rework_target)
+                                    if target_cp:
+                                        rolled_back = self.worktree_manager.rollback_to_checkpoint(
+                                            effective_workspace, target_cp
+                                        )
+                                        if rolled_back and verbose:
+                                            console.print(
+                                                f"[bold yellow][!] Rolled back working tree to pre-stage checkpoint "
+                                                f"{target_cp[:8]} for clean rework restart.[/bold yellow]"
+                                            )
+
+                                context["reviewer_feedback"] = gate_res.to_feedback_prompt()
+                                context["rework_feedback_block"] = (
+                                    f"\n## Deterministic Verification Gate Failure "
+                                    f"(Rework Cycle {rework_counts[stage.name]}/{max_reworks})\n"
+                                    f"{gate_res.to_feedback_prompt()}\n\n"
+                                )
+
+                                if rework_target in stage_map:
+                                    stage_index = stage_map[rework_target]
+                                    continue
+                                else:
+                                    if verbose:
+                                        console.print(
+                                            f"[red][x] Rework target '{rework_target}' not found in pipeline stages.[/red]"
+                                        )
+                                    await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                                    return await self.storage.get_task(task_id) or task
+                            else:
+                                if verbose:
+                                    console.print(
+                                        f"[bold red][x] Maximum rework attempts reached ({max_reworks}) "
+                                        f"for deterministic verification on '{stage.name}'. Halting pipeline.[/bold red]"
+                                    )
+                                await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                                return await self.storage.get_task(task_id) or task
+                    else:
+                        context["gate_verification"] = (
+                            f"Deterministic verification gate passed for `{gate_cfg.command}`: {gate_res.summary}"
+                        )
+                        context["gate_failures"] = ""
+                        if verbose:
+                            console.print(
+                                f"[bold green][+] Deterministic verification gate passed: {gate_res.summary}[/bold green]"
+                            )
+                        if stage.is_gate_only:
+                            stage_output = gate_res.summary
+
 
                 # Store output in context
                 context["previous_output"] = stage_output
@@ -178,8 +385,93 @@ class PipelineOrchestrator:
                 if verbose:
                     console.print(f"[green]Stage '{stage.name}' complete.[/green]")
 
+                # Evaluate transitions
+                if stage.transitions:
+                    # 1. Rework check
+                    if stage.transitions.rework_target and check_is_rework_verdict(stage_output):
+                        cur_reworks = rework_counts.get(stage.name, 0)
+                        if cur_reworks < stage.transitions.max_reworks:
+                            rework_counts[stage.name] = cur_reworks + 1
+                            target_name = stage.transitions.rework_target
+                            if target_name in stage_map:
+                                if verbose:
+                                    console.print(
+                                        f"[bold yellow][!] Stage '{stage.name}' requested REWORK "
+                                        f"(Cycle {rework_counts[stage.name]}/{stage.transitions.max_reworks}). "
+                                        f"Looping back to '{target_name}'...[/bold yellow]"
+                                    )
+                                # Rollback working tree if configured on stage transitions
+                                if stage.transitions.rollback_on_rework:
+                                    target_cp = stage_checkpoints.get(target_name)
+                                    if target_cp:
+                                        rolled_back = self.worktree_manager.rollback_to_checkpoint(
+                                            effective_workspace, target_cp
+                                        )
+                                        if rolled_back and verbose:
+                                            console.print(
+                                                f"[bold yellow][!] Rolled back working tree to pre-stage checkpoint "
+                                                f"{target_cp[:8]} for clean rework restart.[/bold yellow]"
+                                            )
+                                context["reviewer_feedback"] = stage_output
+                                context["rework_feedback_block"] = (
+                                    f"\n## Reviewer Feedback (Rework Cycle {rework_counts[stage.name]}/{stage.transitions.max_reworks})\n"
+                                    f"{stage_output}\n\n"
+                                    f"Address all issues highlighted in the review feedback above.\n"
+                                )
+                                stage_index = stage_map[target_name]
+                                continue
+                            else:
+                                if verbose:
+                                    console.print(
+                                        f"[red][x] Rework target '{target_name}' not found in pipeline stages.[/red]"
+                                    )
+                                await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                                return await self.storage.get_task(task_id) or task
+                        else:
+                            if verbose:
+                                console.print(
+                                    f"[bold red][x] Maximum rework attempts reached ({stage.transitions.max_reworks}) "
+                                    f"for stage '{stage.name}'. Halting pipeline for user steering.[/bold red]"
+                                )
+                            await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                            return await self.storage.get_task(task_id) or task
+
+                    # 2. Fail check
+                    if stage.transitions.fail_target and check_is_fail_verdict(stage_output):
+                        target_name = stage.transitions.fail_target
+                        if target_name in stage_map:
+                            stage_index = stage_map[target_name]
+                            continue
+                        else:
+                            await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                            return await self.storage.get_task(task_id) or task
+
+                    # 3. Explicit pass target check
+                    if stage.transitions.pass_target:
+                        target_name = stage.transitions.pass_target
+                        if target_name in stage_map:
+                            context["rework_feedback_block"] = ""
+                            stage_index = stage_map[target_name]
+                            continue
+
+                # Normal sequential progression
+                context["rework_feedback_block"] = ""
+                stage_index += 1
+
             # All stages finished successfully
             await self.storage.update_task_status(task_id, TaskStatus.DONE)
+
+            # Final sync for task ledger marking completion
+            sync_task_ledger(
+                effective_workspace,
+                task_id,
+                title,
+                definition,
+                total_stages,
+                rework_counts,
+                context,
+            )
+
             if verbose:
                 console.print(
                     f"\n[bold green][+] Pipeline '{definition.name}' completed successfully![/bold green]"

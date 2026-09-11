@@ -15,10 +15,14 @@ from maulness.core.models import (
 )
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
-from maulness.core.tools import TOOL_DEFINITIONS, execute_tool_call, format_lean_tool_breadcrumb
+from maulness.core.kernel import DurableAgentKernel, ModelTurnOutput
+from maulness.core.kernel.loop import compact_in_flight_tool_messages
 from maulness.storage.db import StorageManager
 
 logger = logging.getLogger("maulness.providers.api")
+
+
+
 
 
 class UnifiedApiProvider(BaseProvider):
@@ -88,48 +92,40 @@ class UnifiedApiProvider(BaseProvider):
         if on_init:
             await on_init(conv_id)
 
-        if provider_type == "anthropic":
-            return await self._stream_anthropic(
-                session_id=session_id,
-                conv_id=conv_id,
-                prompt=prompt,
-                api_key=api_key or "",
-                on_message=on_message,
-                on_thought=on_thought,
-            )
-        else:
-            return await self._stream_openai_compatible(
-                provider_type=provider_type,
-                session_id=session_id,
-                conv_id=conv_id,
-                prompt=prompt,
-                api_key=api_key or "",
-                workspace_path=workspace_path,
-                on_message=on_message,
-                on_thought=on_thought,
-                on_tool_call=on_tool_call,
-                on_approval=on_approval,
-            )
+        kernel = DurableAgentKernel(self.profile, self.storage)
+        generator_fn = self._generate_anthropic_turn if provider_type == "anthropic" else self._generate_openai_turn
 
-    async def _stream_openai_compatible(
+        return await kernel.run(
+            turn_generator_fn=generator_fn,
+            session_id=session_id,
+            prompt=prompt,
+            workspace_path=workspace_path,
+            conversation_id=conv_id,
+            on_init=None,
+            on_thought=on_thought,
+            on_message=on_message,
+            on_tool_call=on_tool_call,
+            on_approval=on_approval,
+            **kwargs,
+        )
+
+    async def _generate_openai_turn(
         self,
-        provider_type: str,
+        messages: list[dict[str, Any]],
+        tools: Optional[list[dict[str, Any]]],
         session_id: str,
-        conv_id: str,
-        prompt: str,
-        api_key: str,
-        workspace_path: Optional[Path] = None,
-        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
         on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
-        on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
-        on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
-    ) -> str:
+        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
+        **kwargs: Any,
+    ) -> ModelTurnOutput:
+        provider_type = self.profile.provider.lower().strip().replace("-", "_")
         url = self.profile.base_url or self.BASE_URLS.get(provider_type, self.BASE_URLS["openai"])
         if not url.endswith("/chat/completions"):
             url = f"{url.rstrip('/')}/chat/completions"
         headers = {
             "Content-Type": "application/json",
         }
+        api_key = self.profile.get_api_key()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
@@ -143,197 +139,138 @@ class UnifiedApiProvider(BaseProvider):
         elif provider_type.startswith("opencode") or provider_type == "deepseek":
             default_model = "deepseek-ai/deepseek-coder-v3"
 
-        # Multi-turn history retrieval
-        history = await self.storage.get_conversation_messages(conv_id, limit=20)
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.profile.effective_system_prompt()}
-        ]
-        for turn in history:
-            messages.append({"role": turn["role"], "content": turn["content"]})
-        messages.append({"role": "user", "content": prompt})
-
         payload: dict[str, Any] = {
             "model": self.profile.model or default_model,
             "messages": messages,
             "temperature": self.profile.temperature,
             "max_tokens": self.profile.max_tokens,
             "stream": True,
-            "tools": TOOL_DEFINITIONS,
         }
+        if tools:
+            payload["tools"] = tools
+
         effort = self.profile.reasoning_effort
         if effort:
             payload["reasoning_effort"] = effort
 
         idle_timeout = float(config.stream_idle_timeout_seconds)
-        accumulated: list[str] = []
+        captured_tool_calls: list[dict[str, Any]] = []
+        streamed_text_chunks: list[str] = []
+        thought_chunks: list[str] = []
+        is_first_chunk = True
+        finish_reason: Optional[str] = None
 
-        max_tool_turns = 5
-        turn_count = 0
+        timeout = httpx.Timeout(120.0, connect=20.0, read=idle_timeout)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                stream_ctx = client.stream("POST", url, headers=headers, json=payload)
+            except Exception as e:
+                raise RuntimeError(f"Failed to initiate stream with {provider_type} ({url}): {e}")
 
-        while turn_count < max_tool_turns:
-            turn_count += 1
-            captured_tool_calls: list[dict[str, Any]] = []
-            is_first_chunk = True
+            async with stream_ctx as response:
+                if response.is_error:
+                    err_body = await response.aread()
+                    err_msg = err_body.decode(errors="replace")
+                    raise RuntimeError(
+                        f"Provider '{provider_type}' ({self.profile.model}) returned HTTP {response.status_code}: {err_msg[:500]}"
+                    )
 
-            timeout = httpx.Timeout(120.0, connect=20.0, read=idle_timeout)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                try:
-                    stream_ctx = client.stream("POST", url, headers=headers, json=payload)
-                except Exception as e:
-                    raise RuntimeError(f"Failed to initiate stream with {provider_type} ({url}): {e}")
-
-                async with stream_ctx as response:
-                    if response.is_error:
-                        err_body = await response.aread()
-                        err_msg = err_body.decode(errors="replace")
-                        raise RuntimeError(
-                            f"Provider '{provider_type}' ({self.profile.model}) returned HTTP {response.status_code}: {err_msg[:500]}"
+                lines_iter = response.aiter_lines().__aiter__()
+                while True:
+                    try:
+                        chunk_timeout = 60.0 if (is_first_chunk and provider_type == "ollama") else (30.0 if is_first_chunk else idle_timeout)
+                        line = await asyncio.wait_for(lines_iter.__anext__(), timeout=chunk_timeout)
+                        is_first_chunk = False
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        if is_first_chunk:
+                            raise TimeoutError(
+                                f"Stream from {provider_type} ({self.profile.model}) timed out waiting for first token after {int(chunk_timeout)}s"
+                            )
+                        raise TimeoutError(
+                            f"Stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
                         )
 
-                    lines_iter = response.aiter_lines().__aiter__()
-                    while True:
-                        try:
-                            chunk_timeout = 60.0 if (is_first_chunk and provider_type == "ollama") else (30.0 if is_first_chunk else idle_timeout)
-                            line = await asyncio.wait_for(lines_iter.__anext__(), timeout=chunk_timeout)
-                            is_first_chunk = False
-                        except StopAsyncIteration:
-                            break
-                        except asyncio.TimeoutError:
-                            if is_first_chunk:
-                                raise TimeoutError(
-                                    f"Stream from {provider_type} ({self.profile.model}) timed out waiting for first token after {int(chunk_timeout)}s"
-                                )
-                            raise TimeoutError(
-                                f"Stream idle watchdog triggered: no response received for {int(idle_timeout)}s"
-                            )
+                    if not line.startswith("data: ") or line == "data: [DONE]":
+                        continue
+                    try:
+                        data = json.loads(line[6:])
+                    except json.JSONDecodeError:
+                        continue
 
-                        if not line.startswith("data: ") or line == "data: [DONE]":
-                            continue
-                        try:
-                            data = json.loads(line[6:])
-                        except json.JSONDecodeError:
-                            continue
+                    choice = data.get("choices", [{}])[0]
+                    delta = choice.get("delta", {})
+                    finish_reason = choice.get("finish_reason") or finish_reason
 
-                        choice = data.get("choices", [{}])[0]
-                        delta = choice.get("delta", {})
-
-                        # 1. Capture reasoning / thoughts (Ollama, DeepSeek, OpenCode)
-                        reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content")
-                        if reasoning_delta and on_thought:
+                    # 1. Capture reasoning / thoughts (Ollama, DeepSeek, OpenCode)
+                    reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content")
+                    if reasoning_delta:
+                        thought_chunks.append(reasoning_delta)
+                        if on_thought:
                             await on_thought(
                                 AgentThoughtEvent(delta=reasoning_delta, session_id=session_id)
                             )
 
-                        # 2. Capture tool calls (OpenAI format)
-                        tool_calls_delta = delta.get("tool_calls")
-                        if tool_calls_delta:
-                            for tc in tool_calls_delta:
-                                idx = tc.get("index", 0)
-                                while len(captured_tool_calls) <= idx:
-                                    captured_tool_calls.append({"name": "", "arguments": ""})
-                                fn = tc.get("function", {})
-                                if "name" in fn:
-                                    captured_tool_calls[idx]["name"] += fn["name"]
-                                if "arguments" in fn:
-                                    captured_tool_calls[idx]["arguments"] += fn["arguments"]
+                    # 2. Capture tool calls (OpenAI format)
+                    tool_calls_delta = delta.get("tool_calls")
+                    if tool_calls_delta and tools:
+                        for tc in tool_calls_delta:
+                            idx = tc.get("index", 0)
+                            while len(captured_tool_calls) <= idx:
+                                captured_tool_calls.append({"id": "", "name": "", "arguments": ""})
+                            if tc.get("id"):
+                                captured_tool_calls[idx]["id"] += tc["id"]
+                            fn = tc.get("function", {})
+                            if "name" in fn:
+                                captured_tool_calls[idx]["name"] += fn["name"]
+                            if "arguments" in fn:
+                                captured_tool_calls[idx]["arguments"] += fn["arguments"]
 
-                        # 3. Capture visible text content
-                        text_delta = delta.get("content", "")
-                        if text_delta:
-                            accumulated.append(text_delta)
-                            if on_message:
-                                await on_message(
-                                    AgentMessageEvent(delta=text_delta, session_id=session_id)
-                                )
-
-            # Process captured tool calls if any and loop back for synthesized response
-            if captured_tool_calls:
-                asst_tool_calls = []
-                tool_results = []
-                for i, tc in enumerate(captured_tool_calls):
-                    call_name = tc.get("name", "").strip()
-                    call_args_str = tc.get("arguments", "").strip()
-                    if not call_name:
-                        continue
-                    try:
-                        call_args = json.loads(call_args_str) if call_args_str else {}
-                    except Exception:
-                        call_args = {"raw": call_args_str}
-
-                    call_id = f"call_{turn_count}_{i}_{call_name}"
-                    asst_tool_calls.append({
-                        "id": call_id,
-                        "type": "function",
-                        "function": {"name": call_name, "arguments": call_args_str or "{}"},
-                    })
-
-                    if on_tool_call:
-                        await on_tool_call(
-                            AgentToolCallEvent(
-                                call_id=call_id,
-                                tool_name=call_name,
-                                args=call_args,
-                                session_id=session_id,
+                    # 3. Capture visible text content
+                    text_delta = delta.get("content", "")
+                    if text_delta:
+                        streamed_text_chunks.append(text_delta)
+                        if on_message:
+                            await on_message(
+                                AgentMessageEvent(delta=text_delta, session_id=session_id)
                             )
-                        )
 
-                    tool_result = await execute_tool_call(
-                        name=call_name,
-                        args=call_args,
-                        workspace_path=workspace_path,
-                        session_id=session_id,
-                        on_approval=on_approval,
-                        yolo=self.profile.execution.yolo,
-                        rule_engine=self.profile.get_rule_engine(),
-                    )
-                    breadcrumb = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
-                    accumulated.append(breadcrumb)
-                    if on_message:
-                        await on_message(
-                            AgentMessageEvent(delta=breadcrumb, session_id=session_id)
-                        )
+        formatted_tool_calls = []
+        for i, tc in enumerate(captured_tool_calls):
+            call_name = tc.get("name", "").strip()
+            call_args_str = tc.get("arguments", "").strip()
+            if not call_name:
+                continue
+            call_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}_{call_name}"
+            try:
+                call_args = json.loads(call_args_str) if call_args_str else {}
+            except Exception:
+                call_args = {"raw": call_args_str}
 
-                    tool_results.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": tool_result,
-                    })
+            formatted_tool_calls.append({
+                "id": call_id,
+                "name": call_name,
+                "arguments": call_args,
+            })
 
-                if asst_tool_calls:
-                    messages.append({"role": "assistant", "tool_calls": asst_tool_calls})
-                    messages.extend(tool_results)
-                    payload["messages"] = messages
-                    logger.info("[%s] Tool executed; continuing turn loop for model answer synthesis (step %d)", provider_type, turn_count)
-                    continue
-                else:
-                    break
-            else:
-                break
+        return ModelTurnOutput(
+            content="".join(streamed_text_chunks),
+            thought="".join(thought_chunks) if thought_chunks else None,
+            tool_calls=formatted_tool_calls,
+            finish_reason=finish_reason,
+        )
 
-        result_text = "".join(accumulated).strip()
-        if not result_text:
-            raise RuntimeError(
-                f"Provider '{provider_type}' ({self.profile.model}) returned an empty response"
-            )
-
-        # Persist conversation turn
-        try:
-            await self.storage.add_conversation_message(conv_id, "user", prompt)
-            await self.storage.add_conversation_message(conv_id, "assistant", result_text)
-        except Exception as e:
-            logger.debug("Failed to persist conversation turn: %s", e)
-
-        return result_text
-
-    async def _stream_anthropic(
+    async def _generate_anthropic_turn(
         self,
+        messages: list[dict[str, Any]],
+        tools: Optional[list[dict[str, Any]]],
         session_id: str,
-        conv_id: str,
-        prompt: str,
-        api_key: str,
-        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]],
         on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
-    ) -> str:
+        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
+        **kwargs: Any,
+    ) -> ModelTurnOutput:
+        api_key = self.profile.get_api_key() or ""
         url = self.profile.base_url or self.BASE_URLS["anthropic"]
         if not url.endswith("/messages"):
             url = f"{url.rstrip('/')}/messages"
@@ -343,18 +280,19 @@ class UnifiedApiProvider(BaseProvider):
             "content-type": "application/json",
         }
 
-        # Multi-turn history retrieval
-        history = await self.storage.get_conversation_messages(conv_id, limit=20)
-        messages: list[dict[str, Any]] = []
-        for turn in history:
-            role = "assistant" if turn["role"] == "assistant" else "user"
-            messages.append({"role": role, "content": turn["content"]})
-        messages.append({"role": "user", "content": prompt})
+        anthropic_messages: list[dict[str, Any]] = []
+        for turn in messages:
+            if turn.get("role") == "system":
+                continue
+            anthropic_messages.append({
+                "role": "assistant" if turn["role"] == "assistant" else "user",
+                "content": turn.get("content", ""),
+            })
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.profile.model or "claude-3-7-sonnet-20250219",
             "system": self.profile.effective_system_prompt(),
-            "messages": messages,
+            "messages": anthropic_messages,
             "max_tokens": self.profile.max_tokens,
             "temperature": self.profile.temperature,
             "stream": True,
@@ -363,10 +301,11 @@ class UnifiedApiProvider(BaseProvider):
         effort = self.profile.reasoning_effort
         if effort:
             payload["thinking"] = {"type": "enabled", "budget_tokens": _EFFORT_BUDGET.get(effort.lower(), 8192)}
-            payload["temperature"] = 1  # Anthropic requires temperature=1 when thinking is enabled
+            payload["temperature"] = 1
 
         idle_timeout = float(config.stream_idle_timeout_seconds)
-        accumulated: list[str] = []
+        streamed_text_chunks: list[str] = []
+        thought_chunks: list[str] = []
         is_first_chunk = True
 
         timeout = httpx.Timeout(120.0, connect=20.0, read=idle_timeout)
@@ -411,32 +350,25 @@ class UnifiedApiProvider(BaseProvider):
                     event_type = event_data.get("type")
                     if event_type == "content_block_delta":
                         delta_obj = event_data.get("delta", {})
-                        # Handle reasoning/thinking delta
                         if delta_obj.get("type") == "thinking_delta":
                             th_text = delta_obj.get("thinking", "")
-                            if th_text and on_thought:
-                                await on_thought(
-                                    AgentThoughtEvent(delta=th_text, session_id=session_id)
-                                )
-                        # Handle text delta
+                            if th_text:
+                                thought_chunks.append(th_text)
+                                if on_thought:
+                                    await on_thought(
+                                        AgentThoughtEvent(delta=th_text, session_id=session_id)
+                                    )
                         elif delta_obj.get("type") == "text_delta" or "text" in delta_obj:
                             delta = delta_obj.get("text", "")
                             if delta:
-                                accumulated.append(delta)
+                                streamed_text_chunks.append(delta)
                                 if on_message:
                                     await on_message(
                                         AgentMessageEvent(delta=delta, session_id=session_id)
                                     )
 
-        result_text = "".join(accumulated).strip()
-        if not result_text:
-            raise RuntimeError(f"Anthropic model '{self.profile.model}' returned an empty response")
-
-        # Persist conversation turn
-        try:
-            await self.storage.add_conversation_message(conv_id, "user", prompt)
-            await self.storage.add_conversation_message(conv_id, "assistant", result_text)
-        except Exception as e:
-            logger.debug("Failed to persist conversation turn: %s", e)
-
-        return result_text
+        return ModelTurnOutput(
+            content="".join(streamed_text_chunks),
+            thought="".join(thought_chunks) if thought_chunks else None,
+            tool_calls=[],
+        )

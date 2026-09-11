@@ -78,6 +78,7 @@ DEFAULT_TOOL_POLICIES: dict[str, PolicyAction] = {
     "find_by_name": PolicyAction.ALLOW,
     "read_url_content": PolicyAction.ALLOW,
     "search_web": PolicyAction.ALLOW,
+    "search_files": PolicyAction.ALLOW,
     "git_status": PolicyAction.ALLOW,
     "write_file": PolicyAction.ASK,
     "write_to_file": PolicyAction.ASK,
