@@ -168,3 +168,12 @@ async def test_execute_tool_call_gates_ask(tmp_path: Path):
         rule_engine=engine,
     )
     mock_approval.assert_called_once()
+
+
+def test_worktree_paths_auto_approved():
+    engine = RuleEngine()
+    worktree_file = Path("/home/zlnew/www/personal/repo/maulness/.worktrees/pipe-task123/src/cache.py")
+    policy, reason = engine.evaluate("write_file", {"path": str(worktree_file), "content": "x = 1"})
+    assert policy == PolicyAction.ALLOW
+    assert "auto-approved" in reason
+

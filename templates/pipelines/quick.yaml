@@ -12,7 +12,6 @@ stages:
       {prompt}
       {rework_feedback_block}
       Implement the requested changes in repository '{repo_name}', verify with local tests, and inspect diffs.
-    requires_approval: true
 
   - name: review
     profile: reviewer

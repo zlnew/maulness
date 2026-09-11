@@ -17,11 +17,14 @@ from maulness.core.models import (
     TaskStatus,
 )
 from maulness.core.pipeline import PipelineOrchestrator
+from maulness.core.pipelines import PipelineStage
 from maulness.core.profiles import ProfileManager
 from maulness.core.providers.factory import get_provider_for_profile
 from maulness.core.runner import TaskRunner
 from maulness.discord.views import ApprovalView
 from maulness.storage.db import StorageManager
+
+import json
 
 import subprocess
 import time
@@ -1260,9 +1263,9 @@ class MaulnessBot(commands.Bot):
 
         @self.tree.command(name="pipeline", description="Execute a multi-stage Kanban pipeline (Planner -> Builder -> Reviewer)")
         @app_commands.describe(
-            repo="Target repository name",
-            title="Pipeline goal / headline",
             prompt="Detailed task requirements and instructions",
+            repo="Target repository name (optional, default inferred or maulness)",
+            title="Pipeline goal / headline (optional, auto-derived from prompt)",
             pipeline_name="Pipeline definition to execute (default: standard)",
             worktree="Run builder in an isolated git worktree",
             yolo="YOLO mode: bypass HITL approval on mutating actions",
@@ -1270,9 +1273,9 @@ class MaulnessBot(commands.Bot):
         @app_commands.choices(repo=REPO_CHOICES)
         async def pipeline_cmd(
             interaction: discord.Interaction,
-            repo: str,
-            title: str,
             prompt: str,
+            repo: Optional[str] = None,
+            title: Optional[str] = None,
             pipeline_name: Optional[str] = "standard",
             worktree: Optional[bool] = None,
             yolo: Optional[bool] = None,
@@ -1284,6 +1287,24 @@ class MaulnessBot(commands.Bot):
             effective_pipe_name = pipeline_name or "standard"
             effective_worktree = self.channel_worktree.get(interaction.channel_id, False) if worktree is None else worktree
             effective_yolo = self.channel_yolo.get(interaction.channel_id, False) if yolo is None else yolo
+
+            # Infer repository if omitted
+            effective_repo = repo
+            if not effective_repo:
+                if isinstance(interaction.channel, discord.Thread) and isinstance(interaction.channel.parent, discord.ForumChannel):
+                    for tag in interaction.channel.applied_tags:
+                        for choice in REPO_CHOICES:
+                            if tag.name.lower() == choice.value.lower():
+                                effective_repo = choice.value
+                                break
+                        if effective_repo:
+                            break
+            if not effective_repo:
+                effective_repo = "maulness"
+
+            # Infer title if omitted
+            first_line = prompt.strip().splitlines()[0].strip() if prompt and prompt.strip() else "Pipeline Task"
+            effective_title = title.strip() if title and title.strip() else first_line[:70]
 
             await interaction.response.defer()
 
@@ -1298,12 +1319,12 @@ class MaulnessBot(commands.Bot):
                 if isinstance(forum, discord.ForumChannel):
                     applied_tags = []
                     avail = {t.name.lower(): t for t in forum.available_tags}
-                    for tag_key in ("pipeline", "planning", repo.lower()):
+                    for tag_key in ("pipeline", "planning", effective_repo.lower()):
                         if tag_key in avail:
                             applied_tags.append(avail[tag_key])
                     thread_with_msg = await forum.create_thread(
-                        name=f"[{repo}] {title[:70]}",
-                        content=f"**Pipeline Kanban Task ({effective_pipe_name})**\n**Goal:** {title}\n> {prompt[:200]}",
+                        name=f"[{effective_repo}] {effective_title[:70]}",
+                        content=f"**Pipeline Kanban Task ({effective_pipe_name})**\n**Goal:** {effective_title}\n> {prompt[:200]}",
                         applied_tags=applied_tags,
                     )
                     exec_channel = thread_with_msg.thread
@@ -1313,19 +1334,60 @@ class MaulnessBot(commands.Bot):
                     )
 
             if not created_in_forum:
-                status_msg = await interaction.followup.send(f"**Launching Pipeline `{effective_pipe_name}` for `{title}` on `{repo}`...**")
+                status_msg = await interaction.followup.send(f"**Launching Pipeline `{effective_pipe_name}` for `{effective_title}` on `{effective_repo}`...**")
             else:
-                status_msg = await exec_channel.send(f"**Launching Pipeline `{effective_pipe_name}` for `{title}` on `{repo}`...**")
+                status_msg = await exec_channel.send(f"**Launching Pipeline `{effective_pipe_name}` for `{effective_title}` on `{effective_repo}`...**")
 
             thread_id = exec_channel.id if isinstance(exec_channel, discord.Thread) else None
             if isinstance(exec_channel, discord.Thread):
                 await self._update_forum_tags(exec_channel, "Planning")
+
+            start_time = time.time()
 
             async def on_thought(event: AgentThoughtEvent):
                 pass
 
             async def on_message(event: AgentMessageEvent):
                 pass
+
+            async def on_stage_start(stage: PipelineStage, current: int, total: int):
+                if isinstance(exec_channel, discord.Thread):
+                    await self._update_forum_tags(exec_channel, stage.name.title())
+
+                color_map = {
+                    "planning": 0x3B82F6,
+                    "building": 0xF59E0B,
+                    "review": 0x8B5CF6,
+                }
+                color = color_map.get(stage.name.lower(), 0x06B6D4)
+                embed = discord.Embed(
+                    title=f"Stage {current}/{total}: {stage.name.title()} ({stage.profile}) Started",
+                    description=f"**Goal:** {effective_title}",
+                    color=color,
+                )
+                if stage.use_worktree or effective_worktree:
+                    embed.add_field(name="Worktree Isolation", value="Active (isolated branch)", inline=True)
+                if stage.verification_gate:
+                    embed.add_field(name="Verification Gate", value=f"`{stage.verification_gate.command}`", inline=True)
+                await exec_channel.send(embed=embed)
+
+            async def on_stage_finish(stage: PipelineStage, stage_output: str):
+                embed = discord.Embed(
+                    title=f"Stage {stage.name.title()} Completed",
+                    color=0x10B981,
+                )
+                if stage_output and stage_output.strip():
+                    clean_text = format_discord_markdown(stage_output.strip())
+                    if len(clean_text) > 900:
+                        snippet = clean_text[:900] + "\n..."
+                    else:
+                        snippet = clean_text
+                    embed.add_field(
+                        name="Stage Output Excerpt",
+                        value=f"```markdown\n{snippet}\n```" if "```" not in snippet else snippet,
+                        inline=False,
+                    )
+                await exec_channel.send(embed=embed)
 
             async def on_approval(event: ApprovalRequestEvent) -> bool:
                 if effective_yolo:
@@ -1346,8 +1408,8 @@ class MaulnessBot(commands.Bot):
                 task_id = None
                 try:
                     task_record = await self.pipeline.run_pipeline(
-                        repo_name=repo,
-                        title=title,
+                        repo_name=effective_repo,
+                        title=effective_title,
                         prompt=prompt,
                         pipeline_name=effective_pipe_name,
                         discord_thread_id=thread_id,
@@ -1356,6 +1418,8 @@ class MaulnessBot(commands.Bot):
                         on_thought=on_thought,
                         on_message=on_message,
                         on_approval=on_approval,
+                        on_stage_start=on_stage_start,
+                        on_stage_finish=on_stage_finish,
                         auto_proceed=True,
                     )
                     task_id = task_record.id
@@ -1364,11 +1428,42 @@ class MaulnessBot(commands.Bot):
                         status_tag = "Done" if task_record.status == TaskStatus.DONE else "Failed"
                         await self._update_forum_tags(exec_channel, status_tag)
 
-                    await exec_channel.send(
-                        f"**Pipeline Completed for `{title}`!**\nStatus: `{task_record.status.value}`"
+                    duration_s = int(time.time() - start_time)
+                    mins, secs = divmod(duration_s, 60)
+                    time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+
+                    status_color = 0x10B981 if task_record.status == TaskStatus.DONE else 0xEF4444
+                    status_text = "Completed Successfully" if task_record.status == TaskStatus.DONE else "Failed"
+
+                    summary_embed = discord.Embed(
+                        title=f"Pipeline {status_text}: {effective_title}",
+                        color=status_color,
                     )
+                    summary_embed.add_field(name="Repository", value=f"`{effective_repo}`", inline=True)
+                    summary_embed.add_field(name="Task ID", value=f"`{task_record.id}`", inline=True)
+                    summary_embed.add_field(name="Duration", value=time_str, inline=True)
+                    summary_embed.add_field(name="Pipeline", value=f"`{effective_pipe_name}`", inline=True)
+                    summary_embed.add_field(name="Final Status", value=f"**`{task_record.status.value.upper()}`**", inline=True)
+
+                    # Extract reviewer scorecard from agent_events if available
+                    try:
+                        events = await self.storage.get_agent_events(task_record.id, limit=50)
+                        review_event = next(
+                            (e for e in reversed(events) if e.get("stage") == "review" and e.get("event_type") == "final_response"),
+                            None,
+                        )
+                        if review_event:
+                            p = review_event.get("event_payload")
+                            audit_text = p.get("content", "") if isinstance(p, dict) else str(p)
+                            if audit_text:
+                                clean_audit = format_discord_markdown(audit_text)
+                                summary_embed.add_field(name="Review Verdict", value=clean_audit[:1000], inline=False)
+                    except Exception as ev_err:
+                        logger.debug("Could not attach review event to summary embed: %s", ev_err)
+
+                    await exec_channel.send(embed=summary_embed)
                 except asyncio.CancelledError:
-                    logger.info("Pipeline %s cancelled via /stop", task_id or title)
+                    logger.info("Pipeline %s cancelled via /stop", task_id or effective_title)
                     await exec_channel.send("**Pipeline was stopped by user.**")
                 finally:
                     if task_id and task_id in self.active_tasks:

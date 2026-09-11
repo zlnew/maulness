@@ -29,7 +29,6 @@ stages:
       {plan}
       {rework_feedback_block}
       Execute the changes, inspect diffs, and run test suites to verify.
-    requires_approval: true
 
   - name: review
     profile: reviewer

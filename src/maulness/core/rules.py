@@ -70,6 +70,10 @@ DEFAULT_DENY_PATHS = [
     "/root/**",
 ]
 
+DEFAULT_ALLOW_PATHS = [
+    "**/.worktrees/**",
+]
+
 DEFAULT_TOOL_POLICIES: dict[str, PolicyAction] = {
     "view_file": PolicyAction.ALLOW,
     "read_file": PolicyAction.ALLOW,
@@ -190,7 +194,7 @@ class RuleEngine:
         self.ask_commands = list(dict.fromkeys(self.config.commands.ask))
 
         self.deny_paths = list(dict.fromkeys(DEFAULT_DENY_PATHS + self.config.paths.deny))
-        self.allow_paths = list(dict.fromkeys(self.config.paths.allow))
+        self.allow_paths = list(dict.fromkeys(DEFAULT_ALLOW_PATHS + self.config.paths.allow))
         self.ask_paths = list(dict.fromkeys(self.config.paths.ask))
 
         self.tool_policies = dict(DEFAULT_TOOL_POLICIES)
