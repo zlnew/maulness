@@ -484,4 +484,136 @@ class StorageManager:
             row = await cursor.fetchone()
             return row["summary"] if row else None
 
+    # ==========================================================================
+    # Kernel v2: Durable Event-Sourced Journal & Step Memoization
+    # ==========================================================================
+
+    async def record_agent_event(
+        self,
+        task_id: str,
+        stage: str,
+        step_index: int,
+        event_type: str,
+        payload: Any,
+        idempotency_key: Optional[str] = None,
+    ) -> int:
+        """Record an immutable event into the durable agent journal. Returns event ID."""
+        try:
+            payload_str = json.dumps(payload, default=str)
+        except Exception:
+            payload_str = json.dumps(str(payload))
+
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO agent_events (task_id, stage, step_index, event_type, event_payload, idempotency_key)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(idempotency_key) DO UPDATE SET
+                    event_payload = excluded.event_payload
+                """,
+                (task_id, stage, step_index, event_type, payload_str, idempotency_key),
+            )
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_agent_event_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> Optional[dict[str, Any]]:
+        """Lookup a previously memoized event by its deterministic idempotency key."""
+        if not idempotency_key:
+            return None
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, task_id, stage, step_index, event_type, event_payload, idempotency_key, created_at
+                FROM agent_events
+                WHERE idempotency_key = ?
+                """,
+                (idempotency_key,),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            p = row["event_payload"]
+            try:
+                payload_val = json.loads(p)
+            except Exception:
+                payload_val = p
+            return {
+                "id": row["id"],
+                "task_id": row["task_id"],
+                "stage": row["stage"],
+                "step_index": row["step_index"],
+                "event_type": row["event_type"],
+                "payload": payload_val,
+                "idempotency_key": row["idempotency_key"],
+                "created_at": row["created_at"],
+            }
+
+    async def get_agent_events(
+        self,
+        task_id: str,
+        stage: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Retrieve chronological event history for a task and optional stage."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            if stage:
+                cursor = await db.execute(
+                    """
+                    SELECT id, task_id, stage, step_index, event_type, event_payload, idempotency_key, created_at
+                    FROM agent_events
+                    WHERE task_id = ? AND stage = ?
+                    ORDER BY step_index ASC, id ASC
+                    LIMIT ?
+                    """,
+                    (task_id, stage, limit),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT id, task_id, stage, step_index, event_type, event_payload, idempotency_key, created_at
+                    FROM agent_events
+                    WHERE task_id = ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (task_id, limit),
+                )
+            rows = await cursor.fetchall()
+            events = []
+            for r in rows:
+                p = r["event_payload"]
+                try:
+                    payload_val = json.loads(p)
+                except Exception:
+                    payload_val = p
+                events.append({
+                    "id": r["id"],
+                    "task_id": r["task_id"],
+                    "stage": r["stage"],
+                    "step_index": r["step_index"],
+                    "event_type": r["event_type"],
+                    "payload": payload_val,
+                    "idempotency_key": r["idempotency_key"],
+                    "created_at": r["created_at"],
+                })
+            return events
+
+    async def get_latest_agent_step_index(self, task_id: str, stage: str) -> int:
+        """Get the highest recorded step index for a given task and stage (defaults to 0)."""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                SELECT COALESCE(MAX(step_index), 0)
+                FROM agent_events
+                WHERE task_id = ? AND stage = ?
+                """,
+                (task_id, stage),
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
 

@@ -72,4 +72,18 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_conv_messages_conv_id ON conversation_messages(conversation_id);
 
+-- Durable Event-Sourced Step Journal (Kernel v2)
+CREATE TABLE IF NOT EXISTS agent_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    step_index INTEGER NOT NULL,
+    event_type TEXT NOT NULL,       -- 'prompt', 'thought', 'tool_call', 'tool_result', 'gate_eval', 'checkpoint'
+    event_payload TEXT NOT NULL,    -- JSON string
+    idempotency_key TEXT UNIQUE,    -- SHA256(task_id:stage:step_index:event_type:payload_signature)
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_agent_events_task_stage ON agent_events(task_id, stage, step_index);
+CREATE INDEX IF NOT EXISTS idx_agent_events_idempotency ON agent_events(idempotency_key);
+
 
