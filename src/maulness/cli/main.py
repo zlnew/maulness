@@ -372,7 +372,7 @@ def task_list(limit: int = typer.Option(20, "-n", "--limit", help="Number of tas
         }.get(t.status.value, "white")
         table.add_row(
             t.id,
-            t.repo_name,
+            t.repo_name or "[dim]general[/dim]",
             t.mode.value,
             f"[{status_color}]{t.status.value}[/{status_color}]",
             t.title,
@@ -395,14 +395,21 @@ def task_show(task_id: str = typer.Argument(..., help="Task ID to inspect")):
         console.print(f"[red][x] Task '{task_id}' not found.[/red]")
         return
 
+    origin_str = f"{task.origin_platform}"
+    if task.origin_channel_id:
+        origin_str += f" (channel: {task.origin_channel_id}"
+        if task.origin_thread_id:
+            origin_str += f", thread: {task.origin_thread_id}"
+        origin_str += ")"
+
     console.print(
         Panel(
             f"[bold cyan]ID:[/bold cyan] {task.id}\n"
-            f"[bold cyan]Repository:[/bold cyan] {task.repo_name}\n"
-            f"[bold cyan]Workspace:[/bold cyan] {task.workspace_path}\n"
+            f"[bold cyan]Origin:[/bold cyan] {origin_str}\n"
+            f"[bold cyan]Repository:[/bold cyan] {task.repo_name or 'None (General)'}\n"
+            f"[bold cyan]Workspace:[/bold cyan] {task.workspace_path or 'None'}\n"
             f"[bold cyan]Mode:[/bold cyan] {task.mode.value}\n"
             f"[bold cyan]Status:[/bold cyan] {task.status.value}\n"
-            f"[bold cyan]Discord Thread:[/bold cyan] {task.discord_thread_id or 'None'}\n"
             f"[bold cyan]Title:[/bold cyan] {task.title}",
             title=f"Task Details — {task.id}",
             border_style="cyan",

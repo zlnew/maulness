@@ -1454,10 +1454,13 @@ class MaulnessBot(commands.Bot):
                 task_id = None
                 try:
                     task_record = await self.pipeline.run_pipeline(
-                        repo_name=effective_repo,
                         title=effective_title,
                         prompt=prompt,
+                        repo_name=effective_repo,
                         pipeline_name=effective_pipe_name,
+                        origin_platform="discord",
+                        origin_channel_id=str(exec_channel.id),
+                        origin_thread_id=str(thread_id) if thread_id else None,
                         discord_thread_id=thread_id,
                         use_worktree=effective_worktree,
                         yolo=effective_yolo,

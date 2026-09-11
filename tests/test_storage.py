@@ -42,7 +42,7 @@ async def test_storage_crud(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_storage_multiple_tasks_same_thread(tmp_path: Path):
-    """Verify that multiple tasks can share the same discord_thread_id without unique constraint violations."""
+    """Verify that multiple tasks can share the same thread/channel without unique constraint violations."""
     db_file = tmp_path / "test_multi_thread.db"
     storage = StorageManager(db_path=db_file)
     await storage.initialize()
@@ -53,7 +53,9 @@ async def test_storage_multiple_tasks_same_thread(tmp_path: Path):
         repo_name="horizonx",
         workspace_path="/tmp/ws",
         mode=TaskMode.MULTI,
-        discord_thread_id=987654321,
+        origin_platform="discord",
+        origin_channel_id="987654321",
+        origin_thread_id="987654321",
     )
     t2 = await storage.create_task(
         task_id="task_102",
@@ -61,10 +63,58 @@ async def test_storage_multiple_tasks_same_thread(tmp_path: Path):
         repo_name="horizonx",
         workspace_path="/tmp/ws",
         mode=TaskMode.MULTI,
-        discord_thread_id=987654321,
+        origin_platform="discord",
+        origin_channel_id="987654321",
+        origin_thread_id="987654321",
     )
+    assert t1.origin_channel_id == "987654321"
+    assert t2.origin_channel_id == "987654321"
     assert t1.discord_thread_id == 987654321
-    assert t2.discord_thread_id == 987654321
+
+
+@pytest.mark.asyncio
+async def test_storage_multi_platform_and_optional_repo(tmp_path: Path):
+    """Verify tasks without repository and tasks originating from Telegram/Slack/WhatsApp."""
+    db_file = tmp_path / "test_multi_platform.db"
+    storage = StorageManager(db_path=db_file)
+    await storage.initialize()
+
+    # Task without repo (general Q&A)
+    t_general = await storage.create_task(
+        task_id="task_general",
+        title="What is the meaning of life?",
+        repo_name=None,
+        workspace_path=None,
+        mode=TaskMode.DIRECT,
+        origin_platform="telegram",
+        origin_channel_id="-1001234567890",
+        origin_thread_id="42",
+    )
+    assert t_general.repo_name is None
+    assert t_general.workspace_path is None
+    assert t_general.origin_platform == "telegram"
+    assert t_general.origin_channel_id == "-1001234567890"
+    assert t_general.origin_thread_id == "42"
+
+    fetched = await storage.get_task("task_general")
+    assert fetched is not None
+    assert fetched.repo_name is None
+    assert fetched.origin_platform == "telegram"
+
+    # Multi-platform channel conversations
+    await storage.set_channel_conversation(
+        channel_id="C01234ABCD",
+        conversation_id="uuid-slack-001",
+        platform="slack",
+    )
+    await storage.set_channel_conversation(
+        channel_id="-1001234567890",
+        conversation_id="uuid-telegram-001",
+        platform="telegram",
+    )
+    assert await storage.get_channel_conversation("C01234ABCD", platform="slack") == "uuid-slack-001"
+    assert await storage.get_channel_conversation("-1001234567890", platform="telegram") == "uuid-telegram-001"
+    assert await storage.get_channel_conversation("C01234ABCD", platform="discord") is None
 
 
 @pytest.mark.asyncio

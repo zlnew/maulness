@@ -40,12 +40,15 @@ class TaskRunner:
 
     async def run_direct(
         self,
-        repo_name: str,
         prompt: str,
+        repo_name: Optional[str] = None,
         workspace_path: Optional[Path] = None,
         profile_name: str = "builder",
         session_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
+        origin_platform: str = "cli",
+        origin_channel_id: Optional[str | int] = None,
+        origin_thread_id: Optional[str | int] = None,
         use_worktree: bool = False,
         yolo: bool = False,
         on_init: Optional[Callable[[str], Coroutine]] = None,
@@ -59,9 +62,12 @@ class TaskRunner:
         await self.storage.initialize()
 
         profile = self.profile_manager.get_profile(profile_name)
-        fallback_workspace = Path(workspace_path).resolve() if workspace_path else config.resolve_repo_path(repo_name)
+        if repo_name:
+            fallback_workspace = Path(workspace_path).resolve() if workspace_path else config.resolve_repo_path(repo_name)
+        else:
+            fallback_workspace = Path(workspace_path).resolve() if workspace_path else config.workspace_root
         target_workspace = self.profile_manager.resolve_workspace_for_profile(profile, fallback_workspace)
-        effective_repo = target_workspace.name if target_workspace != fallback_workspace else repo_name
+        effective_repo = repo_name or (target_workspace.name if target_workspace != config.workspace_root else None)
         task_id = f"task_{uuid.uuid4().hex[:10]}"
 
         # Record task in database
@@ -71,6 +77,9 @@ class TaskRunner:
             repo_name=effective_repo,
             workspace_path=str(target_workspace),
             mode=TaskMode.DIRECT,
+            origin_platform=origin_platform,
+            origin_channel_id=origin_channel_id,
+            origin_thread_id=origin_thread_id,
         )
 
         session_rec_id = session_id or f"session_{uuid.uuid4().hex[:10]}"

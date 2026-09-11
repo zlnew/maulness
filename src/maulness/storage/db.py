@@ -48,63 +48,62 @@ class StorageManager:
         async with self._connect() as db:
             await db.execute("PRAGMA journal_mode = WAL;")
             await db.execute("PRAGMA synchronous = NORMAL;")
-            await db.executescript(schema_sql)
 
-            # Auto-migrate tasks table if discord_thread_id has legacy UNIQUE constraint
+            # If existing tasks table lacks origin_platform, drop legacy tables and recreate
             cursor = await db.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
             )
             row = await cursor.fetchone()
-            if row and "discord_thread_id INTEGER UNIQUE" in row[0]:
-                logger.info("Migrating tasks table: removing legacy UNIQUE constraint on discord_thread_id")
+            if row and "origin_platform" not in row[0]:
+                logger.info("Migrating storage: recreating tables with multi-platform schema")
                 await db.execute("PRAGMA foreign_keys = OFF;")
-                await db.execute(
-                    """
-                    CREATE TABLE tasks_migration (
-                        id TEXT PRIMARY KEY,
-                        discord_thread_id INTEGER,
-                        title TEXT NOT NULL,
-                        repo_name TEXT NOT NULL,
-                        workspace_path TEXT NOT NULL,
-                        mode TEXT CHECK(mode IN ('direct', 'multi')) NOT NULL,
-                        status TEXT CHECK(status IN ('planning', 'building', 'review', 'done', 'failed')) NOT NULL DEFAULT 'planning',
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                    """
-                )
-                await db.execute(
-                    "INSERT INTO tasks_migration SELECT id, discord_thread_id, title, repo_name, workspace_path, mode, status, created_at, updated_at FROM tasks;"
-                )
-                await db.execute("DROP TABLE tasks;")
-                await db.execute("ALTER TABLE tasks_migration RENAME TO tasks;")
-                await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_thread_id ON tasks(discord_thread_id);")
+                await db.execute("DROP TABLE IF EXISTS task_events;")
+                await db.execute("DROP TABLE IF EXISTS approvals;")
+                await db.execute("DROP TABLE IF EXISTS agent_sessions;")
+                await db.execute("DROP TABLE IF EXISTS channel_conversations;")
+                await db.execute("DROP TABLE IF EXISTS tasks;")
                 await db.execute("PRAGMA foreign_keys = ON;")
 
+            await db.executescript(schema_sql)
             await db.commit()
 
     async def create_task(
         self,
         task_id: str,
         title: str,
-        repo_name: str,
-        workspace_path: str,
-        mode: TaskMode,
+        repo_name: Optional[str] = None,
+        workspace_path: Optional[str] = None,
+        mode: TaskMode = TaskMode.DIRECT,
+        origin_platform: str = "cli",
+        origin_channel_id: Optional[str | int] = None,
+        origin_thread_id: Optional[str | int] = None,
         discord_thread_id: Optional[int] = None,
     ) -> TaskRecord:
         """Create a new task record in the database."""
+        eff_platform = origin_platform
+        eff_channel = str(origin_channel_id) if origin_channel_id is not None else None
+        eff_thread = str(origin_thread_id) if origin_thread_id is not None else None
+
+        if discord_thread_id is not None:
+            eff_platform = "discord"
+            eff_thread = str(discord_thread_id)
+            if not eff_channel:
+                eff_channel = str(discord_thread_id)
+
         async with self._connect() as db:
             await db.execute(
                 """
-                INSERT INTO tasks (id, discord_thread_id, title, repo_name, workspace_path, mode, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO tasks (id, title, repo_name, workspace_path, origin_platform, origin_channel_id, origin_thread_id, mode, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
-                    discord_thread_id,
                     title,
                     repo_name,
                     workspace_path,
+                    eff_platform,
+                    eff_channel,
+                    eff_thread,
                     mode.value,
                     TaskStatus.PLANNING.value,
                 ),
@@ -118,7 +117,9 @@ class StorageManager:
             workspace_path=workspace_path,
             mode=mode,
             status=TaskStatus.PLANNING,
-            discord_thread_id=discord_thread_id,
+            origin_platform=eff_platform,
+            origin_channel_id=eff_channel,
+            origin_thread_id=eff_thread,
         )
 
     async def update_task_status(self, task_id: str, status: TaskStatus):
@@ -133,6 +134,7 @@ class StorageManager:
     async def delete_task(self, task_id: str) -> bool:
         """Delete a task. Cascades to associated sessions, approvals, and events."""
         async with self._connect() as db:
+            await db.execute("DELETE FROM agent_events WHERE task_id = ?", (task_id,))
             cursor = await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
             await db.commit()
             return cursor.rowcount > 0
@@ -153,7 +155,9 @@ class StorageManager:
                 workspace_path=row["workspace_path"],
                 mode=TaskMode(row["mode"]),
                 status=TaskStatus(row["status"]),
-                discord_thread_id=row["discord_thread_id"],
+                origin_platform=row["origin_platform"] if "origin_platform" in row.keys() else "cli",
+                origin_channel_id=row["origin_channel_id"] if "origin_channel_id" in row.keys() else None,
+                origin_thread_id=row["origin_thread_id"] if "origin_thread_id" in row.keys() else None,
             )
 
     async def list_tasks(self, limit: int = 20) -> list[TaskRecord]:
@@ -172,7 +176,9 @@ class StorageManager:
                     workspace_path=row["workspace_path"],
                     mode=TaskMode(row["mode"]),
                     status=TaskStatus(row["status"]),
-                    discord_thread_id=row["discord_thread_id"],
+                    origin_platform=row["origin_platform"] if "origin_platform" in row.keys() else "cli",
+                    origin_channel_id=row["origin_channel_id"] if "origin_channel_id" in row.keys() else None,
+                    origin_thread_id=row["origin_thread_id"] if "origin_thread_id" in row.keys() else None,
                 )
                 for row in rows
             ]
@@ -281,17 +287,22 @@ class StorageManager:
         rpc_request_id: int,
         tool_name: str,
         tool_args: Any,
+        platform: str = "discord",
+        platform_message_id: Optional[str | int] = None,
         discord_message_id: Optional[int] = None,
     ) -> ApprovalRecord:
         """Create a new pending approval record."""
+        eff_platform = platform
+        eff_msg_id = str(platform_message_id or discord_message_id) if (platform_message_id or discord_message_id) is not None else None
         args_str = tool_args if isinstance(tool_args, str) else json.dumps(tool_args)
+
         async with self._connect() as db:
             await db.execute(
                 """
-                INSERT INTO approvals (id, task_id, rpc_request_id, tool_name, tool_args, status, discord_message_id)
-                VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                INSERT INTO approvals (id, task_id, rpc_request_id, tool_name, tool_args, status, platform, platform_message_id)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
-                (approval_id, task_id, rpc_request_id, tool_name, args_str, discord_message_id),
+                (approval_id, task_id, rpc_request_id, tool_name, args_str, eff_platform, eff_msg_id),
             )
             await db.commit()
 
@@ -302,7 +313,8 @@ class StorageManager:
             tool_name=tool_name,
             tool_args=args_str,
             status=ApprovalStatus.PENDING,
-            discord_message_id=discord_message_id,
+            platform=eff_platform,
+            platform_message_id=eff_msg_id,
         )
 
     async def update_approval_status(
@@ -337,7 +349,8 @@ class StorageManager:
                 tool_name=row["tool_name"],
                 tool_args=row["tool_args"],
                 status=ApprovalStatus(row["status"]),
-                discord_message_id=row["discord_message_id"],
+                platform=row["platform"] if "platform" in row.keys() else "discord",
+                platform_message_id=row["platform_message_id"] if "platform_message_id" in row.keys() else (str(row["discord_message_id"]) if "discord_message_id" in row.keys() and row["discord_message_id"] else None),
             )
 
     async def list_approvals(
@@ -364,7 +377,8 @@ class StorageManager:
                     tool_name=row["tool_name"],
                     tool_args=row["tool_args"],
                     status=ApprovalStatus(row["status"]),
-                    discord_message_id=row["discord_message_id"],
+                    platform=row["platform"] if "platform" in row.keys() else "discord",
+                    platform_message_id=row["platform_message_id"] if "platform_message_id" in row.keys() else (str(row["discord_message_id"]) if "discord_message_id" in row.keys() and row["discord_message_id"] else None),
                 )
                 for row in rows
             ]
@@ -421,49 +435,76 @@ class StorageManager:
                 "tasks_failed": c2.rowcount,
             }
 
-    async def get_channel_conversation(self, channel_id: int) -> Optional[str]:
+    async def get_channel_conversation(
+        self, channel_id: str | int, platform: str = "discord"
+    ) -> Optional[str]:
         """Fetch active conversation UUID for a channel."""
+        cid = str(channel_id)
         async with self._connect() as db:
             async with db.execute(
-                "SELECT conversation_id FROM channel_conversations WHERE channel_id = ?",
-                (channel_id,),
+                "SELECT conversation_id FROM channel_conversations WHERE platform = ? AND channel_id = ?",
+                (platform, cid),
             ) as cursor:
                 row = await cursor.fetchone()
                 return row[0] if row else None
 
     async def set_channel_conversation(
-        self, channel_id: int, conversation_id: str, profile_name: Optional[str] = None
+        self,
+        channel_id: str | int,
+        conversation_id: str,
+        profile_name: Optional[str] = None,
+        platform: str = "discord",
     ):
         """Save or update active conversation UUID for a channel."""
+        cid = str(channel_id)
         async with self._connect() as db:
             await db.execute(
                 """
-                INSERT INTO channel_conversations (channel_id, conversation_id, profile_name, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(channel_id) DO UPDATE SET
+                INSERT INTO channel_conversations (platform, channel_id, conversation_id, profile_name, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(platform, channel_id) DO UPDATE SET
                     conversation_id = excluded.conversation_id,
                     profile_name = excluded.profile_name,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (channel_id, conversation_id, profile_name),
+                (platform, cid, conversation_id, profile_name or "default"),
             )
             await db.commit()
 
-    async def clear_channel_conversation(self, channel_id: int):
+    async def clear_channel_conversation(
+        self, channel_id: str | int, platform: str = "discord"
+    ):
         """Clear active conversation UUID for a channel."""
+        cid = str(channel_id)
         async with self._connect() as db:
             await db.execute(
-                "DELETE FROM channel_conversations WHERE channel_id = ?",
-                (channel_id,),
+                "DELETE FROM channel_conversations WHERE platform = ? AND channel_id = ?",
+                (platform, cid),
             )
             await db.commit()
 
-    async def list_channel_conversations(self) -> dict[int, str]:
+    async def list_channel_conversations(
+        self, platform: Optional[str] = None
+    ) -> dict[Any, str]:
         """List all active channel conversation UUID mappings."""
+        query = "SELECT channel_id, conversation_id FROM channel_conversations"
+        params = ()
+        if platform:
+            query += " WHERE platform = ?"
+            params = (platform,)
+
         async with self._connect() as db:
-            async with db.execute("SELECT channel_id, conversation_id FROM channel_conversations") as cursor:
+            async with db.execute(query, params) as cursor:
                 rows = await cursor.fetchall()
-                return {row[0]: row[1] for row in rows}
+                res: dict[Any, str] = {}
+                for row in rows:
+                    ch_key: Any = row[0]
+                    try:
+                        ch_key = int(ch_key)
+                    except ValueError:
+                        pass
+                    res[ch_key] = row[1]
+                return res
 
     async def add_conversation_message(
         self, conversation_id: str, role: str, content: str

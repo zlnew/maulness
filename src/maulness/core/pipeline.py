@@ -106,12 +106,15 @@ class PipelineOrchestrator:
 
     async def run_pipeline(
         self,
-        repo_name: str,
         title: str,
         prompt: str,
+        repo_name: Optional[str] = None,
         workspace_path: Optional[Path] = None,
         pipeline_name: str = "standard",
         pipeline_def: Optional[PipelineDefinition] = None,
+        origin_platform: str = "cli",
+        origin_channel_id: Optional[str | int] = None,
+        origin_thread_id: Optional[str | int] = None,
         discord_thread_id: Optional[int] = None,
         use_worktree: bool = False,
         yolo: bool = False,
@@ -127,7 +130,7 @@ class PipelineOrchestrator:
         """Execute a declarative pipeline across defined stages."""
         await self.storage.initialize()
         effective_auto_proceed = auto_proceed or yolo
-        target_workspace = Path(workspace_path).resolve() if workspace_path else config.resolve_repo_path(repo_name)
+        target_workspace = Path(workspace_path).resolve() if workspace_path else (config.resolve_repo_path(repo_name) if repo_name else config.workspace_root)
         task_id = f"task_{uuid.uuid4().hex[:10]}"
 
         # Load pipeline definition
@@ -140,6 +143,9 @@ class PipelineOrchestrator:
             repo_name=repo_name,
             workspace_path=str(target_workspace),
             mode=TaskMode.MULTI,
+            origin_platform=origin_platform,
+            origin_channel_id=origin_channel_id,
+            origin_thread_id=origin_thread_id,
             discord_thread_id=discord_thread_id,
         )
 

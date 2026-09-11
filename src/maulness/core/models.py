@@ -57,13 +57,24 @@ class ApprovalRequestEvent:
 class TaskRecord:
     id: str
     title: str
-    repo_name: str
-    workspace_path: str
-    mode: TaskMode
-    status: TaskStatus
-    discord_thread_id: Optional[int] = None
+    repo_name: Optional[str] = None
+    workspace_path: Optional[str] = None
+    mode: TaskMode = TaskMode.DIRECT
+    status: TaskStatus = TaskStatus.PLANNING
+    origin_platform: str = "cli"
+    origin_channel_id: Optional[str] = None
+    origin_thread_id: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+    @property
+    def discord_thread_id(self) -> Optional[int]:
+        if self.origin_platform == "discord" and self.origin_thread_id:
+            try:
+                return int(self.origin_thread_id)
+            except ValueError:
+                return None
+        return None
 
 
 @dataclass
@@ -86,7 +97,17 @@ class ApprovalRecord:
     tool_name: str
     tool_args: str
     status: ApprovalStatus = ApprovalStatus.PENDING
-    discord_message_id: Optional[int] = None
+    platform: str = "discord"
+    platform_message_id: Optional[str] = None
     created_at: Optional[datetime] = None
     resolved_at: Optional[datetime] = None
+
+    @property
+    def discord_message_id(self) -> Optional[int]:
+        if self.platform == "discord" and self.platform_message_id:
+            try:
+                return int(self.platform_message_id)
+            except ValueError:
+                return None
+        return None
 
