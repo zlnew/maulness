@@ -1,6 +1,7 @@
 import asyncio
 import io
 import logging
+import re
 from typing import Any, Optional
 import discord
 from discord import app_commands
@@ -42,6 +43,38 @@ def get_git_branch(workspace_path: Path) -> str:
         return res.stdout.strip() or "detached"
     except Exception:
         return "none"
+
+
+LATEX_REPLACEMENTS: list[tuple[re.Pattern, str]] = [
+    # Arrows
+    (re.compile(r"\$\s*\\(?:rightarrow|to)\s*\$|\\(?:rightarrow|to)\b"), "->"),
+    (re.compile(r"\$\s*\\leftarrow\s*\$|\\leftarrow\b"), "<-"),
+    (re.compile(r"\$\s*\\leftrightarrow\s*\$|\\leftrightarrow\b"), "<->"),
+    (re.compile(r"\$\s*\\Rightarrow\s*\$|\\Rightarrow\b"), "=>"),
+    (re.compile(r"\$\s*\\Leftarrow\s*\$|\\Leftarrow\b"), "<="),
+    (re.compile(r"\$\s*\\Leftrightarrow\s*\$|\\Leftrightarrow\b"), "<=>"),
+    # Comparisons & Relations
+    (re.compile(r"\$\s*\\approx\s*\$|\\approx\b"), "~"),
+    (re.compile(r"\$\s*\\(?:ne|neq)\s*\$|\\(?:ne|neq)\b"), "!="),
+    (re.compile(r"\$\s*\\(?:le|leq)\s*\$|\\(?:le|leq)\b"), "<="),
+    (re.compile(r"\$\s*\\(?:ge|geq)\s*\$|\\(?:ge|geq)\b"), ">="),
+    # Arithmetic & symbols
+    (re.compile(r"\$\s*\\times\s*\$|\\times\b"), "*"),
+    (re.compile(r"\$\s*\\pm\s*\$|\\pm\b"), "+/-"),
+    (re.compile(r"\$\s*\\cdot\s*\$|\\cdot\b"), "*"),
+    (re.compile(r"\$\s*\\(?:dots|cdots|ldots)\s*\$|\\(?:dots|cdots|ldots)\b"), "..."),
+]
+
+
+def format_discord_markdown(text: str) -> str:
+    """Translate LaTeX math notations into clean ASCII for Discord rendering."""
+    if not text:
+        return text
+    result = text
+    for pattern, replacement in LATEX_REPLACEMENTS:
+        result = pattern.sub(replacement, result)
+    result = re.sub(r"\$\s*(->|<-|<->|=>|<=|<=>|~|!=|\*|\+/-|\.\.\.)\s*\$", r"\1", result)
+    return result
 
 
 class MaulnessBot(commands.Bot):
@@ -277,22 +310,23 @@ class MaulnessBot(commands.Bot):
             nonlocal current_msg
             if not text.strip():
                 return
-            if len(text) <= 1950:
+            clean_text = format_discord_markdown(text)
+            if len(clean_text) <= 1950:
                 try:
-                    await current_msg.edit(content=text)
+                    await current_msg.edit(content=clean_text)
                     if is_overflow and not is_final:
                         current_msg = await channel.send("…")
                         active_msgs.append(current_msg)
                 except Exception as e:
                     logger.warning("Failed to edit Discord message: %s", e)
                     try:
-                        current_msg = await channel.send(text)
+                        current_msg = await channel.send(clean_text)
                         active_msgs.append(current_msg)
                     except Exception as send_err:
                         logger.error("Failed to send replacement Discord message: %s", send_err)
             else:
-                first_part = text[:1950]
-                rest = text[1950:]
+                first_part = clean_text[:1950]
+                rest = clean_text[1950:]
                 try:
                     await current_msg.edit(content=first_part)
                 except Exception as e:
@@ -580,7 +614,7 @@ class MaulnessBot(commands.Bot):
             inline=False,
         )
         embed.add_field(
-            name="ℹ️ Reference",
+            name="Reference",
             value="• `/help`: Show this command reference",
             inline=False,
         )
@@ -630,14 +664,14 @@ class MaulnessBot(commands.Bot):
             elif cmd_name == "stop":
                 target_id = self.channel_tasks.get(message.channel.id)
                 if not target_id or target_id not in self.active_tasks:
-                    await message.channel.send("ℹ️ No active task or agent execution running in this channel. (Use `/new` to reset context)")
+                    await message.channel.send("[Info] No active task or agent execution running in this channel. (Use `/new` to reset context)")
                     return
                 async_task = self.active_tasks.get(target_id)
                 if async_task and not async_task.done():
                     async_task.cancel()
                     await message.channel.send(f"**Execution `{target_id}` stopped immediately by user.**")
                 else:
-                    await message.channel.send(f"ℹ️ Execution `{target_id}` is already finished.")
+                    await message.channel.send(f"[Info] Execution `{target_id}` is already finished.")
                 return
 
             elif cmd_name == "interrupt":
@@ -930,7 +964,7 @@ class MaulnessBot(commands.Bot):
             target_id = task_id or self.channel_tasks.get(interaction.channel_id)
             if not target_id or target_id not in self.active_tasks:
                 await interaction.response.send_message(
-                    "ℹ️ No active task or agent execution running in this channel. (Use `/new` to reset context)",
+                    "[Info] No active task or agent execution running in this channel. (Use `/new` to reset context)",
                     ephemeral=True,
                 )
                 return
@@ -950,7 +984,7 @@ class MaulnessBot(commands.Bot):
                 )
             else:
                 await interaction.response.send_message(
-                    f"ℹ️ Execution `{target_id}` is already finished.", ephemeral=True
+                    f"[Info] Execution `{target_id}` is already finished.", ephemeral=True
                 )
 
         @self.tree.command(name="stop", description="Stop running task or prompt stream immediately")

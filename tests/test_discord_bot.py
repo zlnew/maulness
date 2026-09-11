@@ -246,3 +246,20 @@ async def test_bot_on_message_text_commands(tmp_path: Path):
     msg.channel.send.assert_called_once()
 
 
+def test_format_discord_markdown():
+    from maulness.discord.bot import format_discord_markdown
+
+    sample = "Discord $\\rightarrow$ maulness $\\rightarrow$ Antigravity $\\rightarrow$ Filesystem"
+    assert format_discord_markdown(sample) == "Discord -> maulness -> Antigravity -> Filesystem"
+
+    backticked = "`pipeline: git $\\rightarrow$ build`"
+    assert format_discord_markdown(backticked) == "`pipeline: git -> build`"
+
+    comparisons = "x $\\le$ 10 and y $\\ge$ 20, z $\\approx$ 5"
+    assert format_discord_markdown(comparisons) == "x <= 10 and y >= 20, z ~ 5"
+
+    math_symbols = "3 $\\times$ 4 $\\pm$ 0.1"
+    assert format_discord_markdown(math_symbols) == "3 * 4 +/- 0.1"
+
+
+
