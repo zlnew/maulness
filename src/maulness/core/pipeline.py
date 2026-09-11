@@ -24,6 +24,7 @@ from maulness.core.pipelines import (
     check_is_pass_verdict,
     check_is_rework_verdict,
 )
+from maulness.core.kernel.gates import DeterministicGateRunner
 from maulness.core.profiles import ProfileManager
 from maulness.core.providers.factory import get_provider_for_profile
 from maulness.core.worktree import WorktreeManager
@@ -94,11 +95,14 @@ class PipelineOrchestrator:
         profile_manager: Optional[ProfileManager] = None,
         pipeline_manager: Optional[PipelineManager] = None,
         worktree_manager: Optional[WorktreeManager] = None,
+        gate_runner: Optional[DeterministicGateRunner] = None,
     ):
         self.storage = storage or StorageManager(db_path=config.db_path)
         self.profile_manager = profile_manager or ProfileManager()
         self.pipeline_manager = pipeline_manager or PipelineManager()
         self.worktree_manager = worktree_manager or WorktreeManager()
+        self.gate_runner = gate_runner or DeterministicGateRunner(storage=self.storage)
+
 
     async def run_pipeline(
         self,
@@ -157,7 +161,11 @@ class PipelineOrchestrator:
                 "rework_feedback_block": "",
                 "reviewer_feedback": "",
                 "task_ledger": "",
+                "gate_verification": "",
+                "gate_failures": "",
+                "last_gate_result": {},
             }
+
 
             total_stages = len(definition.stages)
             stage_map = {s.name: i for i, s in enumerate(definition.stages)}
@@ -238,34 +246,133 @@ class PipelineOrchestrator:
                     )
                     context["git_diff"] = diff_res.stdout or "(No uncommitted diffs detected)"
 
-                # Render stage prompt
-                stage_prompt = self.pipeline_manager.render_stage_prompt(stage, context)
+                if stage.is_gate_only:
+                    stage_output = ""
+                else:
+                    # Render stage prompt
+                    stage_prompt = self.pipeline_manager.render_stage_prompt(stage, context)
 
-                profile = self.profile_manager.get_profile(stage.profile)
-                stage_workspace = self.profile_manager.resolve_workspace_for_profile(
-                    profile, effective_workspace
-                )
-                provider = get_provider_for_profile(profile)
-
-                exec_count = stage_executions.get(stage.name, 0)
-                stage_executions[stage.name] = exec_count + 1
-                session_suffix = f"_r{exec_count}" if exec_count > 0 else ""
-                session_id = f"{task_id}_{stage.name}{session_suffix}"
-
-                try:
-                    stage_output = await provider.run(
-                        session_id=session_id,
-                        prompt=stage_prompt,
-                        workspace_path=stage_workspace,
-                        on_thought=on_thought,
-                        on_message=on_message,
-                        on_approval=on_approval if stage.requires_approval else None,
+                    profile = self.profile_manager.get_profile(stage.profile)
+                    stage_workspace = self.profile_manager.resolve_workspace_for_profile(
+                        profile, effective_workspace
                     )
-                except Exception as e:
-                    if verbose:
-                        console.print(f"[red][x] Stage '{stage.name}' failed: {e}[/red]")
-                    await self.storage.update_task_status(task_id, TaskStatus.FAILED)
-                    raise
+                    provider = get_provider_for_profile(profile)
+
+                    exec_count = stage_executions.get(stage.name, 0)
+                    stage_executions[stage.name] = exec_count + 1
+                    session_suffix = f"_r{exec_count}" if exec_count > 0 else ""
+                    session_id = f"{task_id}_{stage.name}{session_suffix}"
+
+                    try:
+                        stage_output = await provider.run(
+                            session_id=session_id,
+                            prompt=stage_prompt,
+                            workspace_path=stage_workspace,
+                            on_thought=on_thought,
+                            on_message=on_message,
+                            on_approval=on_approval if stage.requires_approval else None,
+                        )
+                    except Exception as e:
+                        if verbose:
+                            console.print(f"[red][x] Stage '{stage.name}' failed: {e}[/red]")
+                        await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                        raise
+
+                # Execute deterministic verification gate if configured
+                if stage.verification_gate:
+                    gate_cfg = stage.verification_gate
+                    gate_cwd = (
+                        Path(gate_cfg.cwd).resolve()
+                        if gate_cfg.cwd
+                        else effective_workspace
+                    )
+                    step_idx = await self.storage.get_latest_agent_step_index(task_id, stage.name) + 1
+                    gate_res = await self.gate_runner.run_gate(
+                        task_id=task_id,
+                        stage=stage.name,
+                        step_index=step_idx,
+                        command=gate_cfg.command,
+                        workspace_path=gate_cwd,
+                        timeout_seconds=gate_cfg.timeout_seconds,
+                        sandbox_mode=gate_cfg.sandbox_mode,
+                    )
+                    context["last_gate_result"] = gate_res.to_dict()
+
+                    if not gate_res.passed:
+                        context["gate_failures"] = gate_res.to_feedback_prompt()
+                        if verbose:
+                            console.print(
+                                f"[bold red][!] Deterministic verification gate failed for stage '{stage.name}': "
+                                f"{gate_res.summary}[/bold red]"
+                            )
+
+                        if gate_cfg.auto_rework_on_fail:
+                            cur_reworks = rework_counts.get(stage.name, 0)
+                            max_reworks = stage.transitions.max_reworks if stage.transitions else 2
+                            rework_target = (
+                                stage.transitions.rework_target
+                                if stage.transitions and stage.transitions.rework_target
+                                else stage.name
+                            )
+
+                            if cur_reworks < max_reworks:
+                                rework_counts[stage.name] = cur_reworks + 1
+                                if verbose:
+                                    console.print(
+                                        f"[bold yellow][!] Deterministic verification triggered REWORK "
+                                        f"(Cycle {rework_counts[stage.name]}/{max_reworks}). "
+                                        f"Looping back to '{rework_target}'...[/bold yellow]"
+                                    )
+
+                                if stage.transitions and stage.transitions.rollback_on_rework:
+                                    target_cp = stage_checkpoints.get(rework_target)
+                                    if target_cp:
+                                        rolled_back = self.worktree_manager.rollback_to_checkpoint(
+                                            effective_workspace, target_cp
+                                        )
+                                        if rolled_back and verbose:
+                                            console.print(
+                                                f"[bold yellow][!] Rolled back working tree to pre-stage checkpoint "
+                                                f"{target_cp[:8]} for clean rework restart.[/bold yellow]"
+                                            )
+
+                                context["reviewer_feedback"] = gate_res.to_feedback_prompt()
+                                context["rework_feedback_block"] = (
+                                    f"\n## Deterministic Verification Gate Failure "
+                                    f"(Rework Cycle {rework_counts[stage.name]}/{max_reworks})\n"
+                                    f"{gate_res.to_feedback_prompt()}\n\n"
+                                )
+
+                                if rework_target in stage_map:
+                                    stage_index = stage_map[rework_target]
+                                    continue
+                                else:
+                                    if verbose:
+                                        console.print(
+                                            f"[red][x] Rework target '{rework_target}' not found in pipeline stages.[/red]"
+                                        )
+                                    await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                                    return await self.storage.get_task(task_id) or task
+                            else:
+                                if verbose:
+                                    console.print(
+                                        f"[bold red][x] Maximum rework attempts reached ({max_reworks}) "
+                                        f"for deterministic verification on '{stage.name}'. Halting pipeline.[/bold red]"
+                                    )
+                                await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                                return await self.storage.get_task(task_id) or task
+                    else:
+                        context["gate_verification"] = (
+                            f"Deterministic verification gate passed for `{gate_cfg.command}`: {gate_res.summary}"
+                        )
+                        context["gate_failures"] = ""
+                        if verbose:
+                            console.print(
+                                f"[bold green][+] Deterministic verification gate passed: {gate_res.summary}[/bold green]"
+                            )
+                        if stage.is_gate_only:
+                            stage_output = gate_res.summary
+
 
                 # Store output in context
                 context["previous_output"] = stage_output
