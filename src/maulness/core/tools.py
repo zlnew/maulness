@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
@@ -148,6 +149,61 @@ def clear_turn_tools(session_id: str) -> None:
     _ACTIVE_TURN_HISTORY.pop(session_id, None)
 
 
+def build_sandboxed_command(
+    cmd: str,
+    cwd: Path,
+    sandbox_mode: Optional[str] = None,
+) -> tuple[list[str] | str, bool]:
+    """Wrap shell command in unprivileged Bubblewrap (bwrap) sandbox if available.
+
+    Returns:
+        (command_or_args, is_shell)
+    """
+    from maulness.config import config
+
+    mode = (sandbox_mode or getattr(config, "sandbox_mode", "auto")).lower().strip()
+    if mode in ("none", "false", "0", "disabled"):
+        return cmd, True
+
+    bwrap_path = shutil.which("bwrap")
+    if not bwrap_path:
+        if mode == "bwrap":
+            logger.warning("bwrap requested but binary not found; falling back to direct host execution")
+        return cmd, True
+
+    workspace = cwd.resolve()
+    home = Path.home()
+    ssh_path = home / ".ssh"
+    gnupg_path = home / ".gnupg"
+
+    bwrap_args = [
+        bwrap_path,
+        "--ro-bind", "/", "/",
+        "--dev", "/dev",
+        "--proc", "/proc",
+        "--tmpfs", "/tmp",
+    ]
+
+    # Mask sensitive credentials
+    if ssh_path.exists():
+        bwrap_args.extend(["--tmpfs", str(ssh_path)])
+    if gnupg_path.exists():
+        bwrap_args.extend(["--tmpfs", str(gnupg_path)])
+
+    # Bind workspace read-write and set working directory & context
+    bwrap_args.extend([
+        "--bind", str(workspace), str(workspace),
+        "--chdir", str(workspace),
+        "--unshare-all",
+        "--share-net",
+        "--setenv", "HOME", str(workspace),
+        "--",
+        "/bin/bash", "-c", cmd,
+    ])
+
+    return bwrap_args, False
+
+
 async def execute_tool_call(
     name: str,
     args: dict[str, Any],
@@ -156,6 +212,7 @@ async def execute_tool_call(
     on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
     yolo: bool = False,
     rule_engine: Optional[RuleEngine] = None,
+    sandbox_mode: Optional[str] = None,
 ) -> str:
     """Execute a supported tool action with execution rules and HITL approval gating."""
     cwd = workspace_path or Path.cwd()
@@ -198,6 +255,7 @@ async def execute_tool_call(
         policy=policy,
         on_approval=on_approval,
         yolo=yolo,
+        sandbox_mode=sandbox_mode,
     )
 
     if session_id and not res.startswith("Execution cancelled"):
@@ -222,6 +280,7 @@ async def _execute_tool_action(
     policy: PolicyAction,
     on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]],
     yolo: bool,
+    sandbox_mode: Optional[str] = None,
 ) -> str:
     """Internal tool action dispatcher."""
 
@@ -245,16 +304,18 @@ async def _execute_tool_action(
                 return f"Execution cancelled: User rejected command '{cmd}'."
 
         try:
+            cmd_target, is_shell = build_sandboxed_command(cmd, cwd, sandbox_mode=sandbox_mode)
             loop = asyncio.get_running_loop()
             proc = await loop.run_in_executor(
                 None,
                 lambda: subprocess.run(
-                    cmd,
-                    shell=True,
+                    cmd_target,
+                    shell=is_shell,
                     cwd=str(cwd),
                     capture_output=True,
                     text=True,
                     timeout=60,
+                    env=os.environ.copy(),
                 ),
             )
             output = proc.stdout

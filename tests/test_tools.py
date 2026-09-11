@@ -218,3 +218,64 @@ def test_clean_relay_completion_tags():
     assert "[STATUS: COMPLETE]" not in cleaned
 
 
+def test_build_sandboxed_command(tmp_path: Path):
+    import shutil
+    from maulness.core.tools import build_sandboxed_command
+
+    # 1. Disabled mode
+    cmd_disabled, is_shell = build_sandboxed_command("echo hello", tmp_path, sandbox_mode="none")
+    assert cmd_disabled == "echo hello"
+    assert is_shell is True
+
+    # 2. bwrap / auto mode
+    if shutil.which("bwrap"):
+        args, is_shell_bwrap = build_sandboxed_command("echo hello", tmp_path, sandbox_mode="bwrap")
+        assert is_shell_bwrap is False
+        assert isinstance(args, list)
+        assert "--ro-bind" in args
+        assert "/" in args
+        assert "--bind" in args
+        assert str(tmp_path.resolve()) in args
+        assert "--unshare-all" in args
+        assert "--share-net" in args
+
+
+@pytest.mark.asyncio
+async def test_execute_run_command_sandboxed_blocks_external_write(tmp_path: Path):
+    import shutil
+    from maulness.core.tools import execute_tool_call
+
+    if not shutil.which("bwrap"):
+        pytest.skip("bwrap not installed on test runner")
+
+    # Attempt to write outside workspace to /home/zlnew/leak_test.txt (or /etc/leak_test)
+    res = await execute_tool_call(
+        name="run_command",
+        args={"command": "touch /home/zlnew/leak_test_blocked.txt"},
+        workspace_path=tmp_path,
+        yolo=True,
+        sandbox_mode="bwrap",
+    )
+    assert "Read-only file system" in res
+    assert not Path("/home/zlnew/leak_test_blocked.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_execute_run_command_sandboxed_allows_workspace_write(tmp_path: Path):
+    import shutil
+    from maulness.core.tools import execute_tool_call
+
+    if not shutil.which("bwrap"):
+        pytest.skip("bwrap not installed on test runner")
+
+    res = await execute_tool_call(
+        name="run_command",
+        args={"command": "touch inside_test.txt && ls"},
+        workspace_path=tmp_path,
+        yolo=True,
+        sandbox_mode="bwrap",
+    )
+    assert "inside_test.txt" in res
+    assert (tmp_path / "inside_test.txt").exists()
+
+

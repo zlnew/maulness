@@ -241,6 +241,7 @@ class GeminiProvider(BaseProvider):
                                             on_approval=on_approval,
                                             yolo=self.profile.execution.yolo,
                                             rule_engine=self.profile.get_rule_engine(),
+                                            sandbox_mode=self.profile.sandbox_mode,
                                         )
                                         tool_desc = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
                                         accumulated.append(tool_desc)

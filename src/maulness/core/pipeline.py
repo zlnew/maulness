@@ -15,7 +15,14 @@ from maulness.core.models import (
     TaskRecord,
     TaskStatus,
 )
-from maulness.core.pipelines import PipelineDefinition, PipelineManager, PipelineStage
+from maulness.core.pipelines import (
+    PipelineDefinition,
+    PipelineManager,
+    PipelineStage,
+    check_is_fail_verdict,
+    check_is_pass_verdict,
+    check_is_rework_verdict,
+)
 from maulness.core.profiles import ProfileManager
 from maulness.core.providers.factory import get_provider_for_profile
 from maulness.core.worktree import WorktreeManager
@@ -93,11 +100,20 @@ class PipelineOrchestrator:
                 "prompt": prompt,
                 "git_diff": "",
                 "previous_output": "",
+                "rework_feedback_block": "",
+                "reviewer_feedback": "",
             }
 
             total_stages = len(definition.stages)
+            stage_map = {s.name: i for i, s in enumerate(definition.stages)}
+            rework_counts: dict[str, int] = {}
+            stage_executions: dict[str, int] = {}
 
-            for idx, stage in enumerate(definition.stages, start=1):
+            stage_index = 0
+            while stage_index < total_stages:
+                stage = definition.stages[stage_index]
+                display_idx = stage_index + 1
+
                 # Check gate before stage begins if specified
                 if stage.gate and not effective_auto_proceed:
                     proceed = True
@@ -127,11 +143,11 @@ class PipelineOrchestrator:
 
                 if verbose:
                     console.print(
-                        f"\n[bold cyan]── Stage {idx}/{total_stages}: {stage.name.title()} ({stage.profile}) ──[/bold cyan]"
+                        f"\n[bold cyan]── Stage {display_idx}/{total_stages}: {stage.name.title()} ({stage.profile}) ──[/bold cyan]"
                     )
 
                 if on_stage_start:
-                    await on_stage_start(stage, idx, total_stages)
+                    await on_stage_start(stage, display_idx, total_stages)
 
                 # If stage requires git diff, refresh it now
                 if stage.requires_diff:
@@ -152,9 +168,14 @@ class PipelineOrchestrator:
                 )
                 provider = get_provider_for_profile(profile)
 
+                exec_count = stage_executions.get(stage.name, 0)
+                stage_executions[stage.name] = exec_count + 1
+                session_suffix = f"_r{exec_count}" if exec_count > 0 else ""
+                session_id = f"{task_id}_{stage.name}{session_suffix}"
+
                 try:
                     stage_output = await provider.run(
-                        session_id=f"{task_id}_{stage.name}",
+                        session_id=session_id,
                         prompt=stage_prompt,
                         workspace_path=stage_workspace,
                         on_thought=on_thought,
@@ -177,6 +198,67 @@ class PipelineOrchestrator:
 
                 if verbose:
                     console.print(f"[green]Stage '{stage.name}' complete.[/green]")
+
+                # Evaluate transitions
+                if stage.transitions:
+                    # 1. Rework check
+                    if stage.transitions.rework_target and check_is_rework_verdict(stage_output):
+                        cur_reworks = rework_counts.get(stage.name, 0)
+                        if cur_reworks < stage.transitions.max_reworks:
+                            rework_counts[stage.name] = cur_reworks + 1
+                            target_name = stage.transitions.rework_target
+                            if target_name in stage_map:
+                                if verbose:
+                                    console.print(
+                                        f"[bold yellow][!] Stage '{stage.name}' requested REWORK "
+                                        f"(Cycle {rework_counts[stage.name]}/{stage.transitions.max_reworks}). "
+                                        f"Looping back to '{target_name}'...[/bold yellow]"
+                                    )
+                                context["reviewer_feedback"] = stage_output
+                                context["rework_feedback_block"] = (
+                                    f"\n## Reviewer Feedback (Rework Cycle {rework_counts[stage.name]}/{stage.transitions.max_reworks})\n"
+                                    f"{stage_output}\n\n"
+                                    f"Address all issues highlighted in the review feedback above.\n"
+                                )
+                                stage_index = stage_map[target_name]
+                                continue
+                            else:
+                                if verbose:
+                                    console.print(
+                                        f"[red][x] Rework target '{target_name}' not found in pipeline stages.[/red]"
+                                    )
+                                await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                                return await self.storage.get_task(task_id) or task
+                        else:
+                            if verbose:
+                                console.print(
+                                    f"[bold red][x] Maximum rework attempts reached ({stage.transitions.max_reworks}) "
+                                    f"for stage '{stage.name}'. Halting pipeline for user steering.[/bold red]"
+                                )
+                            await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                            return await self.storage.get_task(task_id) or task
+
+                    # 2. Fail check
+                    if stage.transitions.fail_target and check_is_fail_verdict(stage_output):
+                        target_name = stage.transitions.fail_target
+                        if target_name in stage_map:
+                            stage_index = stage_map[target_name]
+                            continue
+                        else:
+                            await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                            return await self.storage.get_task(task_id) or task
+
+                    # 3. Explicit pass target check
+                    if stage.transitions.pass_target:
+                        target_name = stage.transitions.pass_target
+                        if target_name in stage_map:
+                            context["rework_feedback_block"] = ""
+                            stage_index = stage_map[target_name]
+                            continue
+
+                # Normal sequential progression
+                context["rework_feedback_block"] = ""
+                stage_index += 1
 
             # All stages finished successfully
             await self.storage.update_task_status(task_id, TaskStatus.DONE)

@@ -65,6 +65,7 @@ class ExecutionConfig(BaseModel):
     rules: ExecutionRulesConfig = Field(default_factory=ExecutionRulesConfig)
     max_tool_turns: Optional[int] = None
     max_relays: Optional[int] = None
+    sandbox: Optional[str] = None
 
 
 class FallbackItem(BaseModel):
@@ -206,6 +207,12 @@ class Profile(BaseModel):
         if self.execution and self.execution.max_relays is not None:
             return self.execution.max_relays
         return config.max_relays
+
+    @property
+    def sandbox_mode(self) -> str:
+        if self.execution and self.execution.sandbox is not None:
+            return str(self.execution.sandbox)
+        return config.sandbox_mode
 
     @property
     def fallbacks(self) -> list[dict[str, Any]]:

@@ -27,7 +27,7 @@ stages:
 
       Approved Plan:
       {plan}
-
+      {rework_feedback_block}
       Execute the changes, inspect diffs, and run test suites to verify.
     requires_approval: true
 
@@ -36,6 +36,9 @@ stages:
     status: review
     output_key: review_audit
     requires_diff: true
+    transitions:
+      rework_target: building
+      max_reworks: 2
     prompt: |
       Review the following changes made for task '{title}':
 
@@ -44,4 +47,4 @@ stages:
       {git_diff}
       ```
 
-      Provide an audit scorecard: PASS or REWORK with reasons.
+      Provide an audit scorecard: [DECISION: PASS] or [DECISION: REWORK] with reasons.

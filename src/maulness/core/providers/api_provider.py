@@ -316,6 +316,7 @@ class UnifiedApiProvider(BaseProvider):
                             on_approval=on_approval,
                             yolo=self.profile.execution.yolo,
                             rule_engine=self.profile.get_rule_engine(),
+                            sandbox_mode=self.profile.sandbox_mode,
                         )
                         breadcrumb = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
                         accumulated.append(breadcrumb)
@@ -417,6 +418,7 @@ class UnifiedApiProvider(BaseProvider):
                             on_approval=on_approval,
                             yolo=self.profile.execution.yolo,
                             rule_engine=self.profile.get_rule_engine(),
+                            sandbox_mode=self.profile.sandbox_mode,
                         )
                         real_breadcrumb = format_lean_tool_breadcrumb(call_name, call_args, tool_result)
                         if streamed_text_chunks:
