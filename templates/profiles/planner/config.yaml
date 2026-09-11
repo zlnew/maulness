@@ -9,7 +9,7 @@ identity:
 
 agent:
   provider: gemini
-  model: gemini-3.5-flash
+  model: gemini-3.6-flash
   reasoning_effort: high
 
 parameters:
@@ -22,11 +22,7 @@ execution:
 resilience:
   fallbacks:
     - provider: gemini
-      model: gemini-3.5-flash-lite
-      reasoning_effort: high
-    - provider: ollama
-      model: deepseek-v4-flash:cloud
-      base_url: http://localhost:11434/v1
+      model: gemini-3.8-flash
     - provider: ollama
       model: gemma4:31b-cloud
       base_url: http://localhost:11434/v1

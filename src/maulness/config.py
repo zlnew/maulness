@@ -40,7 +40,7 @@ class Config:
         )
 
         # Gemini API Key (Optional)
-        self.gemini_api_key: Optional[str] = os.getenv("GEMINI_API_KEY")
+        self.gemini_api_key: Optional[str] = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
         # Streaming & Execution Watchdog
         self.stream_idle_timeout_seconds: float = float(

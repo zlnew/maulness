@@ -192,3 +192,21 @@ def test_fallback_reasoning_effort_propagated():
     fb_profile = provider.fallbacks[0].profile
     assert fb_profile.reasoning_effort == "medium"
     assert fb_profile.provider == "anthropic"
+
+
+def test_profile_inherits_root_env(tmp_path, monkeypatch):
+    """Profiles without a local .env should inherit base environment keys."""
+    from maulness.config import config
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text("GOOGLE_API_KEY=shared-google-key-123\n", encoding="utf-8")
+    monkeypatch.setattr(config, "config_dir", config_dir)
+
+    prof_dir = tmp_path / "profiles" / "planner_test"
+    prof_dir.mkdir(parents=True)
+    (prof_dir / "config.yaml").write_text("identity:\n  name: planner_test\nagent:\n  provider: gemini", encoding="utf-8")
+
+    pm = ProfileManager(profiles_dir=tmp_path / "profiles")
+    profile = pm.get_profile("planner_test")
+
+    assert profile.get_api_key() == "shared-google-key-123"

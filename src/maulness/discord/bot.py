@@ -224,7 +224,6 @@ class MaulnessBot(commands.Bot):
                 interaction.channel_id,
                 interaction.user.id,
             )
-        await super().on_interaction(interaction)
 
     def resolve_profile_for_channel(self, channel_id: int, parent_id: Optional[int] = None) -> Optional[Any]:
         """Find the matching profile from self.profiles for a given channel or thread."""
@@ -1330,8 +1329,10 @@ class MaulnessBot(commands.Bot):
                                 break
                         if effective_repo:
                             break
-            if not effective_repo:
-                effective_repo = "maulness"
+
+            repo_label = effective_repo or "[general]"
+            repo_desc = f" on `{effective_repo}`" if effective_repo else ""
+            repo_prefix = f"[{effective_repo}] " if effective_repo else ""
 
             # Infer title if omitted
             first_line = prompt.strip().splitlines()[0].strip() if prompt and prompt.strip() else "Pipeline Task"
@@ -1356,11 +1357,14 @@ class MaulnessBot(commands.Bot):
                 if isinstance(target_parent, discord.ForumChannel):
                     applied_tags = []
                     avail = {t.name.lower(): t for t in target_parent.available_tags}
-                    for tag_key in ("pipeline", "planning", effective_repo.lower()):
+                    tag_keys = ["pipeline", "planning"]
+                    if effective_repo:
+                        tag_keys.append(effective_repo.lower())
+                    for tag_key in tag_keys:
                         if tag_key in avail:
                             applied_tags.append(avail[tag_key])
                     thread_with_msg = await target_parent.create_thread(
-                        name=f"[{effective_repo}] {effective_title[:70]}",
+                        name=f"{repo_prefix}{effective_title[:70]}",
                         content=f"**Pipeline Kanban Task ({effective_pipe_name})**\n**Goal:** {effective_title}\n> {prompt[:200]}",
                         applied_tags=applied_tags,
                     )
@@ -1371,7 +1375,7 @@ class MaulnessBot(commands.Bot):
                     )
                 elif isinstance(target_parent, discord.TextChannel):
                     exec_channel = await target_parent.create_thread(
-                        name=f"[{effective_repo}] {effective_title[:70]}",
+                        name=f"{repo_prefix}{effective_title[:70]}",
                         type=discord.ChannelType.public_thread,
                     )
                     created_in_forum = True
@@ -1380,9 +1384,9 @@ class MaulnessBot(commands.Bot):
                     )
 
             if not created_in_forum:
-                status_msg = await interaction.followup.send(f"**Launching Pipeline `{effective_pipe_name}` for `{effective_title}` on `{effective_repo}`...**")
+                status_msg = await interaction.followup.send(f"**Launching Pipeline `{effective_pipe_name}` for `{effective_title}`{repo_desc}...**")
             else:
-                status_msg = await exec_channel.send(f"**Launching Pipeline `{effective_pipe_name}` for `{effective_title}` on `{effective_repo}`...**")
+                status_msg = await exec_channel.send(f"**Launching Pipeline `{effective_pipe_name}` for `{effective_title}`{repo_desc}...**")
 
             thread_id = exec_channel.id if isinstance(exec_channel, discord.Thread) else None
             if isinstance(exec_channel, discord.Thread):
@@ -1488,15 +1492,30 @@ class MaulnessBot(commands.Bot):
                         title=f"Pipeline {status_text}: {effective_title}",
                         color=status_color,
                     )
-                    summary_embed.add_field(name="Repository", value=f"`{effective_repo}`", inline=True)
+                    summary_embed.add_field(name="Repository", value=f"`{repo_label}`", inline=True)
                     summary_embed.add_field(name="Task ID", value=f"`{task_record.id}`", inline=True)
                     summary_embed.add_field(name="Duration", value=time_str, inline=True)
                     summary_embed.add_field(name="Pipeline", value=f"`{effective_pipe_name}`", inline=True)
                     summary_embed.add_field(name="Final Status", value=f"**`{task_record.status.value.upper()}`**", inline=True)
 
-                    # Extract reviewer scorecard from agent_events if available
+                    # Extract reviewer scorecard and worktree branch from agent_events if available
                     try:
                         events = await self.storage.get_agent_events(task_record.id, limit=50)
+                        branch_event = next(
+                            (e for e in reversed(events) if e.get("event_type") == "worktree_branch"),
+                            None,
+                        )
+                        if branch_event:
+                            bp = branch_event.get("event_payload")
+                            branch_name = bp.get("branch") if isinstance(bp, dict) else str(bp)
+                            if branch_name:
+                                summary_embed.add_field(name="Git Branch", value=f"`{branch_name}`", inline=True)
+                                summary_embed.add_field(
+                                    name="Inspect / Merge",
+                                    value=f"`git checkout {branch_name}` or `git merge {branch_name}`",
+                                    inline=False,
+                                )
+
                         review_event = next(
                             (e for e in reversed(events) if e.get("stage") == "review" and e.get("event_type") == "final_response"),
                             None,
@@ -1508,7 +1527,7 @@ class MaulnessBot(commands.Bot):
                                 clean_audit = format_discord_markdown(audit_text)
                                 summary_embed.add_field(name="Review Verdict", value=clean_audit[:1000], inline=False)
                     except Exception as ev_err:
-                        logger.debug("Could not attach review event to summary embed: %s", ev_err)
+                        logger.debug("Could not attach review/branch events to summary embed: %s", ev_err)
 
                     await exec_channel.send(embed=summary_embed)
                 except asyncio.CancelledError:

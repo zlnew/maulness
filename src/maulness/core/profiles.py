@@ -253,7 +253,13 @@ class Profile(BaseModel):
         if prov in ("openai_compatible", "opencode", "opencode_go", "opencode_zen"):
             return self.env_vars.get("OPENCODE_API_KEY") or os.getenv("OPENCODE_API_KEY") or self.env_vars.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
         if prov in ("gemini", "antigravity_sdk"):
-            return self.env_vars.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            return (
+                self.env_vars.get("GOOGLE_API_KEY")
+                or self.env_vars.get("GEMINI_API_KEY")
+                or os.getenv("GOOGLE_API_KEY")
+                or os.getenv("GEMINI_API_KEY")
+                or config.gemini_api_key
+            )
 
         return None
 
@@ -355,7 +361,16 @@ class ProfileManager:
         if name in profiles:
             return profiles[name]
 
-        # If not found, return fallback default profile
+        # If not found, return fallback default profile with inherited base environment
+        base_env: dict[str, str] = {}
+        root_env = config.config_dir / ".env"
+        if root_env.exists():
+            base_env.update({k: v for k, v in dotenv_values(root_env).items() if v is not None})
+        else:
+            default_env = config.config_dir / "profiles" / "default" / ".env"
+            if default_env.exists():
+                base_env.update({k: v for k, v in dotenv_values(default_env).items() if v is not None})
+
         return Profile(
             identity=IdentityConfig(name=name, description="Ephemeral default fallback profile"),
             agent=AgentConfig(
@@ -363,6 +378,7 @@ class ProfileManager:
                 model="gemini-3.6-flash",
                 command="agy" if name in ("default", "builder") else None,
             ),
+            env_vars=base_env,
         )
 
     def resolve_workspace_for_profile(self, profile: Profile, fallback_workspace: Path) -> Path:
@@ -423,9 +439,17 @@ class ProfileManager:
                     user_content = root_user.read_text(encoding="utf-8").strip()
 
             env_vars: dict[str, str] = {}
+            root_env = config.config_dir / ".env"
+            if root_env.exists():
+                env_vars.update({k: v for k, v in dotenv_values(root_env).items() if v is not None})
+            else:
+                default_env = config.config_dir / "profiles" / "default" / ".env"
+                if default_env.exists():
+                    env_vars.update({k: v for k, v in dotenv_values(default_env).items() if v is not None})
+
             env_file = profile_dir / ".env"
             if env_file.exists():
-                env_vars = {k: v for k, v in dotenv_values(env_file).items() if v is not None}
+                env_vars.update({k: v for k, v in dotenv_values(env_file).items() if v is not None})
 
             skills_dir = profile_dir / "skills"
             if not skills_dir.exists():

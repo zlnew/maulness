@@ -112,9 +112,10 @@ class WorktreeManager:
         repo_path: Path,
         branch_prefix: str = "maulness-task",
         base_commit: str = "HEAD",
-        delete_branch: bool = True,
+        delete_branch: bool = False,
+        auto_commit: bool = True,
     ) -> Generator[Path, None, None]:
-        """Context manager providing an isolated git worktree that automatically cleans up."""
+        """Context manager providing an isolated git worktree that snapshots changes and preserves the branch."""
         if not self.is_git_repo(repo_path):
             yield repo_path
             return
@@ -129,6 +130,28 @@ class WorktreeManager:
 
         try:
             yield worktree_dir
+            # Snapshot any uncommitted or untracked changes before teardown
+            if auto_commit and worktree_dir.exists():
+                try:
+                    status_res = subprocess.run(
+                        ["git", "status", "--porcelain"],
+                        cwd=str(worktree_dir),
+                        capture_output=True,
+                        text=True,
+                    )
+                    if status_res.returncode == 0 and status_res.stdout.strip():
+                        subprocess.run(
+                            ["git", "add", "-A"],
+                            cwd=str(worktree_dir),
+                            capture_output=True,
+                        )
+                        subprocess.run(
+                            ["git", "commit", "-m", f"chore(pipeline): snapshot changes for {branch_name}"],
+                            cwd=str(worktree_dir),
+                            capture_output=True,
+                        )
+                except Exception as ex:
+                    logger.debug("Worktree auto-commit failed: %s", ex)
         finally:
             self.remove_worktree(
                 repo_path=repo_path,

@@ -486,13 +486,45 @@ class PipelineOrchestrator:
             fetched = await self.storage.get_task(task_id)
             return fetched or task
 
-        effective_use_worktree = use_worktree or any(s.use_worktree for s in definition.stages)
-        if effective_use_worktree:
+        if use_worktree is not None:
+            effective_use_worktree = use_worktree
+        else:
+            effective_use_worktree = any(s.use_worktree for s in definition.stages)
+
+        if effective_use_worktree and self.worktree_manager.is_git_repo(target_workspace):
             with self.worktree_manager.isolated_worktree(
                 target_workspace, branch_prefix=f"pipe-{task_id[:6]}"
             ) as wt_path:
                 if verbose:
                     console.print(f"[dim]Running pipeline in isolated worktree: {wt_path}[/dim]")
-                return await _execute_stages(wt_path)
+
+                wt_branch = None
+                try:
+                    b_res = subprocess.run(
+                        ["git", "branch", "--show-current"],
+                        cwd=str(wt_path),
+                        capture_output=True,
+                        text=True,
+                    )
+                    if b_res.returncode == 0 and b_res.stdout.strip():
+                        wt_branch = b_res.stdout.strip()
+                except Exception:
+                    pass
+
+                result = await _execute_stages(wt_path)
+
+                if wt_branch:
+                    try:
+                        await self.storage.record_agent_event(
+                            task_id=task_id,
+                            stage="pipeline",
+                            step_index=0,
+                            event_type="worktree_branch",
+                            payload={"branch": wt_branch},
+                        )
+                    except Exception as ev_err:
+                        logger.debug("Failed to record worktree_branch event: %s", ev_err)
+
+                return result
         else:
             return await _execute_stages(target_workspace)

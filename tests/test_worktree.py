@@ -80,3 +80,33 @@ def test_checkpoint_and_rollback(tmp_path: Path):
     assert readme.read_text() == "# Test Repo\n"
     assert not new_file.exists()
 
+
+def test_isolated_worktree_auto_commits_and_preserves_branch(tmp_path: Path):
+    repo_path = setup_git_repo(tmp_path / "preserve_repo")
+    wm = WorktreeManager()
+
+    captured_wt_path = None
+    created_branch = None
+    with wm.isolated_worktree(repo_path, branch_prefix="preserve-test", delete_branch=False) as wt_path:
+        captured_wt_path = wt_path
+        # Get branch name
+        b_res = subprocess.run(["git", "branch", "--show-current"], cwd=str(wt_path), capture_output=True, text=True)
+        created_branch = b_res.stdout.strip()
+        assert created_branch.startswith("preserve-test-")
+
+        # Write untracked and modified files
+        (wt_path / "docs").mkdir()
+        (wt_path / "docs" / "research.md").write_text("# Preserved Research Notes\n")
+
+    # 1. Directory must be deleted
+    assert not captured_wt_path.exists()
+
+    # 2. Branch must still exist in git repository
+    branches_res = subprocess.run(["git", "branch"], cwd=str(repo_path), capture_output=True, text=True)
+    assert created_branch in branches_res.stdout
+
+    # 3. Checkout branch and verify committed file content
+    subprocess.run(["git", "checkout", created_branch], cwd=str(repo_path), check=True, capture_output=True)
+    assert (repo_path / "docs" / "research.md").exists()
+    assert (repo_path / "docs" / "research.md").read_text() == "# Preserved Research Notes\n"
+
