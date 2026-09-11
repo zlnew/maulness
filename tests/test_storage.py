@@ -41,6 +41,33 @@ async def test_storage_crud(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_storage_multiple_tasks_same_thread(tmp_path: Path):
+    """Verify that multiple tasks can share the same discord_thread_id without unique constraint violations."""
+    db_file = tmp_path / "test_multi_thread.db"
+    storage = StorageManager(db_path=db_file)
+    await storage.initialize()
+
+    t1 = await storage.create_task(
+        task_id="task_101",
+        title="First Task",
+        repo_name="horizonx",
+        workspace_path="/tmp/ws",
+        mode=TaskMode.MULTI,
+        discord_thread_id=987654321,
+    )
+    t2 = await storage.create_task(
+        task_id="task_102",
+        title="Second Task",
+        repo_name="horizonx",
+        workspace_path="/tmp/ws",
+        mode=TaskMode.MULTI,
+        discord_thread_id=987654321,
+    )
+    assert t1.discord_thread_id == 987654321
+    assert t2.discord_thread_id == 987654321
+
+
+@pytest.mark.asyncio
 async def test_storage_sessions(tmp_path: Path):
     db_file = tmp_path / "test_maulness.db"
     storage = StorageManager(db_path=db_file)

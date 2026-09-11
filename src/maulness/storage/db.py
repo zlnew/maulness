@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,6 +15,8 @@ from maulness.core.models import (
     TaskRecord,
     TaskStatus,
 )
+
+logger = logging.getLogger("maulness.storage")
 
 DEFAULT_DB_PATH = Path.home() / ".config" / "maulness" / "maulness.db"
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -46,6 +49,38 @@ class StorageManager:
             await db.execute("PRAGMA journal_mode = WAL;")
             await db.execute("PRAGMA synchronous = NORMAL;")
             await db.executescript(schema_sql)
+
+            # Auto-migrate tasks table if discord_thread_id has legacy UNIQUE constraint
+            cursor = await db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+            )
+            row = await cursor.fetchone()
+            if row and "discord_thread_id INTEGER UNIQUE" in row[0]:
+                logger.info("Migrating tasks table: removing legacy UNIQUE constraint on discord_thread_id")
+                await db.execute("PRAGMA foreign_keys = OFF;")
+                await db.execute(
+                    """
+                    CREATE TABLE tasks_migration (
+                        id TEXT PRIMARY KEY,
+                        discord_thread_id INTEGER,
+                        title TEXT NOT NULL,
+                        repo_name TEXT NOT NULL,
+                        workspace_path TEXT NOT NULL,
+                        mode TEXT CHECK(mode IN ('direct', 'multi')) NOT NULL,
+                        status TEXT CHECK(status IN ('planning', 'building', 'review', 'done', 'failed')) NOT NULL DEFAULT 'planning',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    """
+                )
+                await db.execute(
+                    "INSERT INTO tasks_migration SELECT id, discord_thread_id, title, repo_name, workspace_path, mode, status, created_at, updated_at FROM tasks;"
+                )
+                await db.execute("DROP TABLE tasks;")
+                await db.execute("ALTER TABLE tasks_migration RENAME TO tasks;")
+                await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_thread_id ON tasks(discord_thread_id);")
+                await db.execute("PRAGMA foreign_keys = ON;")
+
             await db.commit()
 
     async def create_task(

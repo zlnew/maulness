@@ -1,7 +1,7 @@
 -- Tasks table (Direct runs & Multi-route tickets)
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
-    discord_thread_id INTEGER UNIQUE,
+    discord_thread_id INTEGER,
     title TEXT NOT NULL,
     repo_name TEXT NOT NULL,
     workspace_path TEXT NOT NULL,
@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_tasks_thread_id ON tasks(discord_thread_id);
 
 -- Active & Historical Agent Sessions
 CREATE TABLE IF NOT EXISTS agent_sessions (

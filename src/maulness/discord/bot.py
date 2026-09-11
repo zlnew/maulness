@@ -214,6 +214,18 @@ class MaulnessBot(commands.Bot):
             self.user.id,
         )
 
+    async def on_interaction(self, interaction: discord.Interaction):
+        if interaction.type == discord.InteractionType.application_command:
+            cmd_name = interaction.command.name if interaction.command else "unknown"
+            logger.info(
+                "[%s] Received /%s command in channel %s from user %s",
+                self.profile_name,
+                cmd_name,
+                interaction.channel_id,
+                interaction.user.id,
+            )
+        await super().on_interaction(interaction)
+
     def resolve_profile_for_channel(self, channel_id: int, parent_id: Optional[int] = None) -> Optional[Any]:
         """Find the matching profile from self.profiles for a given channel or thread."""
         channel_ids = {channel_id}
@@ -928,6 +940,25 @@ class MaulnessBot(commands.Bot):
             logger.debug("Could not update forum tags: %s", e)
 
     async def _register_slash_commands(self):
+        async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+            logger.error(
+                "[%s] Slash command error in channel %s: %s",
+                self.profile_name,
+                interaction.channel_id,
+                error,
+                exc_info=True,
+            )
+            msg = f"**Command Error:** `{error}`"
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(msg, ephemeral=True)
+            except Exception:
+                pass
+
+        self.tree.on_error = on_app_command_error
+
         @self.tree.command(name="new", description="Start a fresh conversation session in this channel/thread")
         async def new_cmd(interaction: discord.Interaction):
             if self.owner_id and interaction.user.id != self.owner_id:
@@ -1310,19 +1341,25 @@ class MaulnessBot(commands.Bot):
 
             exec_channel = interaction.channel
             created_in_forum = False
-            if (
-                self.forum_channel_id
-                and not isinstance(interaction.channel, discord.Thread)
-                and interaction.channel_id != self.forum_channel_id
-            ):
-                forum = self.get_channel(self.forum_channel_id)
-                if isinstance(forum, discord.ForumChannel):
+            if not isinstance(interaction.channel, discord.Thread):
+                target_parent = None
+                if self.forum_channel_id and interaction.channel_id != self.forum_channel_id:
+                    target_parent = self.get_channel(self.forum_channel_id)
+                    if not target_parent:
+                        try:
+                            target_parent = await self.fetch_channel(self.forum_channel_id)
+                        except Exception:
+                            pass
+                if not target_parent and isinstance(interaction.channel, (discord.ForumChannel, discord.TextChannel)):
+                    target_parent = interaction.channel
+
+                if isinstance(target_parent, discord.ForumChannel):
                     applied_tags = []
-                    avail = {t.name.lower(): t for t in forum.available_tags}
+                    avail = {t.name.lower(): t for t in target_parent.available_tags}
                     for tag_key in ("pipeline", "planning", effective_repo.lower()):
                         if tag_key in avail:
                             applied_tags.append(avail[tag_key])
-                    thread_with_msg = await forum.create_thread(
+                    thread_with_msg = await target_parent.create_thread(
                         name=f"[{effective_repo}] {effective_title[:70]}",
                         content=f"**Pipeline Kanban Task ({effective_pipe_name})**\n**Goal:** {effective_title}\n> {prompt[:200]}",
                         applied_tags=applied_tags,
@@ -1331,6 +1368,15 @@ class MaulnessBot(commands.Bot):
                     created_in_forum = True
                     await interaction.followup.send(
                         f"Created pipeline thread in workbench: {exec_channel.mention}"
+                    )
+                elif isinstance(target_parent, discord.TextChannel):
+                    exec_channel = await target_parent.create_thread(
+                        name=f"[{effective_repo}] {effective_title[:70]}",
+                        type=discord.ChannelType.public_thread,
+                    )
+                    created_in_forum = True
+                    await interaction.followup.send(
+                        f"Created pipeline thread: {exec_channel.mention}"
                     )
 
             if not created_in_forum:
@@ -1465,6 +1511,11 @@ class MaulnessBot(commands.Bot):
                 except asyncio.CancelledError:
                     logger.info("Pipeline %s cancelled via /stop", task_id or effective_title)
                     await exec_channel.send("**Pipeline was stopped by user.**")
+                except Exception as e:
+                    logger.exception("[%s] Pipeline execution failed for '%s': %s", self.profile_name, effective_title, e)
+                    await exec_channel.send(
+                        f"**Pipeline Execution Error:** `{type(e).__name__}: {str(e)[:400]}`"
+                    )
                 finally:
                     if task_id and task_id in self.active_tasks:
                         del self.active_tasks[task_id]
