@@ -18,6 +18,15 @@ class PipelineGate(BaseModel):
     prompt: str = "Proceed to next stage?"
 
 
+class VerificationGate(BaseModel):
+    """Deterministic command verification gate executed before transition or review."""
+    command: str
+    cwd: Optional[str] = None
+    timeout_seconds: int = 120
+    auto_rework_on_fail: bool = True
+    sandbox_mode: Optional[str] = None
+
+
 class StageTransitions(BaseModel):
     pass_target: Optional[str] = None
     rework_target: Optional[str] = None
@@ -28,16 +37,19 @@ class StageTransitions(BaseModel):
 
 class PipelineStage(BaseModel):
     name: str
-    profile: str
+    profile: str = "builder"
     status: str = "building"
     output_key: Optional[str] = None
     requires_diff: bool = False
     requires_approval: bool = False
     use_worktree: bool = False
     checkpoint_before_stage: bool = False
-    prompt: str
+    is_gate_only: bool = False
+    prompt: str = ""
     gate: Optional[PipelineGate] = None
+    verification_gate: Optional[VerificationGate] = None
     transitions: Optional[StageTransitions] = None
+
 
 
 def check_is_rework_verdict(text: str) -> bool:
