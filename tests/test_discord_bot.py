@@ -17,7 +17,7 @@ async def test_bot_slash_commands_registered(tmp_path: Path):
     registered_cmds = {cmd.name for cmd in bot.tree.get_commands()}
     expected_cmds = {
         "new", "stop", "interrupt", "queue", "context", "compact",
-        "pipeline", "profile", "yolo", "worktree", "usage", "help", "thread"
+        "pipeline", "profile", "yolo", "worktree", "usage", "help", "thread", "providers"
     }
     assert registered_cmds == expected_cmds, f"Slash command mismatch: {registered_cmds ^ expected_cmds}"
 

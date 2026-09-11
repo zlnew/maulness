@@ -1065,6 +1065,11 @@ class MaulnessBot(commands.Bot):
                 value=f"• YOLO: `{yolo_status}`\n• Worktree: `{wt_status}`\n• Queued: `{queue_count}`",
                 inline=True,
             )
+
+            from maulness.core.providers.circuit import ProviderHealthRegistry
+            circuit_text = ProviderHealthRegistry.get_instance().format_status_text()
+            embed.add_field(name="Circuit Breaker Status", value=circuit_text, inline=False)
+
             await interaction.response.send_message(embed=embed)
 
         @self.tree.command(name="compact", description="Compact conversation history into SQLite memory and reset context")
@@ -1402,4 +1407,23 @@ class MaulnessBot(commands.Bot):
             embed.add_field(name="Active Profile", value=f"`{target_profile.name}` ({target_profile.provider})", inline=True)
             embed.add_field(name="Session Uptime", value=f"**{m}m {s}s**", inline=True)
             embed.add_field(name="Estimated Cost", value="**$0.00** (Local Antigravity ACP / Free Tier)", inline=False)
+            await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="providers", description="Inspect provider circuit breaker health and cooldowns, or reset circuits")
+        @app_commands.describe(action="Optional action: 'status' (default) or 'reset'")
+        async def providers_cmd(interaction: discord.Interaction, action: Optional[str] = "status"):
+            if self.owner_id and interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Unauthorized", ephemeral=True)
+                return
+
+            from maulness.core.providers.circuit import ProviderHealthRegistry
+            registry = ProviderHealthRegistry.get_instance()
+
+            if action and action.lower() == "reset":
+                registry.reset_all()
+                await interaction.response.send_message("All provider circuit breakers have been reset to CLOSED (HEALTHY).", ephemeral=False)
+                return
+
+            summary_text = registry.format_status_text()
+            embed = discord.Embed(title="Provider Circuit Breaker Registry", description=summary_text, color=0x10B981)
             await interaction.response.send_message(embed=embed)

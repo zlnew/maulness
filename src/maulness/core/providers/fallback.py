@@ -1,4 +1,5 @@
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 
@@ -10,6 +11,7 @@ from maulness.core.models import (
 )
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
+from maulness.core.providers.circuit import ProviderHealthRegistry, classify_provider_error
 from maulness.core.tools import clear_turn_tools, get_turn_executed_tools
 
 logger = logging.getLogger("maulness.providers.fallback")
@@ -17,41 +19,23 @@ logger = logging.getLogger("maulness.providers.fallback")
 
 def format_user_friendly_error(error: Exception) -> str:
     """Extract a concise, human-readable summary from various provider exceptions."""
-    err_str = str(error)
-    # Check status codes
-    if "503" in err_str or "UNAVAILABLE" in err_str or "high demand" in err_str:
-        return "Service temporarily overloaded / unavailable (503)"
-    if "502" in err_str or "504" in err_str or "BAD_GATEWAY" in err_str:
-        return "Gateway error from upstream model provider"
-    if "500" in err_str:
-        return "Internal server error (500) from upstream model provider"
-    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-        return "Rate limit / quota exceeded (429)"
-    if "401" in err_str or "CreditsError" in err_str:
-        return "Authentication failure or insufficient credits (401)"
-    if "403" in err_str or "PERMISSION_DENIED" in err_str:
-        return "Permission denied / model access restricted (403)"
-    if "404" in err_str or "NOT_FOUND" in err_str:
-        return "Model not found or deprecated (404)"
-    if isinstance(error, TimeoutError) or "timeout" in err_str.lower():
-        return "Request timed out waiting for model stream"
-    if "API_KEY_INVALID" in err_str or "API key not valid" in err_str:
-        return "Invalid or unauthorized API key"
-
-    # Clean up JSON or multi-line blobs
-    first_line = err_str.strip().split("\n")[0]
-    if len(first_line) > 120:
-        return first_line[:117] + "…"
-    return first_line or "Unknown provider error"
+    _, friendly = classify_provider_error(error)
+    return friendly
 
 
 class FallbackProviderChain(BaseProvider):
     """Executes requests across a primary provider with fallback chain on rate-limits or errors."""
 
-    def __init__(self, primary: BaseProvider, fallbacks: list[BaseProvider]):
+    def __init__(
+        self,
+        primary: BaseProvider,
+        fallbacks: list[BaseProvider],
+        registry: Optional[ProviderHealthRegistry] = None,
+    ):
         super().__init__(primary.profile)
         self.primary = primary
         self.fallbacks = fallbacks
+        self.registry = registry or ProviderHealthRegistry.get_instance()
         self.last_used_provider: Optional[BaseProvider] = None
         self.chain_errors: list[dict[str, Any]] = []
 
@@ -72,24 +56,71 @@ class FallbackProviderChain(BaseProvider):
         on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
         on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
     ) -> str:
-        chain = [self.primary] + self.fallbacks
+        registry = self.registry
+        full_chain = [self.primary] + self.fallbacks
         self.last_used_provider = None
         self.chain_errors = []
         last_error: Optional[Exception] = None
 
+        def get_prov_key(p: BaseProvider) -> str:
+            return f"{p.profile.provider}:{p.profile.model or p.profile.command or 'default'}"
+
+        now = time.time()
+        available_chain: list[BaseProvider] = []
+        bypassed_info: list[tuple[BaseProvider, str, int]] = []
+
+        # 1. Candidate filtering via circuit breaker state
+        for p in full_chain:
+            pkey = get_prov_key(p)
+            health = registry.get_or_create(pkey)
+            if health.is_available(now):
+                available_chain.append(p)
+            else:
+                rem = max(1, int(health.cooldown_until - now))
+                bypassed_info.append((p, health.last_error_msg or "Circuit OPEN", rem))
+                logger.info(
+                    "[router] Fast-bypassing %s (circuit OPEN, %ds cooldown remaining: %s)",
+                    pkey,
+                    rem,
+                    health.last_error_msg,
+                )
+
+        # If all configured providers are in cooldown, route to soonest-expiring
+        if not available_chain:
+            soonest_p = min(
+                full_chain,
+                key=lambda p: registry.get_or_create(get_prov_key(p)).cooldown_until,
+            )
+            available_chain = [soonest_p]
+            logger.warning(
+                "[router] All providers in cooldown! Attempting soonest-expiring provider: %s",
+                get_prov_key(soonest_p),
+            )
+
+        # Emit user-facing thought notice when degraded providers were fast-bypassed
+        if bypassed_info and on_thought:
+            first_active = available_chain[0]
+            first_tag = get_prov_key(first_active)
+            bypassed_notes = [
+                f"[{get_prov_key(bp[0])}] ({bp[1]}, {bp[2]}s cooldown)"
+                for bp in bypassed_info
+            ]
+            notice = f"Routing directly to [{first_tag}]. Bypassed: {', '.join(bypassed_notes)}.\n"
+            await on_thought(AgentThoughtEvent(delta=notice, session_id=session_id))
+
         try:
-            for idx, provider in enumerate(chain):
+            for idx, provider in enumerate(available_chain):
                 prov_name = provider.profile.name
                 prov_type = provider.profile.provider
                 prov_model = provider.profile.model or provider.profile.command or "default"
+                prov_key = get_prov_key(provider)
                 try:
                     effective_prompt = prompt
-                    if idx > 0:
+                    if idx > 0 or bypassed_info:
                         logger.warning(
-                            "Attempting fallback provider %s (%s:%s) for session %s after failure",
+                            "Attempting fallback provider %s (%s) for session %s after failure/bypass",
                             prov_name,
-                            prov_type,
-                            prov_model,
+                            prov_key,
                             session_id,
                         )
                         completed_tools = get_turn_executed_tools(session_id)
@@ -117,12 +148,15 @@ class FallbackProviderChain(BaseProvider):
                         on_approval=on_approval,
                     )
                     if not res or not res.strip():
-                        raise RuntimeError(f"Provider {prov_type}:{prov_model} completed but returned an empty response")
+                        raise RuntimeError(f"Provider {prov_key} completed but returned an empty response")
+
+                    # Succeeded: reset circuit breaker
+                    registry.record_success(prov_key)
                     self.last_used_provider = provider
                     return res
                 except Exception as e:
                     last_error = e
-                    friendly_msg = format_user_friendly_error(e)
+                    tripped, friendly_msg, cd = registry.record_failure(prov_key, e)
                     self.chain_errors.append({
                         "profile": prov_name,
                         "provider": prov_type,
@@ -131,20 +165,20 @@ class FallbackProviderChain(BaseProvider):
                         "raw_error": str(e),
                     })
                     logger.warning(
-                        "Provider %s (%s:%s) failed for session %s: %s",
+                        "Provider %s (%s) failed for session %s: %s (cooldown: %ds)",
                         prov_name,
-                        prov_type,
-                        prov_model,
+                        prov_key,
                         session_id,
                         friendly_msg,
+                        cd,
                     )
 
-                    # Emit user-facing fallback thought notice if there is another provider in chain
-                    if idx < len(chain) - 1:
-                        next_p = chain[idx + 1]
-                        next_tag = f"{next_p.profile.provider}:{next_p.profile.model or next_p.profile.command or 'default'}"
+                    # Emit user-facing fallback thought notice if there is another provider in available_chain
+                    if idx < len(available_chain) - 1:
+                        next_p = available_chain[idx + 1]
+                        next_tag = get_prov_key(next_p)
                         notice = (
-                            f"Provider [{prov_type}:{prov_model}] failed ({friendly_msg}). "
+                            f"Provider [{prov_key}] failed ({friendly_msg}). "
                             f"Switching to fallback [{next_tag}]..."
                         )
                         if on_thought:
@@ -152,7 +186,7 @@ class FallbackProviderChain(BaseProvider):
                                 AgentThoughtEvent(delta=f"{notice}\n", session_id=session_id)
                             )
 
-                    if idx == len(chain) - 1:
+                    if idx == len(available_chain) - 1:
                         summary = "\n".join(
                             f"- {item['provider']}:{item['model']} -> {item['error']}"
                             for item in self.chain_errors
