@@ -434,16 +434,10 @@ def test_cli_status_single_discord(tmp_path: Path):
         assert "Configured" in res.output
 
 
-def test_cli_chat_tui_invocation():
-    with (
-        patch("sys.stdin.isatty", return_value=True),
-        patch("maulness.cli.tui.MaulnessTUIApp") as mock_tui_app_cls,
-    ):
-        mock_app = MagicMock()
-        mock_tui_app_cls.return_value = mock_app
-
-        main.chat(profile="builder", plain=False)
-        mock_app.run.assert_called_once()
+def test_cli_chat_invocation():
+    with patch("maulness.cli.main.run_plain_chat") as mock_plain:
+        main.chat(profile="builder")
+        mock_plain.assert_called_once_with(initial_profile="builder")
 
 
 def test_cli_chat_keyboard_interrupt(tmp_path: Path):

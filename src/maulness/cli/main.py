@@ -1,7 +1,6 @@
 import asyncio
 import os
 import subprocess
-import sys
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -382,18 +381,12 @@ def chat(
     plain: bool = typer.Option(
         False,
         "--plain",
-        "--no-tui",
-        help="Run in plain text REPL mode instead of the full terminal TUI",
+        help="Run in plain text REPL mode (default)",
+        hidden=True,
     ),
 ):
     """Start an interactive workspace chat session scoped to current directory."""
-    if not plain and sys.stdin.isatty():
-        from maulness.cli.tui import MaulnessTUIApp
-
-        app = MaulnessTUIApp(initial_profile=profile)
-        app.run()
-    else:
-        run_plain_chat(initial_profile=profile)
+    run_plain_chat(initial_profile=profile)
 
 
 # ==========================================
