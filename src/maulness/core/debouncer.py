@@ -99,6 +99,7 @@ class MessageStreamDebouncer:
         self.max_chunk_size = max_chunk_size
 
         self._buffer: list[str] = []
+        self._history_parts: list[str] = []
         self._current_text = ""
         self._last_flush_time = 0.0
         self._flush_task: Optional[asyncio.Task] = None
@@ -107,13 +108,14 @@ class MessageStreamDebouncer:
 
     @property
     def full_text(self) -> str:
-        return self._current_text + "".join(self._buffer)
+        return "".join(self._history_parts) + self._current_text + "".join(self._buffer)
 
     def reset(self):
         """Reset internal text buffer to start streaming into a fresh message container."""
         if self._flush_task and not self._flush_task.done():
             self._flush_task.cancel()
         self._buffer.clear()
+        self._history_parts.clear()
         self._current_text = ""
         self._is_active = True
 
@@ -184,6 +186,7 @@ class MessageStreamDebouncer:
                     )
                     if len(chunks) > 1:
                         for chunk in chunks[:-1]:
+                            self._history_parts.append(chunk)
                             try:
                                 await self.flush_callback(
                                     chunk, is_final=False, is_overflow=True
@@ -201,6 +204,7 @@ class MessageStreamDebouncer:
                             )
                     else:
                         chunk_to_flush, prefix = balance_code_blocks(self._current_text)
+                        self._history_parts.append(chunk_to_flush)
                         self._current_text = prefix
                         try:
                             await self.flush_callback(

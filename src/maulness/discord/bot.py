@@ -418,59 +418,46 @@ class MaulnessBot(commands.Bot):
         start_time = time.time()
         fallback_alerts: list[str] = []
 
+        needs_new_msg = False
+
         async def flush_chunk(text: str, is_final: bool, is_overflow: bool = False):
-            nonlocal current_msg
+            nonlocal current_msg, needs_new_msg
             if not text.strip():
                 return
             clean_text = format_discord_markdown(text)
             if not clean_text.strip():
                 return
 
-            if len(clean_text) <= 1950:
-                try:
-                    await current_msg.edit(content=clean_text)
-                    if is_overflow and not is_final:
-                        current_msg = await channel.send("…")
-                        active_msgs.append(current_msg)
-                except Exception as e:
-                    logger.warning("Failed to edit Discord message: %s", e)
+            chunks = chunk_markdown_message(clean_text, max_size=1900)
+            for idx, ch in enumerate(chunks):
+                is_chunk_overflow = (idx < len(chunks) - 1) or is_overflow
+
+                if needs_new_msg or idx > 0:
                     try:
-                        current_msg = await channel.send(clean_text)
+                        current_msg = await channel.send(ch)
                         active_msgs.append(current_msg)
-                    except Exception as send_err:
-                        logger.error(
-                            "Failed to send replacement Discord message: %s", send_err
+                        needs_new_msg = False
+                    except Exception as e:
+                        logger.error("Failed to send Discord message chunk: %s", e)
+                else:
+                    try:
+                        current_msg = await current_msg.edit(content=ch)
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to edit Discord message (%s), sending replacement",
+                            e,
                         )
-            else:
-                chunks = chunk_markdown_message(clean_text, max_size=1900)
-                for idx, ch in enumerate(chunks):
-                    if idx == 0:
-                        try:
-                            await current_msg.edit(content=ch)
-                        except Exception as e:
-                            logger.warning(
-                                "Failed to edit Discord message with first chunk: %s", e
-                            )
-                            try:
-                                current_msg = await channel.send(ch)
-                                active_msgs.append(current_msg)
-                            except Exception:
-                                pass
-                    else:
                         try:
                             current_msg = await channel.send(ch)
                             active_msgs.append(current_msg)
                         except Exception as send_err:
                             logger.error(
-                                "Failed to send overflow Discord chunk: %s", send_err
+                                "Failed to send replacement Discord message: %s",
+                                send_err,
                             )
-                            break
-                if is_overflow and not is_final:
-                    try:
-                        current_msg = await channel.send("…")
-                        active_msgs.append(current_msg)
-                    except Exception:
-                        pass
+
+                if is_chunk_overflow and not is_final:
+                    needs_new_msg = True
 
         debouncer = MessageStreamDebouncer(flush_callback=flush_chunk)
 
@@ -725,12 +712,6 @@ class MaulnessBot(commands.Bot):
                 self.channel_tasks.pop(channel_id, None)
             self.active_tasks.pop(session_key, None)
             await debouncer.close()
-            # If current_msg remained as an ellipsis placeholder, remove it
-            if current_msg and getattr(current_msg, "content", "") == "…":
-                try:
-                    await current_msg.delete()
-                except Exception:
-                    pass
             elapsed = time.time() - start_time
             logger.info(
                 "[%s] Completed chat prompt in channel %s in %.2fs (output: %d chars)",
