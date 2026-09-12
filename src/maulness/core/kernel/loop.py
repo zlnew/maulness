@@ -169,10 +169,12 @@ class DurableAgentKernel:
             effective_workspace
         )
 
+        turn_output: Optional[ModelTurnOutput] = None
         while relay_count < max_relays:
             relay_count += 1
             turn_count = 0
             forcing_synthesis = False
+            synthesis_retried = False
             last_streamed_turn_text = ""
 
             while max_tool_turns <= 0 or turn_count <= max_tool_turns:
@@ -263,6 +265,26 @@ class DurableAgentKernel:
 
                 # If no tool calls produced, turn cycle completed
                 if not tool_calls or forcing_synthesis:
+                    if (
+                        forcing_synthesis
+                        and not (turn_output.content and turn_output.content.strip())
+                        and not synthesis_retried
+                    ):
+                        synthesis_retried = True
+                        logger.info(
+                            "[kernel] Model produced reasoning but empty visible content during forced synthesis; retrying for explicit user text"
+                        )
+                        current_messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "[SYSTEM NOTE: You generated reasoning but did not output a visible answer to the user. "
+                                    "Formulate and output your final textual answer to the user now based on your reasoning and the tool results above. "
+                                    "Do not call any tools or output only internal thought.]"
+                                ),
+                            }
+                        )
+                        continue
                     break
 
                 # Step 3: Execute Tool Calls (Memoized per call)
@@ -473,7 +495,11 @@ class DurableAgentKernel:
         final_text = clean_relay_completion_tags(final_text)
 
         if not model_produced_text:
-            fallback_note = "\n\n*(Agent completed tool executions but did not produce a final textual summary.)*"
+            if turn_output and turn_output.thought and turn_output.thought.strip():
+                clean_thought = turn_output.thought.strip()
+                fallback_note = f"\n\n*(Summary derived from agent analysis:)*\n{clean_thought[:1200]}"
+            else:
+                fallback_note = "\n\n*(Agent completed tool executions but did not produce a final textual summary.)*"
             final_text += fallback_note
             if on_message:
                 await on_message(
