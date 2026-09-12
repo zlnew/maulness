@@ -159,12 +159,12 @@ def test_format_lean_tool_breadcrumb():
     bc1 = format_lean_tool_breadcrumb(
         "get_outline", {"path": "src/models.py"}, "Outline output"
     )
-    assert "get_outline: src/models.py" in bc1
+    assert bc1 == "> 🔍 Outline `src/models.py`\n\n"
 
     bc2 = format_lean_tool_breadcrumb("find_symbol", {"name": "User"}, "Found symbol")
-    assert "find_symbol: User" in bc2
+    assert bc2 == "> 🔍 Symbol `User`\n\n"
 
     bc3 = format_lean_tool_breadcrumb(
         "web_search", {"query": "pytest fixtures"}, "Results"
     )
-    assert "web_search: 'pytest fixtures'" in bc3
+    assert bc3 == "> 🌐 Search 'pytest fixtures'\n\n"

@@ -19,17 +19,80 @@ def balance_code_blocks(text: str) -> tuple[str, str]:
     return text, ""
 
 
+def chunk_markdown_message(text: str, max_size: int = 1900) -> list[str]:
+    """Split text into chunks of at most max_size characters, respecting
+    code blocks, paragraphs, and word boundaries without losing characters.
+    """
+    if not text:
+        return []
+    if len(text) <= max_size:
+        return [text]
+
+    chunks: list[str] = []
+    current = text
+
+    while current:
+        if len(current) <= max_size:
+            chunks.append(current)
+            break
+
+        # Reserve small margin for potential fence closure (\n```)
+        margin = 15 if max_size > 50 else 0
+        target_limit = max(10, max_size - margin) if max_size > 10 else max_size
+
+        # Find best split boundary within target_limit:
+        # 1. Paragraph boundary: \n\n
+        split_idx = current.rfind("\n\n", 0, target_limit)
+        if split_idx != -1 and split_idx >= target_limit // 4:
+            split_idx += 2
+        else:
+            # 2. Line boundary: \n
+            split_idx = current.rfind("\n", 0, target_limit)
+            if split_idx != -1 and split_idx >= target_limit // 4:
+                split_idx += 1
+            else:
+                # 3. Word boundary: ' '
+                split_idx = current.rfind(" ", 0, target_limit)
+                if split_idx != -1 and split_idx >= target_limit // 4:
+                    split_idx += 1
+                else:
+                    split_idx = target_limit
+
+        head = current[:split_idx]
+        tail = current[split_idx:]
+
+        # Check code fence balance in head
+        fence_count = head.count("```")
+        if fence_count % 2 == 1:
+            last_fence = head.rfind("```")
+            newline_after = head.find("\n", last_fence)
+            if newline_after != -1:
+                lang = head[last_fence + 3 : newline_after].strip()
+            else:
+                lang = head[last_fence + 3 :].strip()
+
+            closed_head = head.rstrip() + "\n```"
+            reopen_tail = f"```{lang}\n" + tail.lstrip("\r\n")
+            chunks.append(closed_head)
+            current = reopen_tail
+        else:
+            chunks.append(head.rstrip("\r\n"))
+            current = tail.lstrip("\r\n")
+
+    return [c for c in chunks if c.strip()]
+
+
 class MessageStreamDebouncer:
     """Buffers streaming token deltas and flushes them to a Discord message edit
-    at a throttled rate (default 900ms) to respect Discord's rate limits (~5 edits / 5s).
+    at a throttled rate (default 1.5s) to respect Discord's rate limits (~5 edits / 5s).
     Automatically chains messages when approaching the 2,000-character ceiling.
     """
 
     def __init__(
         self,
         flush_callback: Callable[..., Coroutine[Any, Any, None]],
-        interval_seconds: float = 0.9,
-        max_chunk_size: int = 1800,
+        interval_seconds: float = 1.5,
+        max_chunk_size: int = 1750,
     ):
         self.flush_callback = flush_callback
         self.interval = interval_seconds
@@ -88,23 +151,70 @@ class MessageStreamDebouncer:
             self._current_text += new_text
             self._last_flush_time = time.monotonic()
 
-            # Check if text exceeds chunk threshold
-            if len(self._current_text) >= self.max_chunk_size and not is_final:
-                chunk_to_flush, prefix = balance_code_blocks(self._current_text)
-                self._current_text = prefix
-                try:
-                    await self.flush_callback(
-                        chunk_to_flush, is_final=False, is_overflow=True
+            if is_final:
+                if not self._current_text.strip():
+                    return
+                if len(self._current_text) > self.max_chunk_size:
+                    chunks = chunk_markdown_message(
+                        self._current_text, max_size=self.max_chunk_size
                     )
-                except TypeError:
-                    await self.flush_callback(chunk_to_flush, is_final=False)
+                    if not chunks:
+                        return
+                    for i, chunk in enumerate(chunks):
+                        is_last = i == len(chunks) - 1
+                        is_over = not is_last
+                        try:
+                            await self.flush_callback(
+                                chunk, is_final=is_last, is_overflow=is_over
+                            )
+                        except TypeError:
+                            await self.flush_callback(chunk, is_final=is_last)
+                else:
+                    try:
+                        await self.flush_callback(
+                            self._current_text, is_final=True, is_overflow=False
+                        )
+                    except TypeError:
+                        await self.flush_callback(self._current_text, is_final=True)
             else:
-                try:
-                    await self.flush_callback(
-                        self._current_text, is_final=is_final, is_overflow=False
+                # Intermediate streaming flush
+                if len(self._current_text) >= self.max_chunk_size:
+                    chunks = chunk_markdown_message(
+                        self._current_text, max_size=self.max_chunk_size
                     )
-                except TypeError:
-                    await self.flush_callback(self._current_text, is_final=is_final)
+                    if len(chunks) > 1:
+                        for chunk in chunks[:-1]:
+                            try:
+                                await self.flush_callback(
+                                    chunk, is_final=False, is_overflow=True
+                                )
+                            except TypeError:
+                                await self.flush_callback(chunk, is_final=False)
+                        self._current_text = chunks[-1]
+                        try:
+                            await self.flush_callback(
+                                self._current_text, is_final=False, is_overflow=False
+                            )
+                        except TypeError:
+                            await self.flush_callback(
+                                self._current_text, is_final=False
+                            )
+                    else:
+                        chunk_to_flush, prefix = balance_code_blocks(self._current_text)
+                        self._current_text = prefix
+                        try:
+                            await self.flush_callback(
+                                chunk_to_flush, is_final=False, is_overflow=True
+                            )
+                        except TypeError:
+                            await self.flush_callback(chunk_to_flush, is_final=False)
+                else:
+                    try:
+                        await self.flush_callback(
+                            self._current_text, is_final=False, is_overflow=False
+                        )
+                    except TypeError:
+                        await self.flush_callback(self._current_text, is_final=False)
 
     async def close(self):
         """Finalize the stream and flush all remaining buffered content."""

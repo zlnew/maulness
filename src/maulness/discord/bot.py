@@ -7,7 +7,10 @@ from discord import app_commands
 from discord.ext import commands
 
 from maulness.config import config
-from maulness.core.debouncer import MessageStreamDebouncer
+from maulness.core.debouncer import (
+    MessageStreamDebouncer,
+    chunk_markdown_message,
+)
 from maulness.core.models import (
     AgentMessageEvent,
     AgentThoughtEvent,
@@ -69,8 +72,75 @@ LATEX_REPLACEMENTS: list[tuple[re.Pattern, str]] = [
 ]
 
 
+def _format_markdown_elements(text: str) -> str:
+    """Format markdown headers and tables for clean Discord rendering without touching code blocks."""
+    if not text:
+        return text
+
+    # If there is an unclosed code fence at the end, separate it so it is treated as a code block
+    fence_count = text.count("```")
+    if fence_count % 2 == 1:
+        last_fence_idx = text.rfind("```")
+        main_part = text[:last_fence_idx]
+        unclosed_code_part = text[last_fence_idx:]
+    else:
+        main_part = text
+        unclosed_code_part = ""
+
+    parts = re.split(r"(```[\s\S]*?```)", main_part)
+    processed_parts: list[str] = []
+
+    for part in parts:
+        if part.startswith("```"):
+            processed_parts.append(part)
+        else:
+            # 1. Soften large markdown headers (# Title -> ### Title, ## Title -> ### Title)
+            part = re.sub(r"^(#{1,2})\s+(.+)$", r"### \2", part, flags=re.MULTILINE)
+
+            # 2. Format markdown tables: wrap table blocks in ```text ... ```
+            lines = part.splitlines(keepends=True)
+            new_lines: list[str] = []
+            table_buffer: list[str] = []
+
+            def flush_table():
+                nonlocal table_buffer
+                if not table_buffer:
+                    return
+                has_divider = any(
+                    re.search(r"\|(?:\s*:?-+:?\s*\|)+", row) for row in table_buffer
+                )
+                if has_divider and len(table_buffer) >= 2:
+                    table_content = "".join(table_buffer).strip()
+                    new_lines.append(f"```text\n{table_content}\n```\n")
+                else:
+                    new_lines.extend(table_buffer)
+                table_buffer = []
+
+            for line in lines:
+                stripped = line.strip()
+                if (
+                    stripped.startswith("|")
+                    and stripped.endswith("|")
+                    and stripped.count("|") >= 2
+                ):
+                    table_buffer.append(line)
+                else:
+                    if table_buffer:
+                        flush_table()
+                    new_lines.append(line)
+            if table_buffer:
+                flush_table()
+
+            processed_parts.append("".join(new_lines))
+
+    if unclosed_code_part:
+        processed_parts.append(unclosed_code_part)
+
+    return "".join(processed_parts)
+
+
 def format_discord_markdown(text: str) -> str:
-    """Translate LaTeX math notations into clean ASCII for Discord rendering."""
+    """Format markdown for clean Discord rendering: LaTeX translation, header softening, and table formatting."""
     if not text:
         return text
     result = text
@@ -79,6 +149,7 @@ def format_discord_markdown(text: str) -> str:
     result = re.sub(
         r"\$\s*(->|<-|<->|=>|<=|<=>|~|!=|\*|\+/-|\.\.\.)\s*\$", r"\1", result
     )
+    result = _format_markdown_elements(result)
     return result
 
 
@@ -352,6 +423,9 @@ class MaulnessBot(commands.Bot):
             if not text.strip():
                 return
             clean_text = format_discord_markdown(text)
+            if not clean_text.strip():
+                return
+
             if len(clean_text) <= 1950:
                 try:
                     await current_msg.edit(content=clean_text)
@@ -368,30 +442,35 @@ class MaulnessBot(commands.Bot):
                             "Failed to send replacement Discord message: %s", send_err
                         )
             else:
-                first_part = clean_text[:1950]
-                rest = clean_text[1950:]
-                try:
-                    await current_msg.edit(content=first_part)
-                except Exception as e:
-                    logger.warning(
-                        "Failed to edit Discord message with first part: %s", e
-                    )
+                chunks = chunk_markdown_message(clean_text, max_size=1900)
+                for idx, ch in enumerate(chunks):
+                    if idx == 0:
+                        try:
+                            await current_msg.edit(content=ch)
+                        except Exception as e:
+                            logger.warning(
+                                "Failed to edit Discord message with first chunk: %s", e
+                            )
+                            try:
+                                current_msg = await channel.send(ch)
+                                active_msgs.append(current_msg)
+                            except Exception:
+                                pass
+                    else:
+                        try:
+                            current_msg = await channel.send(ch)
+                            active_msgs.append(current_msg)
+                        except Exception as send_err:
+                            logger.error(
+                                "Failed to send overflow Discord chunk: %s", send_err
+                            )
+                            break
+                if is_overflow and not is_final:
                     try:
-                        current_msg = await channel.send(first_part)
+                        current_msg = await channel.send("…")
                         active_msgs.append(current_msg)
                     except Exception:
                         pass
-                while rest:
-                    chunk = rest[:1950]
-                    rest = rest[1950:]
-                    try:
-                        current_msg = await channel.send(chunk)
-                        active_msgs.append(current_msg)
-                    except Exception as send_err:
-                        logger.error(
-                            "Failed to send overflow Discord chunk: %s", send_err
-                        )
-                        break
 
         debouncer = MessageStreamDebouncer(flush_callback=flush_chunk)
 
@@ -646,6 +725,12 @@ class MaulnessBot(commands.Bot):
                 self.channel_tasks.pop(channel_id, None)
             self.active_tasks.pop(session_key, None)
             await debouncer.close()
+            # If current_msg remained as an ellipsis placeholder, remove it
+            if current_msg and getattr(current_msg, "content", "") == "…":
+                try:
+                    await current_msg.delete()
+                except Exception:
+                    pass
             elapsed = time.time() - start_time
             logger.info(
                 "[%s] Completed chat prompt in channel %s in %.2fs (output: %d chars)",

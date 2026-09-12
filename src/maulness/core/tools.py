@@ -1386,44 +1386,144 @@ async def _execute_fetch_doc_markdown(url: str, max_chars: int = 10000) -> str:
 def format_lean_tool_breadcrumb(name: str, args: dict[str, Any], result: str) -> str:
     """Format a compact, elegant breadcrumb for tool execution in chat streams."""
     clean_res = result.strip()
-    summary_arg = ""
-    if name == "run_command":
-        summary_arg = args.get("command", "")
-    elif name in ("read_file", "write_file", "replace_file_content"):
-        summary_arg = args.get("path", "")
+
+    if name == "read_file":
+        path = args.get("path") or args.get("file_path") or "file"
+        if clean_res.startswith("Error"):
+            return f"> ⚠️ Reading file `{path}` ({clean_res[:60]})\n\n"
+        start_line = args.get("start_line") or args.get("offset")
+        end_line = args.get("end_line")
+        if start_line is not None:
+            s = int(start_line)
+            if end_line is not None:
+                e = int(end_line)
+            else:
+                total = len(clean_res.splitlines())
+                e = s + max(0, total - 1)
+        else:
+            match = re.search(r"lines\s+(\d+)-(\d+)", clean_res)
+            if match:
+                s, e = match.group(1), match.group(2)
+            else:
+                s = 1
+                e = max(1, len(clean_res.splitlines()))
+        return f"> 📖 Reading file `{path}` {s}:{e}\n\n"
+
+    elif name == "replace_file_content":
+        path = args.get("path") or args.get("file_path") or "file"
+        if clean_res.startswith("Error") or "cancelled" in clean_res:
+            return f"> ⚠️ Editing file `{path}` ({clean_res[:60]})\n\n"
+        old_str = (
+            args.get("target_content")
+            or args.get("old_string")
+            or args.get("old_content")
+            or ""
+        )
+        new_str = (
+            args.get("replacement_content")
+            or args.get("new_string")
+            or args.get("new_content")
+            or ""
+        )
+        del_lines = len(old_str.splitlines()) if old_str else 1
+        add_lines = len(new_str.splitlines()) if new_str else 1
+        return f"> ✏️ Editing file `{path}` (+{add_lines} -{del_lines})\n\n"
+
+    elif name == "patch_file":
+        path = args.get("path") or args.get("file_path") or "file"
+        if clean_res.startswith("Error") or "cancelled" in clean_res:
+            return f"> ⚠️ Patching file `{path}` ({clean_res[:60]})\n\n"
+        patch_text = args.get("patch", "")
+        add_lines = sum(
+            1
+            for line in patch_text.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        )
+        del_lines = sum(
+            1
+            for line in patch_text.splitlines()
+            if line.startswith("-") and not line.startswith("---")
+        )
+        return f"> ✏️ Patching file `{path}` (+{add_lines} -{del_lines})\n\n"
+
+    elif name == "write_file":
+        path = args.get("path") or args.get("file_path") or "file"
+        if clean_res.startswith("Error") or "cancelled" in clean_res:
+            return f"> ⚠️ Writing file `{path}` ({clean_res[:60]})\n\n"
+        content = args.get("content", "")
+        lines = len(content.splitlines()) if content else 0
+        return f"> 📝 Writing file `{path}` (+{lines} lines)\n\n"
+
+    elif name == "run_command":
+        cmd = args.get("command", "")
+        cmd_disp = cmd[:67] + "..." if len(cmd) > 70 else cmd
+        if "[LOOP INTERVENTION:" in clean_res:
+            return f"> ⚠️ ⚡ `run_command: {cmd_disp}` -> {clean_res}\n\n"
+        if clean_res.startswith("Error:") or "failed with returncode" in clean_res:
+            return f"> ⚠️ ⚡ `run_command: {cmd_disp}` (failed)\n\n"
+        return f"> ⚡ `run_command: {cmd_disp}`\n\n"
+
     elif name == "search_files":
         pattern = args.get("pattern", "")
-        summary_arg = f"'{pattern[:40]}'" if len(pattern) > 40 else f"'{pattern}'"
+        pattern_disp = f"'{pattern[:37]}...'" if len(pattern) > 40 else f"'{pattern}'"
+        if clean_res.startswith("Error"):
+            return f"> ⚠️ Search {pattern_disp} ({clean_res[:60]})\n\n"
+        matches = [
+            line
+            for line in clean_res.splitlines()
+            if line and not line.startswith("No matches")
+        ]
+        count = len(matches) if "No matches" not in clean_res else 0
+        return f"> 🔍 Search {pattern_disp} -> {count} match{'es' if count != 1 else ''}\n\n"
+
     elif name == "list_dir":
-        summary_arg = args.get("path", "") or "."
+        p = args.get("path", "") or "."
+        if clean_res.startswith("Error"):
+            return f"> ⚠️ List `{p}` ({clean_res[:60]})\n\n"
+        count = len([line for line in clean_res.splitlines() if line])
+        return f"> 📁 List `{p}` -> {count} items\n\n"
+
     elif name == "git_status":
-        summary_arg = args.get("repo_path", "") or "status"
-    elif name == "get_outline":
-        summary_arg = args.get("path", "")
-    elif name == "find_symbol":
-        summary_arg = args.get("name", "")
+        if clean_res.startswith("Error"):
+            return f"> ⚠️ Git status ({clean_res[:60]})\n\n"
+        return "> 🌿 Git status\n\n"
+
     elif name == "web_search":
         q = args.get("query", "")
-        summary_arg = f"'{q[:40]}'" if len(q) > 40 else f"'{q}'"
+        q_disp = f"'{q[:37]}...'" if len(q) > 40 else f"'{q}'"
+        if clean_res.startswith("Error"):
+            return f"> ⚠️ Search {q_disp} ({clean_res[:60]})\n\n"
+        return f"> 🌐 Search {q_disp}\n\n"
+
     elif name == "fetch_doc_markdown":
-        summary_arg = args.get("url", "")
+        u = args.get("url", "")
+        u_disp = u[:50] + "..." if len(u) > 50 else u
+        if clean_res.startswith("Error"):
+            return f"> ⚠️ Fetch `{u_disp}` ({clean_res[:60]})\n\n"
+        return f"> 🌐 Fetch `{u_disp}`\n\n"
 
+    elif name == "get_outline":
+        path = args.get("path", "")
+        return f"> 🔍 Outline `{path}`\n\n"
+
+    elif name == "find_symbol":
+        sym = args.get("name", "")
+        return f"> 🔍 Symbol `{sym}`\n\n"
+
+    # Generic tool fallback
+    summary_arg = (
+        args.get("name")
+        or args.get("path")
+        or args.get("query")
+        or args.get("command")
+        or ""
+    )
+    if len(str(summary_arg)) > 40:
+        summary_arg = str(summary_arg)[:37] + "..."
     label = f"{name}: {summary_arg}" if summary_arg else name
-
-    # If single-line or brief output (<= 120 chars, no newlines)
-    if "\n" not in clean_res and len(clean_res) <= 120:
-        return f"> **`{label}`** -> `{clean_res}`\n\n"
-
-    # Multiline output: compact preview
-    preview_lines = clean_res.splitlines()
-    if len(preview_lines) > 8:
-        preview = (
-            "\n".join(preview_lines[:6])
-            + f"\n... (+{len(preview_lines) - 6} more lines)"
-        )
-    else:
-        preview = clean_res
-    return f"> **`{label}`**:\n```\n{preview}\n```\n\n"
+    if clean_res.startswith("Error"):
+        return f"> ⚠️ `{label}` ({clean_res[:60]})\n\n"
+    return f"> 🔧 `{label}`\n\n"
 
 
 _TOOL_SIMULATION_PATTERN = re.compile(

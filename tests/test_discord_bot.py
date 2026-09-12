@@ -292,6 +292,29 @@ def test_format_discord_markdown():
     math_symbols = "3 $\\times$ 4 $\\pm$ 0.1"
     assert format_discord_markdown(math_symbols) == "3 * 4 +/- 0.1"
 
+    # Header softening
+    headers = "# Main Header\nText\n## Sub Header\nMore text\n### Already Small"
+    expected_headers = (
+        "### Main Header\nText\n### Sub Header\nMore text\n### Already Small"
+    )
+    assert format_discord_markdown(headers) == expected_headers
+
+    # Code block comments are preserved (not treated as headers)
+    code_block = "```python\n# This is a comment\nx = 1\n```"
+    assert format_discord_markdown(code_block) == code_block
+
+    # Markdown table converted to monospace block
+    table_sample = (
+        "Here is a table:\n| Name | Role |\n| --- | --- |\n| Maul | Lead |\nDone."
+    )
+    formatted_table = format_discord_markdown(table_sample)
+    assert (
+        "```text\n| Name | Role |\n| --- | --- |\n| Maul | Lead |\n```"
+        in formatted_table
+    )
+    assert "Here is a table:" in formatted_table
+    assert "Done." in formatted_table
+
 
 @pytest.mark.asyncio
 async def test_bot_interrupt_command(tmp_path: Path):

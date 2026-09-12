@@ -100,20 +100,35 @@ async def test_execute_unknown_tool():
 def test_format_lean_tool_breadcrumb():
     from maulness.core.tools import format_lean_tool_breadcrumb
 
-    # Single-line output
+    # Command execution
     b1 = format_lean_tool_breadcrumb(
         "run_command", {"command": "uname -srm"}, "Linux 6.18.48-1-cachyos-lts x86_64"
     )
-    assert (
-        "> **`run_command: uname -srm`** -> `Linux 6.18.48-1-cachyos-lts x86_64`" in b1
-    )
+    assert b1 == "> ⚡ `run_command: uname -srm`\n\n"
 
-    # Multiline output
+    # Git status
     b2 = format_lean_tool_breadcrumb(
         "git_status", {"repo_path": "/tmp"}, "M file1.py\n?? file2.py"
     )
-    assert "> **`git_status: /tmp`**:" in b2
-    assert "M file1.py" in b2
+    assert b2 == "> 🌿 Git status\n\n"
+
+    # Reading file with explicit lines
+    b3 = format_lean_tool_breadcrumb(
+        "read_file", {"path": "src/main.py", "start_line": 1, "end_line": 45}, "code"
+    )
+    assert b3 == "> 📖 Reading file `src/main.py` 1:45\n\n"
+
+    # Editing file with additions and deletions
+    b4 = format_lean_tool_breadcrumb(
+        "replace_file_content",
+        {
+            "path": "src/main.py",
+            "target_content": "line1\nline2\n",
+            "replacement_content": "new1\nnew2\nnew3\n",
+        },
+        "success",
+    )
+    assert b4 == "> ✏️ Editing file `src/main.py` (+3 -2)\n\n"
 
 
 def test_detect_simulated_tool_call():
@@ -1129,28 +1144,61 @@ async def test_execute_tool_action_all_exceptions_and_empty_cmd(tmp_path: Path):
 def test_format_lean_tool_breadcrumb_all_branches():
     from maulness.core.tools import format_lean_tool_breadcrumb
 
-    # Lines 789, 791-792, 794: branches
-    b1 = format_lean_tool_breadcrumb("write_file", {"path": "test.txt"}, "done")
-    assert "write_file: test.txt" in b1
+    # write_file
+    b1 = format_lean_tool_breadcrumb(
+        "write_file", {"path": "test.txt", "content": "hello\nworld"}, "done"
+    )
+    assert b1 == "> 📝 Writing file `test.txt` (+2 lines)\n\n"
 
+    # replace_file_content with old and new
     b2 = format_lean_tool_breadcrumb(
-        "replace_file_content", {"path": "test.py"}, "replaced"
+        "replace_file_content",
+        {"path": "test.py", "old_string": "a\nb", "new_string": "c"},
+        "replaced",
     )
-    assert "replace_file_content: test.py" in b2
+    assert b2 == "> ✏️ Editing file `test.py` (+1 -2)\n\n"
 
+    # patch_file
+    b_patch = format_lean_tool_breadcrumb(
+        "patch_file",
+        {"path": "app.py", "patch": "--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new"},
+        "success",
+    )
+    assert b_patch == "> ✏️ Patching file `app.py` (+1 -1)\n\n"
+
+    # search_files with long pattern
     long_pat = "a" * 50
-    b3 = format_lean_tool_breadcrumb("search_files", {"pattern": long_pat}, "matches")
-    assert "search_files: '" in b3
-
-    b4 = format_lean_tool_breadcrumb("list_dir", {}, "files")
-    assert "list_dir: ." in b4
-
-    # Line 807: Multiline output with > 8 lines
-    many_lines = "\n".join([f"Line {i}" for i in range(1, 15)])
-    b5 = format_lean_tool_breadcrumb(
-        "run_command", {"command": "cat long.txt"}, many_lines
+    b3 = format_lean_tool_breadcrumb(
+        "search_files", {"pattern": long_pat}, "line 1\nline 2"
     )
-    assert "+8 more lines" in b5
+    assert "Search 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...'" in b3
+    assert "2 matches" in b3
+
+    # list_dir
+    b4 = format_lean_tool_breadcrumb("list_dir", {}, "file1\nfile2\n")
+    assert b4 == "> 📁 List `.` -> 2 items\n\n"
+
+    # run_command failure
+    b5 = format_lean_tool_breadcrumb(
+        "run_command", {"command": "cat missing.txt"}, "Error: failed with returncode 1"
+    )
+    assert b5 == "> ⚠️ ⚡ `run_command: cat missing.txt` (failed)\n\n"
+
+    # read_file with error
+    b_read_err = format_lean_tool_breadcrumb(
+        "read_file", {"path": "notfound.txt"}, "Error: File not found"
+    )
+    assert b_read_err == "> ⚠️ Reading file `notfound.txt` (Error: File not found)\n\n"
+
+    # read_file from header lines
+    b_read_hdr = format_lean_tool_breadcrumb(
+        "read_file", {"path": "app.py"}, "[app.py lines 10-25 of 100]\nL10: x\nL25: y"
+    )
+    assert b_read_hdr == "> 📖 Reading file `app.py` 10:25\n\n"
+
+    # generic fallback tool
+    b_custom = format_lean_tool_breadcrumb("custom_tool", {"name": "action"}, "ok")
+    assert b_custom == "> 🔧 `custom_tool: action`\n\n"
 
 
 @pytest.mark.asyncio

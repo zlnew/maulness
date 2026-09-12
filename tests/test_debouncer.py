@@ -184,7 +184,9 @@ async def test_debouncer_empty_flush_and_legacy_signature():
         # 2-arg callback that raises TypeError if called with is_overflow
         legacy_flushes.append((text, is_final))
 
-    debouncer = MessageStreamDebouncer(flush_callback=legacy_callback, interval_seconds=0.01)
+    debouncer = MessageStreamDebouncer(
+        flush_callback=legacy_callback, interval_seconds=0.01
+    )
 
     # Empty flush when not final should be a no-op
     await debouncer._flush(is_final=False)
@@ -262,6 +264,7 @@ async def test_debouncer_write_cancels_pending_delayed_flush():
 # Race Condition & Concurrency Tests
 # ==============================================================================
 
+
 @pytest.mark.asyncio
 async def test_debouncer_concurrent_writers_race():
     """Stress test debouncer with 10 concurrent async producers writing interleaved tokens."""
@@ -279,7 +282,9 @@ async def test_debouncer_concurrent_writers_race():
         finally:
             active_flushes -= 1
 
-    debouncer = MessageStreamDebouncer(flush_callback=instrumented_flush, interval_seconds=0.02)
+    debouncer = MessageStreamDebouncer(
+        flush_callback=instrumented_flush, interval_seconds=0.02
+    )
 
     async def worker(worker_id: int):
         for i in range(10):
@@ -307,7 +312,9 @@ async def test_debouncer_mutual_exclusion_invariant():
     active_executions = 0
     max_concurrency = 0
 
-    async def slow_mock_discord_edit(text: str, is_final: bool, is_overflow: bool = False):
+    async def slow_mock_discord_edit(
+        text: str, is_final: bool, is_overflow: bool = False
+    ):
         nonlocal active_executions, max_concurrency
         active_executions += 1
         max_concurrency = max(max_concurrency, active_executions)
@@ -316,7 +323,9 @@ async def test_debouncer_mutual_exclusion_invariant():
         finally:
             active_executions -= 1
 
-    debouncer = MessageStreamDebouncer(flush_callback=slow_mock_discord_edit, interval_seconds=0.01)
+    debouncer = MessageStreamDebouncer(
+        flush_callback=slow_mock_discord_edit, interval_seconds=0.01
+    )
 
     for i in range(30):
         await debouncer.write(f"chunk_{i} ")
@@ -332,6 +341,7 @@ async def test_debouncer_mutual_exclusion_invariant():
 # High-Throughput & Stress Tests
 # ==============================================================================
 
+
 @pytest.mark.asyncio
 async def test_debouncer_high_throughput_stream_stress():
     """Simulate a full LLM response stream (200 rapid tokens) with simulated Discord API latency."""
@@ -341,7 +351,9 @@ async def test_debouncer_high_throughput_stream_stress():
         await asyncio.sleep(0.01)  # 10ms Discord round-trip latency
         delivered_versions.append(text)
 
-    debouncer = MessageStreamDebouncer(flush_callback=mock_discord_api, interval_seconds=0.03)
+    debouncer = MessageStreamDebouncer(
+        flush_callback=mock_discord_api, interval_seconds=0.03
+    )
 
     expected_full_text = ""
     for i in range(200):
@@ -396,3 +408,31 @@ async def test_debouncer_massive_overflow_chain_stress():
     for chunk in overflow_chunks:
         fence_count = chunk.count("```")
         assert fence_count % 2 == 0, f"Unbalanced code block found in chunk: {chunk}"
+
+
+def test_chunk_markdown_message_boundaries_and_fences():
+    from maulness.core.debouncer import chunk_markdown_message
+
+    # Empty and short
+    assert chunk_markdown_message("") == []
+    assert chunk_markdown_message("Hello world", max_size=50) == ["Hello world"]
+
+    # Paragraph split
+    text = "Paragraph one is here.\n\nParagraph two is here."
+    chunks = chunk_markdown_message(text, max_size=30)
+    assert len(chunks) == 2
+    assert "Paragraph one is here." in chunks[0]
+    assert "Paragraph two is here." in chunks[1]
+
+    # Code block splitting balances fences in both chunks
+    code_text = "Intro text.\n```python\nline1 = 1\nline2 = 2\nline3 = 3\n```\nOutro."
+    code_chunks = chunk_markdown_message(code_text, max_size=40)
+    assert len(code_chunks) >= 2
+    for c in code_chunks:
+        assert c.count("```") % 2 == 0, f"Unbalanced fences in chunk: {c}"
+
+    # Single contiguous string without spaces splits safely without infinite loop
+    long_str = "x" * 150
+    str_chunks = chunk_markdown_message(long_str, max_size=50)
+    assert len(str_chunks) >= 3
+    assert "".join(str_chunks) == long_str
