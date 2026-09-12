@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
+from pydantic import BaseModel, Field
 
 
 class TaskMode(str, Enum):
@@ -111,4 +112,43 @@ class ApprovalRecord:
             except ValueError:
                 return None
         return None
+
+
+# ==============================================================================
+# Phase 2: Decoupled Multi-Agent Artifact Contracts & Milestone Sub-Sessions
+# ==============================================================================
+
+class Milestone(BaseModel):
+    """An atomic, verifiable unit of work within a larger task."""
+    id: str
+    title: str
+    files_to_modify: list[str] = Field(default_factory=list)
+    verification_command: str = ""
+    acceptance_criteria: str = ""
+
+
+class MilestonePlan(BaseModel):
+    """Structured architectural plan partitioned into verifiable milestones."""
+    task_id: str
+    summary: str = ""
+    milestones: list[Milestone] = Field(default_factory=list)
+
+
+class ChangeSet(BaseModel):
+    """Structured change payload emitted by the builder."""
+    task_id: str
+    milestone_id: Optional[str] = None
+    touched_files: list[str] = Field(default_factory=list)
+    git_diff_stat: str = ""
+    verification_passed: bool = True
+    verification_output: str = ""
+
+
+class ReviewVerdict(BaseModel):
+    """Structured evaluation returned by the reviewer."""
+    decision: str  # "PASS" or "REWORK"
+    flaws: list[str] = Field(default_factory=list)
+    target_rework_files: list[str] = Field(default_factory=list)
+    guidance: str = ""
+
 

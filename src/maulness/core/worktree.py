@@ -222,3 +222,33 @@ class WorktreeManager:
         except Exception as e:
             logger.error("Failed to rollback to checkpoint %s: %s", commit_hash, e)
             return False
+
+    def milestone_checkpoint(self, repo_path: Path, milestone_id: str, title: str) -> Optional[str]:
+        """Commit an explicit milestone checkpoint in the git worktree."""
+        label = f"maulness(checkpoint): {milestone_id} - {title}"
+        return self.create_checkpoint(repo_path, label)
+
+    def rollback_to_previous_milestone(self, repo_path: Path) -> bool:
+        """Reset the worktree hard to HEAD~1 and clean uncommitted changes."""
+        if not self.is_git_repo(repo_path):
+            return False
+        try:
+            logger.info("Rolling back worktree in '%s' to HEAD~1", repo_path)
+            reset_res = subprocess.run(
+                ["git", "reset", "--hard", "HEAD~1"],
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            clean_res = subprocess.run(
+                ["git", "clean", "-fd"],
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            return reset_res.returncode == 0 and clean_res.returncode == 0
+        except Exception as e:
+            logger.error("Failed to rollback to previous milestone: %s", e)
+            return False

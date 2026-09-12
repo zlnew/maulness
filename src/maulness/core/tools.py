@@ -1,5 +1,6 @@
 import asyncio
 from collections import deque
+import difflib
 import fnmatch
 import hashlib
 import json
@@ -168,6 +169,27 @@ TOOL_DEFINITIONS = [
                         "description": "Optional repository path (defaults to current workspace)",
                     }
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "patch_file",
+            "description": "Apply a standard unified diff patch to a target file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to patch",
+                    },
+                    "patch": {
+                        "type": "string",
+                        "description": "Unified diff patch content (e.g. diff starting with @@ or unified chunk lines)",
+                    },
+                },
+                "required": ["path", "patch"],
             },
         },
     },
@@ -480,7 +502,7 @@ def _execute_replace_file_content(
     replacement_content: str,
     allow_multiple: bool = False,
 ) -> str:
-    """Execute precision chunk replacement within a target file."""
+    """Execute precision chunk replacement within a target file with fuzzy fallback."""
     if not target.exists():
         return f"Error: File '{target}' does not exist."
     if target.is_dir():
@@ -494,10 +516,49 @@ def _execute_replace_file_content(
         return f"Error reading file '{target}': {e}"
 
     count = content.count(target_content)
+
+    # If exact count is 0, attempt indentation-agnostic fuzzy matching
     if count == 0:
+        lines = content.splitlines(keepends=True)
+        target_lines = [l.strip() for l in target_content.splitlines() if l.strip()]
+        if target_lines:
+            matched_start = -1
+            matched_len = -1
+            for i in range(len(lines)):
+                match = True
+                curr_t_idx = 0
+                for j in range(i, len(lines)):
+                    if not lines[j].strip():
+                        continue
+                    if lines[j].strip() == target_lines[curr_t_idx]:
+                        curr_t_idx += 1
+                        if curr_t_idx == len(target_lines):
+                            matched_start = i
+                            matched_len = j - i + 1
+                            break
+                    else:
+                        match = False
+                        break
+                if match and matched_start != -1:
+                    break
+
+            if matched_start != -1:
+                orig_block = "".join(lines[matched_start : matched_start + matched_len])
+                new_content = content[:content.find(orig_block)] + replacement_content + content[content.find(orig_block) + len(orig_block):]
+                try:
+                    target.write_text(new_content, encoding="utf-8")
+                    lines_add = len(replacement_content.splitlines())
+                    lines_sub = matched_len
+                    return (
+                        f"Successfully replaced block in '{target}' via fuzzy matching. "
+                        f"(+{lines_add} / -{lines_sub} lines)"
+                    )
+                except Exception as e:
+                    return f"Error writing file '{target}': {e}"
+
         return (
             f"Error: target_content not found in '{target}'. "
-            "Ensure exact matching including indentation, spaces, and line breaks."
+            "Ensure matching including surrounding lines or try applying a unified diff via patch_file."
         )
 
     if count > 1 and not allow_multiple:
@@ -519,6 +580,56 @@ def _execute_replace_file_content(
         )
     except Exception as e:
         return f"Error writing file '{target}': {e}"
+
+
+def _execute_patch_file(target: Path, patch_text: str) -> str:
+    """Apply a unified diff patch to a target file."""
+    if not target.exists():
+        return f"Error: File '{target}' does not exist."
+    if target.is_dir():
+        return f"Error: '{target}' is a directory, not a file."
+    if not patch_text.strip():
+        return "Error: patch must not be empty."
+
+    git_bin = shutil.which("git")
+    patch_bin = shutil.which("patch")
+
+    # Try applying via git apply or patch command
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+        patch_input = patch_text.strip()
+        # If header missing, synthesize a minimal unified diff header
+        if not patch_input.startswith("---"):
+            header = f"--- a/{target.name}\n+++ b/{target.name}\n"
+            patch_input = header + patch_input
+
+        if git_bin:
+            res = subprocess.run(
+                [git_bin, "apply", "--recount", "--whitespace=fix", "-"],
+                input=patch_input,
+                cwd=str(target.parent),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if res.returncode == 0:
+                return f"Successfully applied unified patch to '{target}'."
+
+        if patch_bin:
+            res = subprocess.run(
+                [patch_bin, "-u", str(target)],
+                input=patch_text,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if res.returncode == 0:
+                return f"Successfully applied patch to '{target}'."
+
+        # Fallback: simple line replacement if patch contains + and - markers
+        return f"Error applying patch to '{target}'. Check patch format."
+    except Exception as e:
+        return f"Error applying patch to '{target}': {e}"
 
 
 async def _execute_search_files(
@@ -794,6 +905,28 @@ async def _execute_tool_action(
             return res.stdout.strip() or "Working tree clean (no changes)."
         except Exception as e:
             return f"Error running git status in '{target}': {e}"
+
+    # 8. patch_file
+    elif name == "patch_file":
+        target = resolve_path(args.get("path", ""), cwd)
+        patch_text = args.get("patch", "")
+
+        if policy == PolicyAction.ASK and on_approval and not yolo:
+            req = ApprovalRequestEvent(
+                request_id=1,
+                call_id=f"call_{name}",
+                tool_name="patch_file",
+                args={
+                    "path": str(target),
+                    "patch_len": len(patch_text),
+                },
+                session_id=session_id,
+            )
+            approved = await on_approval(req)
+            if not approved:
+                return f"Execution cancelled: User rejected patch on '{target}'."
+
+        return _execute_patch_file(target, patch_text)
 
     return f"Error: Unknown tool '{name}'."
 

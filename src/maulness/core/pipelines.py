@@ -46,6 +46,7 @@ class PipelineStage(BaseModel):
     checkpoint_before_stage: bool = False
     is_gate_only: bool = False
     prompt: str = ""
+    run_milestones: bool = False
     gate: Optional[PipelineGate] = None
     verification_gate: Optional[VerificationGate] = None
     transitions: Optional[StageTransitions] = None

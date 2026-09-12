@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+import re
 import subprocess
 import uuid
 from pathlib import Path
@@ -12,6 +14,10 @@ from maulness.core.models import (
     AgentMessageEvent,
     AgentThoughtEvent,
     ApprovalRequestEvent,
+    ChangeSet,
+    Milestone,
+    MilestonePlan,
+    ReviewVerdict,
     TaskMode,
     TaskRecord,
     TaskStatus,
@@ -84,6 +90,55 @@ def sync_task_ledger(
     except Exception as e:
         logger.warning("Failed to sync task ledger to '%s': %s", ledger_path, e)
         return ""
+
+
+def parse_milestone_plan(plan_text: str, task_id: str) -> Optional[MilestonePlan]:
+    """Parse structured JSON or markdown milestone list from planner output."""
+    if not plan_text:
+        return None
+
+    # 1. Try finding fenced or raw JSON MilestonePlan
+    json_candidates = []
+    json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", plan_text, re.DOTALL)
+    if json_match:
+        json_candidates.append(json_match.group(1))
+
+    # Also check if text has { "milestones": ... }
+    m_block = re.search(r"(\{\s*\"(?:task_id|milestones)\".*?\})", plan_text, re.DOTALL)
+    if m_block:
+        json_candidates.append(m_block.group(1))
+
+    for cand in json_candidates:
+        try:
+            data = json.loads(cand)
+            if isinstance(data, dict) and "milestones" in data:
+                return MilestonePlan.model_validate(data)
+        except Exception:
+            pass
+
+    # 2. Heuristic extraction from markdown milestone headings (e.g. "### Milestone 1: ...")
+    milestones: list[Milestone] = []
+    blocks = re.split(r"(?m)^#+\s*(?:Milestone\s*\d+|M\d+)\s*[:\-]\s*", plan_text)
+    if len(blocks) > 1:
+        headers = re.findall(r"(?m)^#+\s*(?:Milestone\s*\d+|M\d+)\s*[:\-]\s*([^\n]+)", plan_text)
+        for idx, (head, body) in enumerate(zip(headers, blocks[1:], strict=False), 1):
+            cmd_match = re.search(r"(?:Verification|Test|Command)\s*:\s*`([^`]+)`", body)
+            ver_cmd = cmd_match.group(1) if cmd_match else ""
+            crit_match = re.search(r"(?:Criteria|Acceptance)\s*:\s*([^\n]+)", body)
+            crit = crit_match.group(1).strip() if crit_match else body.strip()[:200]
+            milestones.append(
+                Milestone(
+                    id=f"M{idx}",
+                    title=head.strip(),
+                    verification_command=ver_cmd,
+                    acceptance_criteria=crit,
+                )
+            )
+
+    if milestones:
+        return MilestonePlan(task_id=task_id, summary=plan_text[:300], milestones=milestones)
+
+    return None
 
 
 class PipelineOrchestrator:
@@ -269,20 +324,103 @@ class PipelineOrchestrator:
                     session_suffix = f"_r{exec_count}" if exec_count > 0 else ""
                     session_id = f"{task_id}_{stage.name}{session_suffix}"
 
-                    try:
-                        stage_output = await provider.run(
-                            session_id=session_id,
-                            prompt=stage_prompt,
-                            workspace_path=stage_workspace,
-                            on_thought=on_thought,
-                            on_message=on_message,
-                            on_approval=on_approval if stage.requires_approval else None,
-                        )
-                    except Exception as e:
+                    # Phase 2: Check if stage runs milestone sub-sessions
+                    plan_candidate = context.get("plan") or context.get("previous_output") or ""
+                    parsed_plan = parse_milestone_plan(plan_candidate, task_id)
+
+                    if (stage.run_milestones or (stage.profile == "builder" and parsed_plan and len(parsed_plan.milestones) > 1)):
                         if verbose:
-                            console.print(f"[red][x] Stage '{stage.name}' failed: {e}[/red]")
-                        await self.storage.update_task_status(task_id, TaskStatus.FAILED)
-                        raise
+                            console.print(
+                                f"[bold magenta][*] Launching Milestone Sub-Sessions ({len(parsed_plan.milestones)} milestones)[/bold magenta]"
+                            )
+
+                        milestone_outputs = []
+                        for m_idx, milestone in enumerate(parsed_plan.milestones, 1):
+                            if verbose:
+                                console.print(
+                                    f"\n[cyan]── Milestone {m_idx}/{len(parsed_plan.milestones)}: {milestone.title} ({milestone.id}) ──[/cyan]"
+                                )
+
+                            # Context Flushing: Fresh minimal prompt turn carrying only high-level plan, current goal, and git stat
+                            diff_stat_res = subprocess.run(
+                                ["git", "diff", "--stat", "HEAD"],
+                                cwd=str(stage_workspace),
+                                capture_output=True,
+                                text=True,
+                            )
+                            git_stat = diff_stat_res.stdout.strip() or "(Clean worktree)"
+
+                            milestone_prompt = (
+                                f"# High-Level Task Objective\n{title}\n\n"
+                                f"## Active Milestone ({milestone.id}): {milestone.title}\n"
+                                f"Acceptance Criteria: {milestone.acceptance_criteria}\n"
+                            )
+                            if milestone.verification_command:
+                                milestone_prompt += f"Verification Command: `{milestone.verification_command}`\n"
+                            milestone_prompt += (
+                                f"\n## Cumulative Worktree Changes\n{git_stat}\n\n"
+                                f"Implement this milestone using your available tools. Focus strictly on {milestone.title}."
+                            )
+
+                            m_session_id = f"{session_id}_{milestone.id}"
+                            try:
+                                m_output = await provider.run(
+                                    session_id=m_session_id,
+                                    prompt=milestone_prompt,
+                                    workspace_path=stage_workspace,
+                                    on_thought=on_thought,
+                                    on_message=on_message,
+                                    on_approval=on_approval if stage.requires_approval else None,
+                                    max_tool_turns=10,  # Hard limit per milestone sub-session
+                                )
+                                milestone_outputs.append(f"### {milestone.id}: {milestone.title}\n{m_output}")
+
+                                # Run milestone verification command if provided
+                                if milestone.verification_command and self.worktree_manager.is_git_repo(stage_workspace):
+                                    v_res = subprocess.run(
+                                        milestone.verification_command,
+                                        shell=True,
+                                        cwd=str(stage_workspace),
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=60,
+                                    )
+                                    if v_res.returncode != 0:
+                                        if verbose:
+                                            console.print(
+                                                f"[bold yellow][!] Milestone {milestone.id} verification failed. "
+                                                "Attempting git rollback...[/bold yellow]"
+                                            )
+                                        self.worktree_manager.rollback_to_previous_milestone(stage_workspace)
+                                    else:
+                                        self.worktree_manager.milestone_checkpoint(stage_workspace, milestone.id, milestone.title)
+                                else:
+                                    if self.worktree_manager.is_git_repo(stage_workspace):
+                                        self.worktree_manager.milestone_checkpoint(stage_workspace, milestone.id, milestone.title)
+
+                            except Exception as m_err:
+                                if verbose:
+                                    console.print(f"[red][x] Milestone {milestone.id} error: {m_err}[/red]")
+                                if self.worktree_manager.is_git_repo(stage_workspace):
+                                    self.worktree_manager.rollback_to_previous_milestone(stage_workspace)
+                                raise
+
+                        stage_output = "\n\n".join(milestone_outputs)
+                    else:
+                        try:
+                            stage_output = await provider.run(
+                                session_id=session_id,
+                                prompt=stage_prompt,
+                                workspace_path=stage_workspace,
+                                on_thought=on_thought,
+                                on_message=on_message,
+                                on_approval=on_approval if stage.requires_approval else None,
+                            )
+                        except Exception as e:
+                            if verbose:
+                                console.print(f"[red][x] Stage '{stage.name}' failed: {e}[/red]")
+                            await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                            raise
 
                 # Execute deterministic verification gate if configured
                 if stage.verification_gate:
