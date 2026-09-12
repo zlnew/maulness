@@ -9,9 +9,10 @@ def balance_code_blocks(text: str) -> tuple[str, str]:
     if fence_count % 2 == 1:
         last_idx = text.rfind("```")
         newline_idx = text.find("\n", last_idx)
-        lang = ""
         if newline_idx != -1:
             lang = text[last_idx + 3 : newline_idx].strip()
+        else:
+            lang = text[last_idx + 3 :].strip()
         closed_chunk = text + "\n```"
         reopen_prefix = f"```{lang}\n" if lang else "```\n"
         return closed_chunk, reopen_prefix
@@ -75,7 +76,7 @@ class MessageStreamDebouncer:
         except asyncio.CancelledError:
             return
         if self._is_active:
-            await self._flush(is_final=False)
+            await asyncio.shield(self._flush(is_final=False))
 
     async def _flush(self, is_final: bool = False):
         async with self._lock:
