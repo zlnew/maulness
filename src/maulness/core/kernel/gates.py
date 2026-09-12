@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import logging
+import os
 import re
 import shlex
 import time
@@ -549,3 +551,74 @@ class DeterministicGateRunner:
             )
         except Exception as e:
             logger.warning("[gate] Failed to record gate_eval event for task %s: %s", task_id, e)
+
+
+class TestTamperingDetectedError(Exception):
+    """Raised when the agent deletes or modifies baseline tests without authorization."""
+    __test__ = False
+
+    def __init__(self, modified_or_deleted: list[str]):
+        super().__init__(f"TEST_TAMPERING_DETECTED: Pre-existing tests were modified or deleted: {', '.join(modified_or_deleted)}")
+        self.modified_or_deleted = modified_or_deleted
+
+
+class TestFreezeGate:
+    """Computes and enforces immutable SHA256 checksums on baseline test files."""
+    __test__ = False
+
+    TEST_PATTERNS = ("test_*.py", "*_test.py", "*_test.go", "*.test.ts", "*.test.js", "*.spec.ts", "*.spec.js")
+
+    def __init__(self, workspace_path: Path):
+        self.workspace_path = workspace_path.resolve()
+        self.baseline_hashes: dict[str, str] = self._snapshot_test_hashes()
+
+    def _snapshot_test_hashes(self) -> dict[str, str]:
+        """Scan workspace for test files and record their SHA-256 hashes."""
+        hashes: dict[str, str] = {}
+        if not self.workspace_path.exists():
+            return hashes
+
+        # Scan tests directory or whole workspace if tests/ exists
+        candidate_dirs = [self.workspace_path / "tests", self.workspace_path / "test"]
+        scan_roots = [d for d in candidate_dirs if d.exists() and d.is_dir()]
+        if not scan_roots:
+            scan_roots = [self.workspace_path]
+
+        for root_dir in scan_roots:
+            for root, dirs, files in os.walk(root_dir):
+                dirs[:] = [d for d in dirs if d not in (".git", ".venv", "__pycache__", "node_modules", ".worktrees")]
+                for f in files:
+                    if any(re.search(pat.replace("*", ".*"), f) for pat in self.TEST_PATTERNS):
+                        fpath = Path(root) / f
+                        try:
+                            rel_p = str(fpath.relative_to(self.workspace_path))
+                            hashes[rel_p] = hashlib.sha256(fpath.read_bytes()).hexdigest()
+                        except Exception as e:
+                            logger.debug("[test_freeze] Unable to hash %s: %e", fpath, e)
+
+        logger.info("[test_freeze] Baseline test snapshot recorded with %d test files", len(hashes))
+        return hashes
+
+    def verify_no_tampering(self) -> list[str]:
+        """Check current workspace against baseline test hashes.
+        
+        Returns list of violated test paths (modified or deleted).
+        """
+        violations: list[str] = []
+        for rel_p, orig_hash in self.baseline_hashes.items():
+            fpath = self.workspace_path / rel_p
+            if not fpath.exists():
+                violations.append(f"{rel_p} (DELETED)")
+                continue
+            try:
+                curr_hash = hashlib.sha256(fpath.read_bytes()).hexdigest()
+                if curr_hash != orig_hash:
+                    violations.append(f"{rel_p} (MODIFIED)")
+            except Exception as e:
+                violations.append(f"{rel_p} (UNREADABLE: {e})")
+
+        if violations:
+            logger.warning("[test_freeze] Test tampering detected: %s", violations)
+            raise TestTamperingDetectedError(violations)
+
+        return violations

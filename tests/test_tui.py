@@ -150,6 +150,7 @@ stages:
 
     app = MaulnessTUIApp()
     app.pipeline_manager = PipelineManager(pipelines_dir=tmp_path)
+    app.profile_manager = ProfileManager(profiles_dir=tmp_path / "profiles_empty")
     commands = app.get_dynamic_commands()
     command_keys = [c[0] for c in commands]
 
@@ -157,7 +158,7 @@ stages:
     assert "/pipeline my_custom_review " in command_keys
     # Verify standard pipelines appear
     assert "/pipeline standard " in command_keys
-    # Verify profiles appear dynamically
+    # Verify profiles appear dynamically (fallback to templates when dir is empty)
     assert "/profile builder" in command_keys
     assert "/profile planner" in command_keys
 

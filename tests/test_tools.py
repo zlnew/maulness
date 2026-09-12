@@ -985,20 +985,24 @@ async def test_execute_tool_action_all_exceptions_and_empty_cmd(tmp_path: Path):
     assert res_empty_cmd == "Error: No command provided."
 
     # Lines 650-651: run_command timeout
-    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="sleep 100", timeout=60)):
-        res_timeout = await _execute_tool_action(
-            name="run_command",
-            args={"command": "sleep 100"},
-            cwd=tmp_path,
-            session_id="sess",
-            policy=PolicyAction.ALLOW,
-            on_approval=None,
-            yolo=True,
-        )
-        assert "timed out after 60s" in res_timeout
+    with patch("subprocess.Popen") as mock_popen:
+        mock_proc = mock_popen.return_value
+        mock_proc.communicate.side_effect = subprocess.TimeoutExpired(cmd="sleep 100", timeout=60)
+        mock_proc.pid = 12345
+        with patch("os.killpg"):
+            res_timeout = await _execute_tool_action(
+                name="run_command",
+                args={"command": "sleep 100"},
+                cwd=tmp_path,
+                session_id="sess",
+                policy=PolicyAction.ALLOW,
+                on_approval=None,
+                yolo=True,
+            )
+            assert "timed out after 60s" in res_timeout
 
     # Lines 652-653: run_command general exception
-    with patch("subprocess.run", side_effect=RuntimeError("Subprocess failed")):
+    with patch("subprocess.Popen", side_effect=RuntimeError("Subprocess failed")):
         res_cmd_err = await _execute_tool_action(
             name="run_command",
             args={"command": "echo test"},

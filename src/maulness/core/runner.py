@@ -17,6 +17,8 @@ from maulness.core.models import (
     TaskStatus,
 )
 from maulness.core.approvals import ApprovalClassifier
+from maulness.core.kernel.budgets import BudgetExceededError, BudgetGuard, BudgetLimits
+from maulness.core.kernel.gates import TestFreezeGate, TestTamperingDetectedError
 from maulness.core.profiles import ProfileManager
 from maulness.core.providers.factory import get_provider_for_profile
 from maulness.core.worktree import WorktreeManager
@@ -167,10 +169,22 @@ class TaskRunner:
             else:
                 console.print(event.delta, end="")
 
+        test_freeze = TestFreezeGate(target_workspace)
+        budget_guard = BudgetGuard()
+
         try:
             provider = get_provider_for_profile(profile)
 
             async def _execute_on(ws: Path):
+                # Ensure baseline tests are hashed on actual workspace/worktree
+                active_freeze = TestFreezeGate(ws)
+
+                async def wrapped_tool_call(event: AgentToolCallEvent):
+                    # Check operational budget before tool execution
+                    budget_guard.record_turn()
+                    if on_tool_call:
+                        await on_tool_call(event)
+
                 await provider.run(
                     session_id=task_id,
                     prompt=prompt,
@@ -179,9 +193,12 @@ class TaskRunner:
                     on_init=internal_init_handler,
                     on_thought=default_thought_handler,
                     on_message=default_message_handler,
-                    on_tool_call=on_tool_call,
+                    on_tool_call=wrapped_tool_call,
                     on_approval=terminal_approval_handler,
                 )
+
+                # Final test integrity freeze verification
+                active_freeze.verify_no_tampering()
 
             if use_worktree:
                 with self.worktree_manager.isolated_worktree(
@@ -197,6 +214,16 @@ class TaskRunner:
             if verbose:
                 console.print(f"\n[bold green]Task {task_id} completed successfully.[/bold green]")
 
+        except BudgetExceededError as e:
+            if verbose:
+                console.print(f"\n[bold yellow]Task suspended (budget exceeded): {e}[/bold yellow]")
+            await self.storage.update_task_status(task_id, TaskStatus.SUSPENDED_AFK)
+            raise
+        except TestTamperingDetectedError as e:
+            if verbose:
+                console.print(f"\n[bold red]Task failed (test tampering): {e}[/bold red]")
+            await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+            raise
         except FileNotFoundError as e:
             if verbose:
                 console.print(f"[bold red]Execution error: {e}[/bold red]")

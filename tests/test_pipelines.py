@@ -63,6 +63,7 @@ stages:
     assert custom.name == "custom_test"
     assert len(custom.stages) == 1
     assert custom.stages[0].profile == "builder"
+    assert "custom_test" in [p.name for p in manager.list_pipelines()]
 
 
 @pytest.mark.asyncio

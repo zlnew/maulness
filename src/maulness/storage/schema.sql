@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     origin_channel_id TEXT,
     origin_thread_id TEXT,
     mode TEXT CHECK(mode IN ('direct', 'multi')) NOT NULL DEFAULT 'direct',
-    status TEXT CHECK(status IN ('planning', 'building', 'review', 'done', 'failed')) NOT NULL DEFAULT 'planning',
+    status TEXT CHECK(status IN ('planning', 'building', 'review', 'done', 'failed', 'suspended_afk')) NOT NULL DEFAULT 'planning',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

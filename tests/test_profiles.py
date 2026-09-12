@@ -6,8 +6,9 @@ import pytest
 from maulness.core.profiles import ProfileManager, Profile
 
 
-def test_profile_manager_list():
-    pm = ProfileManager()
+def test_profile_manager_list(tmp_path: Path):
+    # Empty dir falls back to template discovery
+    pm = ProfileManager(profiles_dir=tmp_path / "nonexistent")
     profiles = pm.list_profiles()
     names = {p.name for p in profiles}
 
@@ -15,10 +16,11 @@ def test_profile_manager_list():
     assert "planner" in names
     assert "builder" in names
     assert "reviewer" in names
+    assert "sdk" not in names
 
 
-def test_get_specific_profile():
-    pm = ProfileManager()
+def test_get_specific_profile(tmp_path: Path):
+    pm = ProfileManager(profiles_dir=tmp_path / "nonexistent")
     planner = pm.get_profile("planner")
     assert planner.name == "planner"
     assert planner.provider == "gemini"
@@ -27,16 +29,16 @@ def test_get_specific_profile():
     assert "Maul" in planner.effective_system_prompt()
 
 
-def test_get_builder_profile():
-    pm = ProfileManager()
+def test_get_builder_profile(tmp_path: Path):
+    pm = ProfileManager(profiles_dir=tmp_path / "nonexistent")
     builder = pm.get_profile("builder")
     assert builder.name == "builder"
     assert builder.provider == "acp"
     assert "agy" in (builder.command or "")
 
 
-def test_fallback_profile():
-    pm = ProfileManager()
+def test_fallback_profile(tmp_path: Path):
+    pm = ProfileManager(profiles_dir=tmp_path / "nonexistent")
     unknown = pm.get_profile("nonexistent_role")
     assert unknown.name == "nonexistent_role"
     assert unknown.provider in ("gemini", "acp")

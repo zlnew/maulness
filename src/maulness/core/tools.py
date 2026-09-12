@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
@@ -630,22 +631,40 @@ async def _execute_tool_action(
 
         try:
             cmd_target, is_shell = build_sandboxed_command(cmd, cwd, sandbox_mode=sandbox_mode)
-            loop = asyncio.get_running_loop()
-            proc = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(
+
+            def _run_with_pgroup():
+                p = subprocess.Popen(
                     cmd_target,
                     shell=is_shell,
                     cwd=str(cwd),
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
-                    timeout=60,
+                    start_new_session=True,
                     env=os.environ.copy(),
-                ),
-            )
-            output = proc.stdout
-            if proc.stderr:
-                output += f"\n[stderr]\n{proc.stderr}"
+                )
+                try:
+                    stdout, stderr = p.communicate(timeout=60)
+                    return p.returncode, stdout, stderr
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+                    except Exception:
+                        pass
+                    try:
+                        p.communicate(timeout=2)
+                    except Exception:
+                        try:
+                            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                        except Exception:
+                            pass
+                    raise
+
+            loop = asyncio.get_running_loop()
+            returncode, stdout, stderr = await loop.run_in_executor(None, _run_with_pgroup)
+            output = stdout
+            if stderr:
+                output += f"\n[stderr]\n{stderr}"
             return truncate_observation(output.strip() or "(Command completed with empty output)")
         except subprocess.TimeoutExpired:
             return "Error: Command timed out after 60s."

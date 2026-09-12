@@ -927,10 +927,12 @@ class MaulnessBot(commands.Bot):
             new_tags = []
             for tag in thread.applied_tags:
                 # Keep repo or mode tags, replace status tag
-                if tag.name.lower() not in ("planning", "building", "review", "done", "failed"):
+                if tag.name.lower() not in ("planning", "building", "review", "done", "failed", "suspended_afk", "suspended"):
                     new_tags.append(tag)
 
             target_tag = available.get(status_tag_name.lower())
+            if not target_tag and status_tag_name.lower() in ("suspended_afk", "suspended"):
+                target_tag = available.get("suspended") or available.get("failed")
             if target_tag and target_tag not in new_tags:
                 new_tags.append(target_tag)
 

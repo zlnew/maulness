@@ -135,19 +135,19 @@ class PipelineManager:
             pass
 
     def list_pipelines(self) -> list[PipelineDefinition]:
-        """List all discovered pipelines (user definitions override templates)."""
+        """List all discovered pipelines strictly from the pipelines directory (~/.config/maulness/pipelines)."""
         pipelines: dict[str, PipelineDefinition] = {}
 
-        # 1. Load built-in templates first
-        if TEMPLATE_PIPELINES_DIR.exists():
-            for file in sorted(TEMPLATE_PIPELINES_DIR.glob("*.yaml")):
+        # Scan pipelines from user config dir (~/.config/maulness/pipelines)
+        if self.pipelines_dir.exists():
+            for file in sorted(self.pipelines_dir.glob("*.yaml")):
                 p = self._load_file(file)
                 if p:
                     pipelines[p.name] = p
 
-        # 2. Overlay user pipelines in ~/.config/maulness/pipelines
-        if self.pipelines_dir.exists():
-            for file in sorted(self.pipelines_dir.glob("*.yaml")):
+        # If user pipelines dir is empty or doesn't exist, seed/fallback from templates
+        if not pipelines and TEMPLATE_PIPELINES_DIR.exists():
+            for file in sorted(TEMPLATE_PIPELINES_DIR.glob("*.yaml")):
                 p = self._load_file(file)
                 if p:
                     pipelines[p.name] = p

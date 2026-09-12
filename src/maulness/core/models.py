@@ -15,6 +15,7 @@ class TaskStatus(str, Enum):
     REVIEW = "review"
     DONE = "done"
     FAILED = "failed"
+    SUSPENDED_AFK = "suspended_afk"
 
 
 class ApprovalStatus(str, Enum):

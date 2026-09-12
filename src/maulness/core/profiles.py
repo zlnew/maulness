@@ -341,17 +341,17 @@ class ProfileManager:
         self.profiles_dir = profiles_dir or USER_PROFILES_DIR
 
     def list_profiles(self) -> list[Profile]:
-        """List all discovered profiles (user directories take precedence over templates)."""
+        """List all discovered profiles strictly from the profiles directory (~/.config/maulness/profiles)."""
         profiles: dict[str, Profile] = {}
 
-        # 1. Load built-in templates first
-        if TEMPLATE_PROFILES_DIR.exists():
-            for p in self._discover_in_dir(TEMPLATE_PROFILES_DIR):
-                profiles[p.name] = p
-
-        # 2. Overlay user profiles in ~/.config/maulness/profiles
+        # Scan profiles from user config dir (~/.config/maulness/profiles)
         if self.profiles_dir.exists():
             for p in self._discover_in_dir(self.profiles_dir):
+                profiles[p.name] = p
+
+        # If user profiles dir is empty or doesn't exist, seed/fallback from templates
+        if not profiles and TEMPLATE_PROFILES_DIR.exists():
+            for p in self._discover_in_dir(TEMPLATE_PROFILES_DIR):
                 profiles[p.name] = p
 
         return list(profiles.values())
