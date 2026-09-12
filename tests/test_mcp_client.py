@@ -122,9 +122,19 @@ async def test_mcp_client_manager_integration(tmp_path: Path):
     assert manager.is_mcp_tool("add") is True
     assert manager.is_mcp_tool("mcp__calc__add") is True
 
-    # Call via manager
-    result = await manager.call_tool("add", {"a": 40, "b": 2}, workspace_path=tmp_path)
-    assert result == "42"
+    # Test alias resolution: hyphen/underscore variations
+    assert manager.is_mcp_tool("calc__add") is True
+    assert manager.is_mcp_tool("mcp__calc__add") is True
+
+    # Call via manager using aliases
+    result1 = await manager.call_tool("add", {"a": 40, "b": 2}, workspace_path=tmp_path)
+    assert result1 == "42"
+
+    result2 = await manager.call_tool("calc__add", {"a": 10, "b": 5}, workspace_path=tmp_path)
+    assert result2 == "15"
+
+    result3 = await manager.call_tool("mcp__calc__add", {"a": 20, "b": 7}, workspace_path=tmp_path)
+    assert result3 == "27"
 
     # Test tools.py get_effective_tool_definitions
     effective_defs = await get_effective_tool_definitions(workspace_path=tmp_path)
@@ -159,5 +169,61 @@ async def test_mcp_client_manager_workspace_switching(tmp_path: Path):
     cfg2 = manager.discover_config(workspace_path=ws2)
     assert "server2" in cfg2
     assert "server1" not in cfg2
+
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_mcp_hyphen_underscore_alias_resolution(tmp_path: Path):
+    """Test that hyphenated server names like 'expense-tracker' resolve when called with underscores."""
+    server_script = (
+        "import sys, json\n"
+        "while True:\n"
+        "    line = sys.stdin.readline()\n"
+        "    if not line: break\n"
+        "    req = json.loads(line)\n"
+        "    method = req.get('method')\n"
+        "    req_id = req.get('id')\n"
+        "    if method == 'initialize':\n"
+        "        res = {'jsonrpc': '2.0', 'id': req_id, 'result': {'protocolVersion': '2024-11-05'}}\n"
+        "        sys.stdout.write(json.dumps(res) + '\\n'); sys.stdout.flush()\n"
+        "    elif method == 'tools/list':\n"
+        "        res = {'jsonrpc': '2.0', 'id': req_id, 'result': {'tools': [{'name': 'list_items', 'description': 'List items', 'inputSchema': {'type': 'object'}}]}}\n"
+        "        sys.stdout.write(json.dumps(res) + '\\n'); sys.stdout.flush()\n"
+        "    elif method == 'tools/call':\n"
+        "        res = {'jsonrpc': '2.0', 'id': req_id, 'result': {'content': [{'type': 'text', 'text': 'item-1, item-2'}]}}\n"
+        "        sys.stdout.write(json.dumps(res) + '\\n'); sys.stdout.flush()\n"
+    )
+
+    mcp_config = tmp_path / ".mcp.json"
+    mcp_config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "expense-tracker": {
+                        "command": sys.executable,
+                        "args": ["-c", server_script],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = MCPClientManager.get_instance()
+    await manager.shutdown()
+
+    await manager.get_tool_definitions(workspace_path=tmp_path)
+
+    # Check that hyphenated, underscored, and bare all resolve
+    assert manager.is_mcp_tool("list_items") is True
+    assert manager.is_mcp_tool("mcp__expense-tracker__list_items") is True
+    assert manager.is_mcp_tool("mcp__expense_tracker__list_items") is True
+    assert manager.is_mcp_tool("expense_tracker__list_items") is True
+    assert manager.is_mcp_tool("expense-tracker__list_items") is True
+
+    # Call with underscore alias
+    res = await manager.call_tool("mcp__expense_tracker__list_items", {}, workspace_path=tmp_path)
+    assert res == "item-1, item-2"
 
     await manager.shutdown()

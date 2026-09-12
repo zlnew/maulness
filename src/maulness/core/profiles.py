@@ -313,8 +313,38 @@ class Profile(BaseModel):
         return result
 
     def effective_system_prompt(self, workspace_path: Optional[Path] = None) -> str:
-        """Combine role-specific system prompt, profile SOUL.md, root SOUL.md, workspace doctrine, stack rules, and skills summary."""
+        """Combine harness environment grounding, profile SOUL.md, root SOUL.md, workspace doctrine, stack rules, and skills summary."""
         parts = []
+
+        # Effective workspace resolution
+        effective_ws = (
+            Path(workspace_path).resolve()
+            if workspace_path
+            else (
+                Path(self.workspace).resolve()
+                if self.workspace and self.workspace != "inherit"
+                else config.workspace_root
+            )
+        )
+
+        # 1. Foundation: Maulness Harness & System Self-Awareness
+        harness_banner = [
+            "## Maulness Agent Harness Environment",
+            "- You are running inside the **Maulness** (`maulness`) autonomous agent harness on host `nova` (`linux`).",
+            f"- **Active Profile:** `{self.name}` ({self.description or 'Specialized Agent Profile'}).",
+            f"- **Active Workspace:** `{effective_ws}`.",
+            "- **Configuration Directory:** `~/.config/maulness/` (contains `config.yaml`, `.env`, `mcp.json`, `maulness.db`, and `profiles/<name>/`).",
+            "- **Knowledge Base & Persistent Memory:** `~/.config/maulness/MEMORY.md`, profile-level `MEMORY.md`, and workspace `_memory/`.",
+            "- **Model Context Protocol (MCP):** External services and tools (such as `expense-tracker`) are mounted as native function tools. You can invoke them directly using their function names (e.g. `list_transactions`, `get_balance_summary`) or namespaced names (`mcp__<server>__<tool>`).",
+            "- **Operational & Tool Execution Rules:**",
+            "  * Always use real function calls. Never simulate, pretend, or print markdown breadcrumbs (such as `> **tool_name**`) in your message text.",
+            "  * Never guess, assume, or invent file contents, command results, or API data. Inspect them with real tools.",
+            "  * **Capped Result / Pagination Rule:** If a tool returns a capped or paginated result (e.g., 100 items returned when asking for more), this indicates a server-side maximum limit. DO NOT repeatedly call the same tool with higher numbers (e.g., 200, 1000, 5000). Analyze the dataset already retrieved or use pagination parameters (`page`, `offset`) if available.",
+            "  * **Mandatory Final Textual Synthesis:** After completing your tool calls, you MUST formulate and emit a clear, informative, and complete final textual answer to the user. Never end your turn with empty text or leave your conclusions solely in internal thought/reasoning blocks.",
+            "  * **Discord & Chat Cleanliness:** Deliver clean, high-signal, fluff-free responses formatted with concise Markdown.",
+        ]
+        parts.append("\n".join(harness_banner))
+
         if self.system_prompt.strip():
             parts.append(self.interpolate_soul_text(self.system_prompt.strip()))
 
@@ -351,11 +381,10 @@ class Profile(BaseModel):
             )
 
         # Workspace Doctrine (repo/AGENTS.md)
-        if workspace_path:
-            ws = Path(workspace_path).resolve()
-            agents_md = ws / "AGENTS.md"
+        if effective_ws and effective_ws.exists():
+            agents_md = effective_ws / "AGENTS.md"
             if not agents_md.exists():
-                agents_md = ws / ".agents" / "AGENTS.md"
+                agents_md = effective_ws / ".agents" / "AGENTS.md"
             if agents_md.exists():
                 try:
                     agents_content = agents_md.read_text(encoding="utf-8").strip()
@@ -368,7 +397,7 @@ class Profile(BaseModel):
                     pass
 
             # Stack-Specific Rules (max 3-5 rules capped)
-            stack_doc = get_stack_doctrine(ws)
+            stack_doc = get_stack_doctrine(effective_ws)
             if stack_doc:
                 parts.append("\n---\n" + stack_doc)
 

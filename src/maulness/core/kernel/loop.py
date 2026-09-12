@@ -129,7 +129,9 @@ class DurableAgentKernel:
 
         # 1. Load multi-turn history from storage
         history = await self.storage.get_conversation_messages(conv_id, limit=20)
-        system_content = self.profile.effective_system_prompt()
+        system_content = self.profile.effective_system_prompt(
+            workspace_path=effective_workspace
+        )
         if kwargs.get("extra_system_prompt"):
             system_content += "\n\n" + str(kwargs["extra_system_prompt"]).strip()
         base_messages: list[dict[str, Any]] = [

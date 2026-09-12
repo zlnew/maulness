@@ -322,8 +322,29 @@ class MCPClientManager:
                 for t in conn.tools:
                     raw_name = t.get("name", "")
                     namespaced_name = f"mcp__{s_name}__{raw_name}"
-                    # Allow both namespaced and bare name (if no conflict)
+                    s_name_underscore = s_name.replace("-", "_")
+                    s_name_hyphen = s_name.replace("_", "-")
+
+                    # Allow both namespaced (with hyphens & underscores) and bare name
                     self.tool_to_server[namespaced_name] = (conn, raw_name)
+                    self.tool_to_server[f"mcp__{s_name_underscore}__{raw_name}"] = (
+                        conn,
+                        raw_name,
+                    )
+                    self.tool_to_server[f"mcp__{s_name_hyphen}__{raw_name}"] = (
+                        conn,
+                        raw_name,
+                    )
+                    self.tool_to_server[f"{s_name}__{raw_name}"] = (conn, raw_name)
+                    self.tool_to_server[f"{s_name_underscore}__{raw_name}"] = (
+                        conn,
+                        raw_name,
+                    )
+                    self.tool_to_server[f"{s_name_hyphen}__{raw_name}"] = (
+                        conn,
+                        raw_name,
+                    )
+
                     if raw_name not in self.tool_to_server:
                         self.tool_to_server[raw_name] = (conn, raw_name)
 
@@ -372,18 +393,56 @@ class MCPClientManager:
 
         return tool_defs
 
+    def _resolve_tool(self, name: str) -> Optional[tuple[MCPServerConnection, str]]:
+        """Resolve a tool name to (MCPServerConnection, original_name) handling aliases, hyphens/underscores, and namespaces."""
+        # 1. Direct match
+        if name in self.tool_to_server:
+            return self.tool_to_server[name]
+
+        # 2. Hyphen / Underscore normalization
+        norm_name = name.replace("-", "_")
+        for registered_name, mapping in self.tool_to_server.items():
+            if registered_name.replace("-", "_") == norm_name:
+                return mapping
+
+        # 3. Namespace parsing for mcp__<server>__<tool> or <server>__<tool>
+        if "__" in name:
+            parts = name.split("__")
+            candidate_server = parts[-2].replace("-", "_")
+            candidate_tool = parts[-1]
+            for s_name, conn in self.servers.items():
+                if s_name.replace("-", "_") == candidate_server:
+                    for t in conn.tools:
+                        raw_tname = t.get("name", "")
+                        if raw_tname == candidate_tool or raw_tname.replace(
+                            "-", "_"
+                        ) == candidate_tool.replace("-", "_"):
+                            return (conn, raw_tname)
+
+            # If server match failed, check candidate_tool directly
+            if candidate_tool in self.tool_to_server:
+                return self.tool_to_server[candidate_tool]
+
+            cand_norm = candidate_tool.replace("-", "_")
+            for registered_name, mapping in self.tool_to_server.items():
+                if registered_name.replace("-", "_") == cand_norm:
+                    return mapping
+
+        return None
+
     def is_mcp_tool(self, name: str) -> bool:
         """Check if tool name corresponds to an active MCP tool."""
-        return name in self.tool_to_server
+        return self._resolve_tool(name) is not None
 
     async def call_tool(
         self, name: str, args: dict[str, Any], workspace_path: Optional[Path] = None
     ) -> str:
         """Route tool call to appropriate MCP server."""
-        if name not in self.tool_to_server:
+        resolved = self._resolve_tool(name)
+        if not resolved:
             return f"Error: MCP tool '{name}' is not registered."
 
-        conn, original_name = self.tool_to_server[name]
+        conn, original_name = resolved
         return await conn.call_tool(original_name, args)
 
     async def shutdown(self) -> None:
