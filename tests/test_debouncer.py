@@ -100,3 +100,31 @@ async def test_debouncer_overflow_triggers_callback():
 
     assert len(overflow_chunks) >= 1
     await debouncer.close()
+
+
+@pytest.mark.asyncio
+async def test_debouncer_in_flight_flush_synchronization():
+    """Verify that when a flush is in-flight, a subsequent write and close()
+    properly await the active flush and deliver the final complete text."""
+    flushed_history = []
+
+    async def slow_flush(text: str, is_final: bool = False, is_overflow: bool = False):
+        await asyncio.sleep(0.05)  # Simulate Discord HTTP edit latency
+        flushed_history.append((text, is_final))
+
+    debouncer = MessageStreamDebouncer(flush_callback=slow_flush, interval_seconds=0.02)
+
+    # Initial write triggers leading flush
+    await debouncer.write("Part 1")
+    # Wait for interval so delayed flush triggers
+    await asyncio.sleep(0.03)
+
+    # Write more text while delayed flush is running
+    await debouncer.write(" Part 2")
+    # Close immediately while flush may be active
+    await debouncer.close()
+
+    assert len(flushed_history) >= 2
+    # The final flush MUST be marked is_final=True and contain the complete text
+    assert flushed_history[-1][1] is True
+    assert flushed_history[-1][0] == "Part 1 Part 2"

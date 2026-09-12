@@ -38,6 +38,7 @@ class MessageStreamDebouncer:
         self._current_text = ""
         self._last_flush_time = 0.0
         self._flush_task: Optional[asyncio.Task] = None
+        self._lock = asyncio.Lock()
         self._is_active = True
 
     @property
@@ -50,6 +51,7 @@ class MessageStreamDebouncer:
             self._flush_task.cancel()
         self._buffer.clear()
         self._current_text = ""
+        self._is_active = True
 
     async def write(self, delta: str):
         """Append text delta to the active buffer and schedule a throttled flush."""
@@ -59,39 +61,45 @@ class MessageStreamDebouncer:
         self._buffer.append(delta)
         now = time.monotonic()
 
-        if now - self._last_flush_time >= self.interval:
+        if now - self._last_flush_time >= self.interval and not self._lock.locked():
+            if self._flush_task and not self._flush_task.done():
+                self._flush_task.cancel()
             await self._flush(is_final=False)
         elif self._flush_task is None or self._flush_task.done():
-            remaining = self.interval - (now - self._last_flush_time)
+            remaining = max(0.0, self.interval - (now - self._last_flush_time))
             self._flush_task = asyncio.create_task(self._delayed_flush(remaining))
 
     async def _delayed_flush(self, delay: float):
-        await asyncio.sleep(delay)
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
         if self._is_active:
             await self._flush(is_final=False)
 
     async def _flush(self, is_final: bool = False):
-        if not self._buffer and not is_final:
-            return
+        async with self._lock:
+            if not self._buffer and not is_final:
+                return
 
-        new_text = "".join(self._buffer)
-        self._buffer.clear()
-        self._current_text += new_text
-        self._last_flush_time = time.monotonic()
+            new_text = "".join(self._buffer)
+            self._buffer.clear()
+            self._current_text += new_text
+            self._last_flush_time = time.monotonic()
 
-        # Check if text exceeds chunk threshold
-        if len(self._current_text) >= self.max_chunk_size and not is_final:
-            chunk_to_flush, prefix = balance_code_blocks(self._current_text)
-            self._current_text = prefix
-            try:
-                await self.flush_callback(chunk_to_flush, is_final=False, is_overflow=True)
-            except TypeError:
-                await self.flush_callback(chunk_to_flush, is_final=False)
-        else:
-            try:
-                await self.flush_callback(self._current_text, is_final=is_final, is_overflow=False)
-            except TypeError:
-                await self.flush_callback(self._current_text, is_final=is_final)
+            # Check if text exceeds chunk threshold
+            if len(self._current_text) >= self.max_chunk_size and not is_final:
+                chunk_to_flush, prefix = balance_code_blocks(self._current_text)
+                self._current_text = prefix
+                try:
+                    await self.flush_callback(chunk_to_flush, is_final=False, is_overflow=True)
+                except TypeError:
+                    await self.flush_callback(chunk_to_flush, is_final=False)
+            else:
+                try:
+                    await self.flush_callback(self._current_text, is_final=is_final, is_overflow=False)
+                except TypeError:
+                    await self.flush_callback(self._current_text, is_final=is_final)
 
     async def close(self):
         """Finalize the stream and flush all remaining buffered content."""
@@ -103,4 +111,5 @@ class MessageStreamDebouncer:
             except asyncio.CancelledError:
                 pass
 
+        # Flush under lock, guaranteeing sequential delivery after any in-flight flush completes
         await self._flush(is_final=True)
