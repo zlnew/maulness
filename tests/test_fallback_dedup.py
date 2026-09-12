@@ -35,11 +35,14 @@ async def test_fallback_chain_passes_tool_context_and_deduplicates(tmp_path: Pat
     mock_primary.run.side_effect = primary_run
 
     received_fallback_prompt = []
+    received_fallback_extra_sys = []
 
-    # Fallback provider receives prompt with tool context
+    # Fallback provider receives clean prompt and tool context via extra_system_prompt
     async def fallback_run(**kwargs):
         prompt_received = kwargs.get("prompt")
         received_fallback_prompt.append(prompt_received)
+        extra_sys = kwargs.get("extra_system_prompt", "")
+        received_fallback_extra_sys.append(extra_sys)
         session_id = kwargs.get("session_id")
 
         # Fallback provider attempts to run the same tool call again
@@ -65,13 +68,17 @@ async def test_fallback_chain_passes_tool_context_and_deduplicates(tmp_path: Pat
     assert "The working directory is:" in result
     assert str(tmp_path.resolve()) in result
 
-    # 2. Fallback provider prompt contained system note with completed tool results
+    # 2. Fallback provider prompt remains clean and unpolluted
     assert len(received_fallback_prompt) == 1
-    assert "SYSTEM NOTE: The following tool(s) were already executed" in received_fallback_prompt[0]
-    assert "run_command" in received_fallback_prompt[0]
-    assert str(tmp_path.resolve()) in received_fallback_prompt[0]
+    assert received_fallback_prompt[0] == "What is current pwd?"
 
-    # 3. Turn tools were cleaned up in finally block
+    # 3. Executed tool results forwarded cleanly via extra_system_prompt
+    assert len(received_fallback_extra_sys) == 1
+    assert "SYSTEM NOTE: The following tool(s) were already executed" in received_fallback_extra_sys[0]
+    assert "run_command" in received_fallback_extra_sys[0]
+    assert str(tmp_path.resolve()) in received_fallback_extra_sys[0]
+
+    # 4. Turn tools were cleaned up in finally block
     assert len(get_turn_executed_tools(sess_id)) == 0
 
 

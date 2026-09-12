@@ -239,7 +239,7 @@ class GeminiProvider(BaseProvider):
         if client is None:
             raise RuntimeError("Gemini client not initialized")
 
-        model_name = self.profile.model or "gemini-3.6-flash"
+        model_name = self.profile.model or "gemini-2.5-flash"
         _EFFORT_BUDGET = {"low": 1024, "medium": 8192, "high": 24576}
 
         max_tokens = self.profile.max_tokens or 4096

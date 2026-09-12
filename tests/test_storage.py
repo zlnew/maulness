@@ -475,5 +475,36 @@ async def test_storage_legacy_migration_and_corrupt_payload(tmp_path: Path):
     assert any(e["payload"] == "{invalid json content" for e in all_events)
 
 
+@pytest.mark.asyncio
+async def test_storage_lossless_migration_preserves_data(tmp_path: Path):
+    """Verify that initialize() on a legacy database without origin_platform preserves existing rows."""
+    db_file = tmp_path / "legacy.db"
+    import aiosqlite
 
+    # Create legacy table without origin_platform
+    async with aiosqlite.connect(str(db_file)) as db:
+        await db.execute("""
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                repo_name TEXT,
+                workspace_path TEXT,
+                mode TEXT NOT NULL DEFAULT 'direct',
+                status TEXT NOT NULL DEFAULT 'planning',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        await db.execute(
+            "INSERT INTO tasks (id, title, repo_name) VALUES ('legacy_001', 'Old Task', 'expense-tracker');"
+        )
+        await db.commit()
 
+    storage = StorageManager(db_path=db_file)
+    await storage.initialize()
+
+    # Verify task was preserved and columns were added
+    task = await storage.get_task("legacy_001")
+    assert task is not None
+    assert task.title == "Old Task"
+    assert task.origin_platform == "cli"

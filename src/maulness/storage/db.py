@@ -51,22 +51,25 @@ class StorageManager:
             await db.execute("PRAGMA journal_mode = WAL;")
             await db.execute("PRAGMA synchronous = NORMAL;")
 
-            # If existing tasks table lacks origin_platform, drop legacy tables and recreate
-            cursor = await db.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
-            )
-            row = await cursor.fetchone()
-            if row and "origin_platform" not in row[0]:
-                logger.info(
-                    "Migrating storage: recreating tables with multi-platform schema"
-                )
-                await db.execute("PRAGMA foreign_keys = OFF;")
-                await db.execute("DROP TABLE IF EXISTS task_events;")
-                await db.execute("DROP TABLE IF EXISTS approvals;")
-                await db.execute("DROP TABLE IF EXISTS agent_sessions;")
-                await db.execute("DROP TABLE IF EXISTS channel_conversations;")
-                await db.execute("DROP TABLE IF EXISTS tasks;")
-                await db.execute("PRAGMA foreign_keys = ON;")
+            # Non-destructive schema migration for existing tasks table
+            cursor = await db.execute("PRAGMA table_info(tasks)")
+            columns = {row[1] for row in await cursor.fetchall()}
+            if columns:
+                expected_columns = {
+                    "repo_name": "TEXT",
+                    "workspace_path": "TEXT",
+                    "origin_platform": "TEXT NOT NULL DEFAULT 'cli'",
+                    "origin_channel_id": "TEXT",
+                    "origin_thread_id": "TEXT",
+                    "mode": "TEXT NOT NULL DEFAULT 'direct'",
+                    "status": "TEXT NOT NULL DEFAULT 'planning'",
+                    "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                    "updated_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                }
+                for col_name, col_def in expected_columns.items():
+                    if col_name not in columns:
+                        logger.info("Migrating storage: adding column %s to tasks", col_name)
+                        await db.execute(f"ALTER TABLE tasks ADD COLUMN {col_name} {col_def};")
 
             await db.executescript(schema_sql)
             await db.commit()

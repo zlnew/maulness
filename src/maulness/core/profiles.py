@@ -489,7 +489,7 @@ class ProfileManager:
             ),
             agent=AgentConfig(
                 provider="gemini",
-                model="gemini-3.6-flash",
+                model="gemini-2.5-flash",
                 command=None,
             ),
             env_vars=base_env,

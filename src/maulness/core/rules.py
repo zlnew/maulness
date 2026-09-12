@@ -2,6 +2,8 @@ import fnmatch
 from enum import Enum
 import logging
 from pathlib import Path
+import re
+import shlex
 from typing import Any, Optional
 from pydantic import BaseModel, Field
 
@@ -167,6 +169,48 @@ def _matches_command(pattern: str, command: str) -> bool:
     return cmd_lower == pat_lower or cmd_lower.startswith(pat_lower + " ")
 
 
+def _split_shell_commands(command: str) -> list[str]:
+    """Split a composite shell command line into individual sub-commands while respecting quotes."""
+    cmd = command.strip()
+    if not cmd:
+        return []
+
+    try:
+        # Split on ;, &&, ||, |, & outside of single or double quotes
+        parts = [
+            p.strip()
+            for p in re.split(
+                r"(?:[;&|]+)(?=(?:[^\x22\x27]*[\x22\x27][^\x22\x27]*[\x22\x27])*[^\x22\x27]*$)",
+                cmd,
+            )
+            if p.strip()
+        ]
+        return parts or [cmd]
+    except Exception:
+        return [cmd]
+
+
+def _has_shell_chaining(command: str) -> bool:
+    """Return True if command contains shell chaining, pipes, or subshell expansion outside quotes."""
+    cmd = command.strip()
+    if not any(c in cmd for c in (";", "&", "|", "`", "$")):
+        return False
+
+    if "$(" in cmd or "`" in cmd:
+        return True
+
+    try:
+        # Check for ;, &, | outside of single or double quotes
+        return bool(
+            re.search(
+                r"[;&|](?=(?:[^\x22\x27]*[\x22\x27][^\x22\x27]*[\x22\x27])*[^\x22\x27]*$)",
+                cmd,
+            )
+        )
+    except Exception:
+        return True
+
+
 def _matches_path(pattern: str, target: Path) -> bool:
     pattern = pattern.strip()
     if not pattern:
@@ -261,21 +305,31 @@ class RuleEngine:
             if not cmd:
                 return (PolicyAction.DENY, "Empty shell command is not allowed")
 
-            # A. Check command DENY
+            sub_commands = _split_shell_commands(cmd)
+            has_chaining = len(sub_commands) > 1 or _has_shell_chaining(cmd)
+
+            # A. Check command DENY on full command and each individual sub-command
             for pat in self.deny_commands:
                 if _matches_command(pat, cmd):
                     return (
                         PolicyAction.DENY,
                         f"Command '{cmd}' is blocked by security rule '{pat}'",
                     )
+                for sub in sub_commands:
+                    if _matches_command(pat, sub):
+                        return (
+                            PolicyAction.DENY,
+                            f"Command component '{sub}' is blocked by security rule '{pat}'",
+                        )
 
-            # B. Check command ALLOW
-            for pat in self.allow_commands:
-                if _matches_command(pat, cmd):
-                    return (
-                        PolicyAction.ALLOW,
-                        f"Command '{cmd}' is auto-approved by rule '{pat}'",
-                    )
+            # B. Check command ALLOW (chained commands must not bypass approval via single rule)
+            if not has_chaining:
+                for pat in self.allow_commands:
+                    if _matches_command(pat, cmd):
+                        return (
+                            PolicyAction.ALLOW,
+                            f"Command '{cmd}' is auto-approved by rule '{pat}'",
+                        )
 
             # C. Check command ASK
             for pat in self.ask_commands:
@@ -289,6 +343,17 @@ class RuleEngine:
                         PolicyAction.ASK,
                         f"Command '{cmd}' requires approval (matched rule '{pat}')",
                     )
+
+            if has_chaining:
+                if yolo:
+                    return (
+                        PolicyAction.ALLOW,
+                        f"Command '{cmd}' auto-approved via YOLO mode (chained shell command)",
+                    )
+                return (
+                    PolicyAction.ASK,
+                    f"Command '{cmd}' requires approval (contains chained shell operators)",
+                )
 
         # 3. Path ALLOW / ASK checks if tool had a path
         if target_path is not None:

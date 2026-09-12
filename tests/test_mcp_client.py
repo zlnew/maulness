@@ -227,3 +227,52 @@ async def test_mcp_hyphen_underscore_alias_resolution(tmp_path: Path):
     assert res == "item-1, item-2"
 
     await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_mcp_stderr_drain_and_reconnect(tmp_path: Path):
+    # Mock server that dumps heavy stderr to verify no pipe deadlocks (>64KB)
+    server_script = (
+        "import sys, json\n"
+        "while True:\n"
+        "    line = sys.stdin.readline()\n"
+        "    if not line: break\n"
+        "    req = json.loads(line)\n"
+        "    method = req.get('method')\n"
+        "    req_id = req.get('id')\n"
+        "    if method == 'initialize':\n"
+        "        sys.stderr.write('x' * 70000 + '\\n')\n"
+        "        sys.stderr.flush()\n"
+        "        res = {'jsonrpc': '2.0', 'id': req_id, 'result': {'protocolVersion': '2024-11-05', 'capabilities': {}, 'serverInfo': {'name': 'noisy-srv'}}}\n"
+        "        sys.stdout.write(json.dumps(res) + '\\n'); sys.stdout.flush()\n"
+        "    elif method == 'tools/list':\n"
+        "        res = {'jsonrpc': '2.0', 'id': req_id, 'result': {'tools': [{'name': 'ping', 'inputSchema': {'type': 'object'}}]}}\n"
+        "        sys.stdout.write(json.dumps(res) + '\\n'); sys.stdout.flush()\n"
+        "    elif method == 'tools/call':\n"
+        "        res = {'jsonrpc': '2.0', 'id': req_id, 'result': {'content': [{'type': 'text', 'text': 'pong'}]}}\n"
+        "        sys.stdout.write(json.dumps(res) + '\\n'); sys.stdout.flush()\n"
+    )
+
+    config = {
+        "command": sys.executable,
+        "args": ["-c", server_script],
+    }
+
+    conn = MCPServerConnection(name="noisy", config=config, workspace_path=tmp_path)
+    connected = await conn.connect()
+    assert connected is True
+
+    # Call tool succeeds without deadlocking on the 70KB stderr output
+    out = await conn.call_tool("ping", {})
+    assert out == "pong"
+
+    # Simulate connection recycle (e.g. process termination)
+    await conn.close()
+    assert conn._is_initialized is False
+
+    # Calling tool again triggers transparent auto-reconnect
+    out2 = await conn.call_tool("ping", {})
+    assert out2 == "pong"
+
+    await conn.close()
+

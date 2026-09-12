@@ -31,6 +31,7 @@ class MCPServerConnection:
         self._request_id = 0
         self._pending_requests: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._reader_task: Optional[asyncio.Task] = None
+        self._stderr_task: Optional[asyncio.Task] = None
         self._is_initialized = False
 
     async def connect(self) -> bool:
@@ -65,6 +66,7 @@ class MCPServerConnection:
                 env=env,
             )
             self._reader_task = asyncio.create_task(self._read_stdio_loop())
+            self._stderr_task = asyncio.create_task(self._read_stderr_loop())
 
             # 1. Initialize
             init_res = await self._send_request(
@@ -144,6 +146,24 @@ class MCPServerConnection:
             self.process.stdin.write(line.encode("utf-8"))
             await self.process.stdin.drain()
             return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "MCP request '%s' (id=%d) timed out after %.1fs. Recycling connection.",
+                method,
+                req_id,
+                timeout,
+            )
+            await self.close()
+            return None
+        except (BrokenPipeError, ConnectionResetError) as bpe:
+            logger.warning(
+                "MCP request '%s' (id=%d) pipe error: %s. Recycling connection.",
+                method,
+                req_id,
+                bpe,
+            )
+            await self.close()
+            return None
         except Exception as e:
             logger.debug("MCP request '%s' (id=%d) error: %s", method, req_id, e)
             return None
@@ -191,6 +211,23 @@ class MCPServerConnection:
         except Exception as e:
             logger.debug("Error in MCP read loop for '%s': %s", self.name, e)
 
+    async def _read_stderr_loop(self) -> None:
+        """Continuously drain stderr from the MCP server to prevent OS pipe buffer deadlocks."""
+        if not self.process or not self.process.stderr:
+            return
+        try:
+            while True:
+                line_bytes = await self.process.stderr.readline()
+                if not line_bytes:
+                    break
+                line = line_bytes.decode("utf-8", errors="replace").strip()
+                if line:
+                    logger.debug("[mcp:%s:stderr] %s", self.name, line)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug("Error in MCP stderr loop for '%s': %s", self.name, e)
+
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Invoke a tool on this MCP server and format the response."""
         url = self.config.get("url")
@@ -210,6 +247,11 @@ class MCPServerConnection:
                     return self._format_tool_result(data)
             except Exception as e:
                 return f"Error executing HTTP MCP tool '{tool_name}': {e}"
+
+        if not self._is_initialized or not self.process:
+            reconnected = await self.connect()
+            if not reconnected:
+                return f"Error: MCP server '{self.name}' is unreachable and could not be reconnected."
 
         res = await self._send_request(
             "tools/call",
@@ -248,6 +290,8 @@ class MCPServerConnection:
         """Terminate process and close stream resources."""
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
+        if self._stderr_task and not self._stderr_task.done():
+            self._stderr_task.cancel()
         if self.process:
             try:
                 if self.process.stdin:

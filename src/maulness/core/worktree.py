@@ -28,6 +28,31 @@ class WorktreeManager:
         except Exception:
             return False
 
+    def is_isolated_worktree(self, path: Path) -> bool:
+        """Check if path is a dedicated/isolated linked git worktree rather than the primary repo root."""
+        try:
+            res_dir = subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=str(path),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            res_common = subprocess.run(
+                ["git", "rev-parse", "--git-common-dir"],
+                cwd=str(path),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res_dir.returncode == 0 and res_common.returncode == 0:
+                git_dir = Path(res_dir.stdout.strip()).resolve()
+                git_common = Path(res_common.stdout.strip()).resolve()
+                return git_dir != git_common or ".worktrees" in str(path)
+        except Exception:
+            pass
+        return False
+
     def create_worktree(
         self,
         repo_path: Path,

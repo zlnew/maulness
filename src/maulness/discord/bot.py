@@ -24,6 +24,7 @@ from maulness.core.pipelines import PipelineStage
 from maulness.core.profiles import ProfileManager
 from maulness.core.providers.factory import get_provider_for_profile
 from maulness.core.runner import TaskRunner
+from maulness.core.tools import clear_turn_tools
 from maulness.discord.views import ApprovalView, SuspendedAfkView
 from maulness.storage.db import StorageManager
 
@@ -251,6 +252,9 @@ class MaulnessBot(commands.Bot):
         # Queue of prompts per channel for sequential execution (/queue)
         self.channel_queues: dict[int, list[str]] = {}
 
+        # Per-channel prompt serialization locks to prevent concurrent execution races
+        self._channel_locks: dict[int, asyncio.Lock] = {}
+
         # Per-channel settings and dynamic overrides
         self.channel_yolo: dict[int, bool] = {}
         self.channel_worktree: dict[int, bool] = {}
@@ -260,6 +264,12 @@ class MaulnessBot(commands.Bot):
         self.session_start_time = time.time()
         self.total_prompts: int = 0
         self.total_chars_out: int = 0
+
+    def _get_channel_lock(self, channel_id: int) -> asyncio.Lock:
+        """Return existing asyncio.Lock for channel or initialize a new one."""
+        if channel_id not in self._channel_locks:
+            self._channel_locks[channel_id] = asyncio.Lock()
+        return self._channel_locks[channel_id]
 
     def _resolve_home_channel_id(self) -> Optional[int]:
         if "DISCORD_HOME_CHANNEL" in self.bound_profile.env_vars:
@@ -444,7 +454,32 @@ class MaulnessBot(commands.Bot):
         session_key: str,
         profile: Optional[Any] = None,
     ):
-        """Execute a conversational chat prompt in Discord and stream the response."""
+        """Execute a conversational chat prompt in Discord, serialized per-channel to avoid races."""
+        channel_id = getattr(channel, "id", None)
+        lock = self._get_channel_lock(channel_id) if channel_id else None
+        if lock:
+            await lock.acquire()
+        try:
+            await self._run_chat_prompt(
+                channel=channel,
+                prompt=prompt,
+                author_mention=author_mention,
+                session_key=session_key,
+                profile=profile,
+            )
+        finally:
+            if lock and lock.locked():
+                lock.release()
+
+    async def _run_chat_prompt(
+        self,
+        channel: discord.abc.Messageable,
+        prompt: str,
+        author_mention: str,
+        session_key: str,
+        profile: Optional[Any] = None,
+    ):
+        """Internal worker executing chat prompt and streaming response."""
         self.total_prompts += 1
         target_profile = profile or self.bound_profile
         model_tag = target_profile.model or target_profile.command or "default"
@@ -480,6 +515,36 @@ class MaulnessBot(commands.Bot):
                 else:
                     try:
                         current_msg = await current_msg.edit(content=ch)
+                    except discord.RateLimited as rl:
+                        retry_after = getattr(rl, "retry_after", 1.5)
+                        logger.warning("Discord edit rate limited: backing off %.2fs", retry_after)
+                        await asyncio.sleep(retry_after)
+                        try:
+                            current_msg = await current_msg.edit(content=ch)
+                        except Exception:
+                            pass
+                    except discord.HTTPException as http_err:
+                        if http_err.status == 429:
+                            retry_after = getattr(http_err, "retry_after", 1.5)
+                            logger.warning("Discord edit HTTP 429: backing off %.2fs", retry_after)
+                            await asyncio.sleep(retry_after)
+                            try:
+                                current_msg = await current_msg.edit(content=ch)
+                            except Exception:
+                                pass
+                        else:
+                            logger.warning(
+                                "Failed to edit Discord message (%s), sending replacement",
+                                http_err,
+                            )
+                            try:
+                                current_msg = await channel.send(ch)
+                                active_msgs.append(current_msg)
+                            except Exception as send_err:
+                                logger.error(
+                                    "Failed to send replacement Discord message: %s",
+                                    send_err,
+                                )
                     except Exception as e:
                         logger.warning(
                             "Failed to edit Discord message (%s), sending replacement",
@@ -591,13 +656,21 @@ class MaulnessBot(commands.Bot):
                 )
 
             embed.set_footer(text="Maulness Security Gate • 10m timeout")
-            await channel.send(embed=embed, view=view)
+            approval_msg = await channel.send(embed=embed, view=view)
             is_timeout = False
             try:
                 approved = await asyncio.wait_for(fut, timeout=600.0)
             except asyncio.TimeoutError:
                 approved = False
                 is_timeout = True
+
+            # Disable view buttons so late interactions don't raise NotFound or unhandled exceptions
+            for item in view.children:
+                item.disabled = True
+            try:
+                await approval_msg.edit(view=view)
+            except Exception:
+                pass
 
             # Clean up old thinking placeholder if empty
             if not debouncer.full_text.strip():
@@ -747,6 +820,7 @@ class MaulnessBot(commands.Bot):
             except Exception:
                 pass
         finally:
+            clear_turn_tools(session_key)
             if channel_id and self.channel_tasks.get(channel_id) == session_key:
                 self.channel_tasks.pop(channel_id, None)
             self.active_tasks.pop(session_key, None)

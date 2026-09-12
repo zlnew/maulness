@@ -4,12 +4,14 @@ from collections import deque
 import fnmatch
 import hashlib
 import html
+import ipaddress
 import json
 import logging
 import os
 import re
 import shutil
 import signal
+import socket
 import ssl
 import subprocess
 import urllib.parse
@@ -570,7 +572,10 @@ async def execute_tool_call(
 ) -> str:
     """Execute a supported tool action with execution rules and HITL approval gating."""
     cwd = workspace_path or Path.cwd()
-    logger.info("Executing tool '%s' with args: %s (cwd: %s)", name, args, cwd)
+    # Guard against malformed JSON arguments from model output
+    if isinstance(args, dict) and "raw" in args and len(args) == 1:
+        raw_val = args["raw"]
+        return f"Error: Tool arguments could not be parsed as valid JSON: {raw_val}"
 
     # Check turn-scoped tool cache to avoid duplicate execution on provider failover
     canonical_args = json.dumps(args, sort_keys=True)
@@ -605,6 +610,7 @@ async def execute_tool_call(
         "run_command",
         "write_file",
         "replace_file_content",
+        "patch_file",
     ):
         if on_approval and not yolo:
             req = ApprovalRequestEvent(
@@ -1371,12 +1377,53 @@ async def _execute_web_search(query: str, max_results: int = 5) -> str:
     return f'Web search results for "{query}": No results found or web search providers currently unreachable.'
 
 
+def _is_ssrf_safe_url(url: str) -> tuple[bool, str]:
+    """Validate that URL does not target loopback, private RFC 1918, link-local, or cloud metadata endpoints."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False, "Error: Missing or invalid hostname in URL."
+
+        lower_host = hostname.lower().strip()
+        if (
+            lower_host in ("localhost", "metadata.google.internal")
+            or lower_host.endswith(".localhost")
+            or lower_host.endswith(".internal")
+        ):
+            return False, f"Error: Access to host '{hostname}' is blocked for security."
+
+        # If hostname is a raw IP literal or resolves to an IP
+        addr_infos = socket.getaddrinfo(hostname, None)
+        for family, _, _, _, sockaddr in addr_infos:
+            ip_str = sockaddr[0]
+            ip = ipaddress.ip_address(ip_str)
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+            ):
+                return (
+                    False,
+                    f"Error: Access to private/local network address '{ip_str}' is blocked for security.",
+                )
+        return True, ""
+    except Exception as e:
+        return False, f"Error validating URL safety: {e}"
+
+
 async def _execute_fetch_doc_markdown(url: str, max_chars: int = 10000) -> str:
-    """Fetch URL and convert HTML to token-dense clean Markdown."""
+    """Fetch URL and convert HTML to token-dense clean Markdown with SSRF protection."""
     if not (url.startswith("http://") or url.startswith("https://")):
         return (
             "Error: Invalid URL scheme. Only http:// and https:// URLs are supported."
         )
+
+    is_safe, err_msg = _is_ssrf_safe_url(url)
+    if not is_safe:
+        return err_msg
 
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",

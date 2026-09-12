@@ -128,7 +128,7 @@ class FallbackProviderChain(BaseProvider):
                 )
                 prov_key = get_prov_key(provider)
                 try:
-                    effective_prompt = prompt
+                    call_kwargs = dict(kwargs)
                     if idx > 0 or bypassed_info:
                         logger.warning(
                             "Attempting fallback provider %s (%s) for session %s after failure/bypass",
@@ -142,16 +142,21 @@ class FallbackProviderChain(BaseProvider):
                                 f"- Tool `{t['name']}` with arguments `{t['args']}` returned:\n```\n{t['result'][:1500]}\n```"
                                 for t in completed_tools
                             )
-                            effective_prompt = (
-                                f"{prompt}\n\n"
+                            system_note = (
                                 f"[SYSTEM NOTE: The following tool(s) were already executed during this request:\n"
                                 f"{tools_summary}\n"
                                 f"Do NOT re-execute these tools. Formulate your final response directly using the output above.]"
                             )
+                            existing_extra = call_kwargs.get("extra_system_prompt", "")
+                            call_kwargs["extra_system_prompt"] = (
+                                f"{existing_extra}\n\n{system_note}".strip()
+                                if existing_extra
+                                else system_note
+                            )
 
                     res = await provider.run(
                         session_id=session_id,
-                        prompt=effective_prompt,
+                        prompt=prompt,
                         workspace_path=workspace_path,
                         conversation_id=conversation_id,
                         on_init=on_init,
@@ -159,7 +164,7 @@ class FallbackProviderChain(BaseProvider):
                         on_message=on_message,
                         on_tool_call=on_tool_call,
                         on_approval=on_approval,
-                        **kwargs,
+                        **call_kwargs,
                     )
                     if not res or not res.strip():
                         raise RuntimeError(

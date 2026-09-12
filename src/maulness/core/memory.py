@@ -50,14 +50,14 @@ class AutonomousMemoryExtractor:
             return []
 
         try:
-            # Instantiate a fast extraction provider (gemini-3.6-flash or current profile fallback)
+            # Instantiate a fast extraction provider (gemini-2.5-flash or current profile fallback)
             from maulness.core.providers.factory import get_provider_for_profile
 
             extract_profile = Profile(
                 identity={"name": "memory-librarian"},
                 agent={
                     "provider": "gemini",
-                    "model": "gemini-3.6-flash",
+                    "model": "gemini-2.5-flash",
                     "temperature": 0.1,
                 },
             )

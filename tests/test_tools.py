@@ -1230,3 +1230,55 @@ async def test_execute_load_skill(tmp_path: Path):
     )
     assert "Playbook Instruction: custom" in res
     assert "Step 1: Do testing." in res
+
+
+@pytest.mark.asyncio
+async def test_fetch_doc_markdown_ssrf_blocked():
+    from maulness.core.tools import execute_tool_call
+
+    # Localhost / loopback
+    res = await execute_tool_call(
+        name="fetch_doc_markdown",
+        args={"url": "http://localhost:8000/secret"},
+        yolo=True,
+    )
+    assert "blocked for security" in res
+
+    # 127.0.0.1
+    res2 = await execute_tool_call(
+        name="fetch_doc_markdown",
+        args={"url": "http://127.0.0.1:5432/"},
+        yolo=True,
+    )
+    assert "blocked for security" in res2
+
+    # Cloud metadata endpoint
+    res3 = await execute_tool_call(
+        name="fetch_doc_markdown",
+        args={"url": "http://169.254.169.254/latest/meta-data/"},
+        yolo=True,
+    )
+    assert "blocked for security" in res3
+
+
+@pytest.mark.asyncio
+async def test_patch_file_single_approval(tmp_path: Path):
+    from maulness.core.tools import execute_tool_call
+    from unittest.mock import AsyncMock
+
+    f = tmp_path / "hello.txt"
+    f.write_text("line1\nline2\n", encoding="utf-8")
+
+    approval_mock = AsyncMock(return_value=True)
+    patch_content = "--- a/hello.txt\n+++ b/hello.txt\n@@ -1,2 +1,2 @@\n line1\n-line2\n+line_patched\n"
+
+    await execute_tool_call(
+        name="patch_file",
+        args={"path": "hello.txt", "patch": patch_content},
+        workspace_path=tmp_path,
+        on_approval=approval_mock,
+        yolo=False,
+    )
+    # Ensure on_approval was invoked EXACTLY once, not twice!
+    assert approval_mock.call_count == 1
+

@@ -18,6 +18,7 @@ from maulness.core.tools import (
     ActionLoopDetector,
     clean_history_message,
     clean_relay_completion_tags,
+    clear_turn_tools,
     detect_simulated_tool_call,
     execute_tool_call,
     extract_checkpoint_info,
@@ -111,7 +112,16 @@ class DurableAgentKernel:
         if on_init:
             await on_init(conv_id)
 
+        # 1. Load multi-turn history from storage
+        history = await self.storage.get_conversation_messages(conv_id, limit=20)
+
         task_id, stage = parse_session_scope(session_id)
+        if task_id == "chat" or task_id.startswith("chat"):
+            if conv_id:
+                task_id = f"chat_{conv_id[:12]}"
+            # Scope stage by turn count in conversation to avoid cross-turn memoization collisions
+            turn_idx = len(history)
+            stage = f"{stage}_t{turn_idx}"
         effective_workspace = workspace_path or (
             Path(self.profile.workspace)
             if self.profile.workspace and self.profile.workspace != "inherit"
@@ -127,8 +137,6 @@ class DurableAgentKernel:
             getattr(self.profile, "max_tool_turns", config.max_tool_turns),
         )
 
-        # 1. Load multi-turn history from storage
-        history = await self.storage.get_conversation_messages(conv_id, limit=20)
         system_content = self.profile.effective_system_prompt(
             workspace_path=effective_workspace
         )
