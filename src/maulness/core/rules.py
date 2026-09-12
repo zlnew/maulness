@@ -84,9 +84,14 @@ DEFAULT_TOOL_POLICIES: dict[str, PolicyAction] = {
     "search_web": PolicyAction.ALLOW,
     "search_files": PolicyAction.ALLOW,
     "git_status": PolicyAction.ALLOW,
+    "get_outline": PolicyAction.ALLOW,
+    "find_symbol": PolicyAction.ALLOW,
+    "web_search": PolicyAction.ALLOW,
+    "fetch_doc_markdown": PolicyAction.ALLOW,
     "write_file": PolicyAction.ASK,
     "write_to_file": PolicyAction.ASK,
     "replace_file_content": PolicyAction.ASK,
+    "patch_file": PolicyAction.ASK,
     "run_command": PolicyAction.ASK,
 }
 
@@ -127,7 +132,9 @@ class ExecutionRulesConfig(BaseModel):
         merged_tools.update(other.tools)
 
         return ExecutionRulesConfig(
-            default_policy=other.default_policy if other.default_policy != PolicyAction.ASK else self.default_policy,
+            default_policy=other.default_policy
+            if other.default_policy != PolicyAction.ASK
+            else self.default_policy,
             tools=merged_tools,
             commands=CommandRulesConfig(deny=deny_cmds, allow=allow_cmds, ask=ask_cmds),
             paths=PathRulesConfig(deny=deny_paths, allow=allow_paths, ask=ask_paths),
@@ -145,7 +152,11 @@ def _matches_command(pattern: str, command: str) -> bool:
 
     # Root wipeout pattern: match rm -rf /* or rm -rf / * but not subdirectories
     if pat_lower in ("rm -rf /*", "rm -rf / *"):
-        return cmd_lower in ("rm -rf /*", "rm -rf / *") or cmd_lower.startswith("rm -rf /* ") or cmd_lower.startswith("rm -rf / * ")
+        return (
+            cmd_lower in ("rm -rf /*", "rm -rf / *")
+            or cmd_lower.startswith("rm -rf /* ")
+            or cmd_lower.startswith("rm -rf / * ")
+        )
 
     if any(c in pattern for c in ("*", "?", "[", "]")):
         if fnmatch.fnmatchcase(cmd_lower, pat_lower):
@@ -189,12 +200,20 @@ class RuleEngine:
         self.config = config or ExecutionRulesConfig()
 
         # Combine defaults with user configuration
-        self.deny_commands = list(dict.fromkeys(DEFAULT_DENY_COMMANDS + self.config.commands.deny))
-        self.allow_commands = list(dict.fromkeys(DEFAULT_ALLOW_COMMANDS + self.config.commands.allow))
+        self.deny_commands = list(
+            dict.fromkeys(DEFAULT_DENY_COMMANDS + self.config.commands.deny)
+        )
+        self.allow_commands = list(
+            dict.fromkeys(DEFAULT_ALLOW_COMMANDS + self.config.commands.allow)
+        )
         self.ask_commands = list(dict.fromkeys(self.config.commands.ask))
 
-        self.deny_paths = list(dict.fromkeys(DEFAULT_DENY_PATHS + self.config.paths.deny))
-        self.allow_paths = list(dict.fromkeys(DEFAULT_ALLOW_PATHS + self.config.paths.allow))
+        self.deny_paths = list(
+            dict.fromkeys(DEFAULT_DENY_PATHS + self.config.paths.deny)
+        )
+        self.allow_paths = list(
+            dict.fromkeys(DEFAULT_ALLOW_PATHS + self.config.paths.allow)
+        )
         self.ask_paths = list(dict.fromkeys(self.config.paths.ask))
 
         self.tool_policies = dict(DEFAULT_TOOL_POLICIES)
@@ -222,7 +241,9 @@ class RuleEngine:
         target_path: Optional[Path] = None
         if path_arg and isinstance(path_arg, (str, Path)):
             raw_path = Path(str(path_arg).strip())
-            target_path = raw_path if raw_path.is_absolute() else (work_dir / raw_path).resolve()
+            target_path = (
+                raw_path if raw_path.is_absolute() else (work_dir / raw_path).resolve()
+            )
 
         if target_path is not None:
             # Check path DENY
@@ -263,7 +284,10 @@ class RuleEngine:
                             PolicyAction.ALLOW,
                             f"Command '{cmd}' auto-approved via YOLO mode (matched ask rule '{pat}')",
                         )
-                    return (PolicyAction.ASK, f"Command '{cmd}' requires approval (matched rule '{pat}')")
+                    return (
+                        PolicyAction.ASK,
+                        f"Command '{cmd}' requires approval (matched rule '{pat}')",
+                    )
 
         # 3. Path ALLOW / ASK checks if tool had a path
         if target_path is not None:
@@ -287,7 +311,10 @@ class RuleEngine:
         if tool_policy == PolicyAction.DENY:
             return (PolicyAction.DENY, f"Tool '{tool_name}' is disabled by policy")
         if tool_policy == PolicyAction.ALLOW:
-            return (PolicyAction.ALLOW, f"Tool '{tool_name}' is auto-approved by policy")
+            return (
+                PolicyAction.ALLOW,
+                f"Tool '{tool_name}' is auto-approved by policy",
+            )
         if tool_policy == PolicyAction.ASK:
             if yolo:
                 return (
@@ -300,6 +327,12 @@ class RuleEngine:
         if self.default_policy == PolicyAction.DENY:
             return (PolicyAction.DENY, f"Tool '{tool_name}' blocked by default policy")
         if self.default_policy == PolicyAction.ALLOW or yolo:
-            return (PolicyAction.ALLOW, f"Tool '{tool_name}' allowed by default policy{' (YOLO)' if yolo else ''}")
+            return (
+                PolicyAction.ALLOW,
+                f"Tool '{tool_name}' allowed by default policy{' (YOLO)' if yolo else ''}",
+            )
 
-        return (PolicyAction.ASK, f"Tool '{tool_name}' requires approval by default policy")
+        return (
+            PolicyAction.ASK,
+            f"Tool '{tool_name}' requires approval by default policy",
+        )

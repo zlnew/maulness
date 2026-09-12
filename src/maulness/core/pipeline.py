@@ -7,17 +7,14 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 from rich.console import Console
-from rich.panel import Panel
 
 from maulness.config import config
 from maulness.core.models import (
     AgentMessageEvent,
     AgentThoughtEvent,
     ApprovalRequestEvent,
-    ChangeSet,
     Milestone,
     MilestonePlan,
-    ReviewVerdict,
     TaskMode,
     TaskRecord,
     TaskStatus,
@@ -27,12 +24,13 @@ from maulness.core.pipelines import (
     PipelineManager,
     PipelineStage,
     check_is_fail_verdict,
-    check_is_pass_verdict,
     check_is_rework_verdict,
 )
+from maulness.core.indexing.repo_map import get_repo_map
 from maulness.core.kernel.gates import DeterministicGateRunner
 from maulness.core.profiles import ProfileManager
 from maulness.core.providers.factory import get_provider_for_profile
+from maulness.core.stack import detect_stack, get_stack_doctrine
 from maulness.core.worktree import WorktreeManager
 from maulness.storage.db import StorageManager
 
@@ -55,7 +53,11 @@ def sync_task_ledger(
     try:
         ledger_dir.mkdir(parents=True, exist_ok=True)
         total_stages = len(definition.stages)
-        current_stage = definition.stages[current_stage_idx] if current_stage_idx < total_stages else None
+        current_stage = (
+            definition.stages[current_stage_idx]
+            if current_stage_idx < total_stages
+            else None
+        )
 
         stage_lines = []
         for idx, s in enumerate(definition.stages):
@@ -70,10 +72,16 @@ def sync_task_ledger(
             else:
                 prefix = "- [ ]"
                 state_str = "Pending"
-            stage_lines.append(f"{prefix} **{s.name.title()}** (`{s.profile}`) - {state_str}")
+            stage_lines.append(
+                f"{prefix} **{s.name.title()}** (`{s.profile}`) - {state_str}"
+            )
 
         stages_checklist = "\n".join(stage_lines)
-        notes = context.get("reviewer_feedback") or context.get("prompt") or "(No additional notes)"
+        notes = (
+            context.get("reviewer_feedback")
+            or context.get("prompt")
+            or "(No additional notes)"
+        )
 
         content = (
             f"# Task Ledger: {title}\n\n"
@@ -120,9 +128,13 @@ def parse_milestone_plan(plan_text: str, task_id: str) -> Optional[MilestonePlan
     milestones: list[Milestone] = []
     blocks = re.split(r"(?m)^#+\s*(?:Milestone\s*\d+|M\d+)\s*[:\-]\s*", plan_text)
     if len(blocks) > 1:
-        headers = re.findall(r"(?m)^#+\s*(?:Milestone\s*\d+|M\d+)\s*[:\-]\s*([^\n]+)", plan_text)
+        headers = re.findall(
+            r"(?m)^#+\s*(?:Milestone\s*\d+|M\d+)\s*[:\-]\s*([^\n]+)", plan_text
+        )
         for idx, (head, body) in enumerate(zip(headers, blocks[1:], strict=False), 1):
-            cmd_match = re.search(r"(?:Verification|Test|Command)\s*:\s*`([^`]+)`", body)
+            cmd_match = re.search(
+                r"(?:Verification|Test|Command)\s*:\s*`([^`]+)`", body
+            )
             ver_cmd = cmd_match.group(1) if cmd_match else ""
             crit_match = re.search(r"(?:Criteria|Acceptance)\s*:\s*([^\n]+)", body)
             crit = crit_match.group(1).strip() if crit_match else body.strip()[:200]
@@ -136,7 +148,9 @@ def parse_milestone_plan(plan_text: str, task_id: str) -> Optional[MilestonePlan
             )
 
     if milestones:
-        return MilestonePlan(task_id=task_id, summary=plan_text[:300], milestones=milestones)
+        return MilestonePlan(
+            task_id=task_id, summary=plan_text[:300], milestones=milestones
+        )
 
     return None
 
@@ -157,7 +171,6 @@ class PipelineOrchestrator:
         self.pipeline_manager = pipeline_manager or PipelineManager()
         self.worktree_manager = worktree_manager or WorktreeManager()
         self.gate_runner = gate_runner or DeterministicGateRunner(storage=self.storage)
-
 
     async def run_pipeline(
         self,
@@ -185,7 +198,15 @@ class PipelineOrchestrator:
         """Execute a declarative pipeline across defined stages."""
         await self.storage.initialize()
         effective_auto_proceed = auto_proceed or yolo
-        target_workspace = Path(workspace_path).resolve() if workspace_path else (config.resolve_repo_path(repo_name) if repo_name else config.workspace_root)
+        target_workspace = (
+            Path(workspace_path).resolve()
+            if workspace_path
+            else (
+                config.resolve_repo_path(repo_name)
+                if repo_name
+                else config.workspace_root
+            )
+        )
         task_id = f"task_{uuid.uuid4().hex[:10]}"
 
         # Load pipeline definition
@@ -211,12 +232,19 @@ class PipelineOrchestrator:
             console.print(f"[dim]Goal: {title}[/dim]\n")
 
         async def _execute_stages(effective_workspace: Path) -> TaskRecord:
+            # Auto-detect workspace stack & generate dense Repo Map
+            ws_stack = detect_stack(effective_workspace)
+            repo_map_content = get_repo_map(effective_workspace, max_tokens=1000)
+
             # Context store shared and mutated across stages
             context: dict[str, Any] = {
                 "repo_name": repo_name,
                 "workspace_path": str(effective_workspace),
                 "title": title,
                 "prompt": prompt,
+                "active_stack": ws_stack.name,
+                "stack_rules": get_stack_doctrine(effective_workspace),
+                "repo_map": repo_map_content,
                 "git_diff": "",
                 "previous_output": "",
                 "rework_feedback_block": "",
@@ -226,7 +254,6 @@ class PipelineOrchestrator:
                 "gate_failures": "",
                 "last_gate_result": {},
             }
-
 
             total_stages = len(definition.stages)
             stage_map = {s.name: i for i, s in enumerate(definition.stages)}
@@ -251,14 +278,17 @@ class PipelineOrchestrator:
                 )
 
                 # Capture pre-stage git checkpoint if explicitly requested or rollback configured
-                should_checkpoint = (
-                    stage.checkpoint_before_stage
-                    or bool(stage.transitions and stage.transitions.rollback_on_rework)
+                should_checkpoint = stage.checkpoint_before_stage or bool(
+                    stage.transitions and stage.transitions.rollback_on_rework
                 )
-                if should_checkpoint and self.worktree_manager.is_git_repo(effective_workspace):
+                if should_checkpoint and self.worktree_manager.is_git_repo(
+                    effective_workspace
+                ):
                     exec_count = stage_executions.get(stage.name, 0)
                     cp_label = f"{task_id}_{stage.name}_r{exec_count}"
-                    cp_hash = self.worktree_manager.create_checkpoint(effective_workspace, cp_label)
+                    cp_hash = self.worktree_manager.create_checkpoint(
+                        effective_workspace, cp_label
+                    )
                     if cp_hash:
                         stage_checkpoints[stage.name] = cp_hash
 
@@ -305,17 +335,33 @@ class PipelineOrchestrator:
                         capture_output=True,
                         text=True,
                     )
-                    context["git_diff"] = diff_res.stdout or "(No uncommitted diffs detected)"
+                    context["git_diff"] = (
+                        diff_res.stdout or "(No uncommitted diffs detected)"
+                    )
 
                 if stage.is_gate_only:
                     stage_output = ""
                 else:
                     # Render stage prompt
-                    stage_prompt = self.pipeline_manager.render_stage_prompt(stage, context)
+                    stage_prompt = self.pipeline_manager.render_stage_prompt(
+                        stage, context
+                    )
+
+                    # Pre-flight repo map injection for planner stage
+                    if (
+                        stage.profile == "planner"
+                        and "{repo_map}" not in stage.prompt
+                        and repo_map_content
+                    ):
+                        stage_prompt += (
+                            f"\n\n## Repository Structural Map\n{repo_map_content}"
+                        )
 
                     profile = self.profile_manager.get_profile(stage.profile)
-                    stage_workspace = self.profile_manager.resolve_workspace_for_profile(
-                        profile, effective_workspace
+                    stage_workspace = (
+                        self.profile_manager.resolve_workspace_for_profile(
+                            profile, effective_workspace
+                        )
                     )
                     provider = get_provider_for_profile(profile)
 
@@ -325,10 +371,16 @@ class PipelineOrchestrator:
                     session_id = f"{task_id}_{stage.name}{session_suffix}"
 
                     # Phase 2: Check if stage runs milestone sub-sessions
-                    plan_candidate = context.get("plan") or context.get("previous_output") or ""
+                    plan_candidate = (
+                        context.get("plan") or context.get("previous_output") or ""
+                    )
                     parsed_plan = parse_milestone_plan(plan_candidate, task_id)
 
-                    if (stage.run_milestones or (stage.profile == "builder" and parsed_plan and len(parsed_plan.milestones) > 1)):
+                    if stage.run_milestones or (
+                        stage.profile == "builder"
+                        and parsed_plan
+                        and len(parsed_plan.milestones) > 1
+                    ):
                         if verbose:
                             console.print(
                                 f"[bold magenta][*] Launching Milestone Sub-Sessions ({len(parsed_plan.milestones)} milestones)[/bold magenta]"
@@ -348,7 +400,9 @@ class PipelineOrchestrator:
                                 capture_output=True,
                                 text=True,
                             )
-                            git_stat = diff_stat_res.stdout.strip() or "(Clean worktree)"
+                            git_stat = (
+                                diff_stat_res.stdout.strip() or "(Clean worktree)"
+                            )
 
                             milestone_prompt = (
                                 f"# High-Level Task Objective\n{title}\n\n"
@@ -370,13 +424,22 @@ class PipelineOrchestrator:
                                     workspace_path=stage_workspace,
                                     on_thought=on_thought,
                                     on_message=on_message,
-                                    on_approval=on_approval if stage.requires_approval else None,
+                                    on_approval=on_approval
+                                    if stage.requires_approval
+                                    else None,
                                     max_tool_turns=10,  # Hard limit per milestone sub-session
                                 )
-                                milestone_outputs.append(f"### {milestone.id}: {milestone.title}\n{m_output}")
+                                milestone_outputs.append(
+                                    f"### {milestone.id}: {milestone.title}\n{m_output}"
+                                )
 
                                 # Run milestone verification command if provided
-                                if milestone.verification_command and self.worktree_manager.is_git_repo(stage_workspace):
+                                if (
+                                    milestone.verification_command
+                                    and self.worktree_manager.is_git_repo(
+                                        stage_workspace
+                                    )
+                                ):
                                     v_res = subprocess.run(
                                         milestone.verification_command,
                                         shell=True,
@@ -391,18 +454,34 @@ class PipelineOrchestrator:
                                                 f"[bold yellow][!] Milestone {milestone.id} verification failed. "
                                                 "Attempting git rollback...[/bold yellow]"
                                             )
-                                        self.worktree_manager.rollback_to_previous_milestone(stage_workspace)
+                                        self.worktree_manager.rollback_to_previous_milestone(
+                                            stage_workspace
+                                        )
                                     else:
-                                        self.worktree_manager.milestone_checkpoint(stage_workspace, milestone.id, milestone.title)
+                                        self.worktree_manager.milestone_checkpoint(
+                                            stage_workspace,
+                                            milestone.id,
+                                            milestone.title,
+                                        )
                                 else:
-                                    if self.worktree_manager.is_git_repo(stage_workspace):
-                                        self.worktree_manager.milestone_checkpoint(stage_workspace, milestone.id, milestone.title)
+                                    if self.worktree_manager.is_git_repo(
+                                        stage_workspace
+                                    ):
+                                        self.worktree_manager.milestone_checkpoint(
+                                            stage_workspace,
+                                            milestone.id,
+                                            milestone.title,
+                                        )
 
                             except Exception as m_err:
                                 if verbose:
-                                    console.print(f"[red][x] Milestone {milestone.id} error: {m_err}[/red]")
+                                    console.print(
+                                        f"[red][x] Milestone {milestone.id} error: {m_err}[/red]"
+                                    )
                                 if self.worktree_manager.is_git_repo(stage_workspace):
-                                    self.worktree_manager.rollback_to_previous_milestone(stage_workspace)
+                                    self.worktree_manager.rollback_to_previous_milestone(
+                                        stage_workspace
+                                    )
                                 raise
 
                         stage_output = "\n\n".join(milestone_outputs)
@@ -414,12 +493,18 @@ class PipelineOrchestrator:
                                 workspace_path=stage_workspace,
                                 on_thought=on_thought,
                                 on_message=on_message,
-                                on_approval=on_approval if stage.requires_approval else None,
+                                on_approval=on_approval
+                                if stage.requires_approval
+                                else None,
                             )
                         except Exception as e:
                             if verbose:
-                                console.print(f"[red][x] Stage '{stage.name}' failed: {e}[/red]")
-                            await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                                console.print(
+                                    f"[red][x] Stage '{stage.name}' failed: {e}[/red]"
+                                )
+                            await self.storage.update_task_status(
+                                task_id, TaskStatus.FAILED
+                            )
                             raise
 
                 # Execute deterministic verification gate if configured
@@ -430,7 +515,12 @@ class PipelineOrchestrator:
                         if gate_cfg.cwd
                         else effective_workspace
                     )
-                    step_idx = await self.storage.get_latest_agent_step_index(task_id, stage.name) + 1
+                    step_idx = (
+                        await self.storage.get_latest_agent_step_index(
+                            task_id, stage.name
+                        )
+                        + 1
+                    )
                     gate_res = await self.gate_runner.run_gate(
                         task_id=task_id,
                         stage=stage.name,
@@ -452,7 +542,11 @@ class PipelineOrchestrator:
 
                         if gate_cfg.auto_rework_on_fail:
                             cur_reworks = rework_counts.get(stage.name, 0)
-                            max_reworks = stage.transitions.max_reworks if stage.transitions else 2
+                            max_reworks = (
+                                stage.transitions.max_reworks
+                                if stage.transitions
+                                else 2
+                            )
                             rework_target = (
                                 stage.transitions.rework_target
                                 if stage.transitions and stage.transitions.rework_target
@@ -468,7 +562,10 @@ class PipelineOrchestrator:
                                         f"Looping back to '{rework_target}'...[/bold yellow]"
                                     )
 
-                                if stage.transitions and stage.transitions.rollback_on_rework:
+                                if (
+                                    stage.transitions
+                                    and stage.transitions.rollback_on_rework
+                                ):
                                     target_cp = stage_checkpoints.get(rework_target)
                                     if target_cp:
                                         rolled_back = self.worktree_manager.rollback_to_checkpoint(
@@ -480,7 +577,9 @@ class PipelineOrchestrator:
                                                 f"{target_cp[:8]} for clean rework restart.[/bold yellow]"
                                             )
 
-                                context["reviewer_feedback"] = gate_res.to_feedback_prompt()
+                                context["reviewer_feedback"] = (
+                                    gate_res.to_feedback_prompt()
+                                )
                                 context["rework_feedback_block"] = (
                                     f"\n## Deterministic Verification Gate Failure "
                                     f"(Rework Cycle {rework_counts[stage.name]}/{max_reworks})\n"
@@ -495,7 +594,9 @@ class PipelineOrchestrator:
                                         console.print(
                                             f"[red][x] Rework target '{rework_target}' not found in pipeline stages.[/red]"
                                         )
-                                    await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                                    await self.storage.update_task_status(
+                                        task_id, TaskStatus.FAILED
+                                    )
                                     return await self.storage.get_task(task_id) or task
                             else:
                                 if verbose:
@@ -503,7 +604,9 @@ class PipelineOrchestrator:
                                         f"[bold red][x] Maximum rework attempts reached ({max_reworks}) "
                                         f"for deterministic verification on '{stage.name}'. Halting pipeline.[/bold red]"
                                     )
-                                await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                                await self.storage.update_task_status(
+                                    task_id, TaskStatus.FAILED
+                                )
                                 return await self.storage.get_task(task_id) or task
                     else:
                         context["gate_verification"] = (
@@ -516,7 +619,6 @@ class PipelineOrchestrator:
                             )
                         if stage.is_gate_only:
                             stage_output = gate_res.summary
-
 
                 # Store output in context
                 context["previous_output"] = stage_output
@@ -532,7 +634,9 @@ class PipelineOrchestrator:
                 # Evaluate transitions
                 if stage.transitions:
                     # 1. Rework check
-                    if stage.transitions.rework_target and check_is_rework_verdict(stage_output):
+                    if stage.transitions.rework_target and check_is_rework_verdict(
+                        stage_output
+                    ):
                         cur_reworks = rework_counts.get(stage.name, 0)
                         if cur_reworks < stage.transitions.max_reworks:
                             rework_counts[stage.name] = cur_reworks + 1
@@ -569,7 +673,9 @@ class PipelineOrchestrator:
                                     console.print(
                                         f"[red][x] Rework target '{target_name}' not found in pipeline stages.[/red]"
                                     )
-                                await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                                await self.storage.update_task_status(
+                                    task_id, TaskStatus.FAILED
+                                )
                                 return await self.storage.get_task(task_id) or task
                         else:
                             if verbose:
@@ -577,17 +683,23 @@ class PipelineOrchestrator:
                                     f"[bold red][x] Maximum rework attempts reached ({stage.transitions.max_reworks}) "
                                     f"for stage '{stage.name}'. Halting pipeline for user steering.[/bold red]"
                                 )
-                            await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                            await self.storage.update_task_status(
+                                task_id, TaskStatus.FAILED
+                            )
                             return await self.storage.get_task(task_id) or task
 
                     # 2. Fail check
-                    if stage.transitions.fail_target and check_is_fail_verdict(stage_output):
+                    if stage.transitions.fail_target and check_is_fail_verdict(
+                        stage_output
+                    ):
                         target_name = stage.transitions.fail_target
                         if target_name in stage_map:
                             stage_index = stage_map[target_name]
                             continue
                         else:
-                            await self.storage.update_task_status(task_id, TaskStatus.FAILED)
+                            await self.storage.update_task_status(
+                                task_id, TaskStatus.FAILED
+                            )
                             return await self.storage.get_task(task_id) or task
 
                     # 3. Explicit pass target check
@@ -629,12 +741,16 @@ class PipelineOrchestrator:
         else:
             effective_use_worktree = any(s.use_worktree for s in definition.stages)
 
-        if effective_use_worktree and self.worktree_manager.is_git_repo(target_workspace):
+        if effective_use_worktree and self.worktree_manager.is_git_repo(
+            target_workspace
+        ):
             with self.worktree_manager.isolated_worktree(
                 target_workspace, branch_prefix=f"pipe-{task_id[:6]}"
             ) as wt_path:
                 if verbose:
-                    console.print(f"[dim]Running pipeline in isolated worktree: {wt_path}[/dim]")
+                    console.print(
+                        f"[dim]Running pipeline in isolated worktree: {wt_path}[/dim]"
+                    )
 
                 wt_branch = None
                 try:
@@ -661,7 +777,9 @@ class PipelineOrchestrator:
                             payload={"branch": wt_branch},
                         )
                     except Exception as ev_err:
-                        logger.debug("Failed to record worktree_branch event: %s", ev_err)
+                        logger.debug(
+                            "Failed to record worktree_branch event: %s", ev_err
+                        )
 
                 return result
         else:

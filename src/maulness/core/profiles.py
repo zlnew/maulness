@@ -10,11 +10,14 @@ from maulness.config import config
 from maulness.core.rules import ExecutionRulesConfig, PolicyAction, RuleEngine
 from maulness.core.skills import SkillManager
 from maulness.core.soul import get_soul_content
+from maulness.core.stack import get_stack_doctrine
 
 logger = logging.getLogger("maulness.profiles")
 
 USER_PROFILES_DIR = config.config_dir / "profiles"
-TEMPLATE_PROFILES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "templates" / "profiles"
+TEMPLATE_PROFILES_DIR = (
+    Path(__file__).resolve().parent.parent.parent.parent / "templates" / "profiles"
+)
 
 
 class IdentityConfig(BaseModel):
@@ -33,11 +36,12 @@ class VertexConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     """Routing + execution identity block (mirrors Hermes 'agent:' schema)."""
+
     provider: str = "acp"
-    model: Optional[str] = None        # target model identifier (e.g. "gemini-2.5-pro")
-    base_url: Optional[str] = None     # custom endpoint (e.g. OpenCode, Ollama, DeepSeek)
+    model: Optional[str] = None  # target model identifier (e.g. "gemini-2.5-pro")
+    base_url: Optional[str] = None  # custom endpoint (e.g. OpenCode, Ollama, DeepSeek)
     api_key_env: Optional[str] = None
-    command: Optional[str] = None      # CLI command for ACP (e.g. "agy", "opencode run")
+    command: Optional[str] = None  # CLI command for ACP (e.g. "agy", "opencode run")
     reasoning_effort: Optional[str] = None  # "low" | "medium" | "high"
     vertex: Optional[VertexConfig] = None
 
@@ -104,7 +108,9 @@ class Profile(BaseModel):
     @model_validator(mode="after")
     def _validate_acp_command(self) -> "Profile":
         """Enforce explicit command requirement for ACP provider."""
-        if self.agent_cfg.provider.lower().strip() == "acp" and not (self.agent_cfg.command and self.agent_cfg.command.strip()):
+        if self.agent_cfg.provider.lower().strip() == "acp" and not (
+            self.agent_cfg.command and self.agent_cfg.command.strip()
+        ):
             raise ValueError(
                 f"Profile '{self.name}' specifies provider 'acp' but has no 'command' configured in config.yaml"
             )
@@ -167,7 +173,9 @@ class Profile(BaseModel):
 
     @property
     def location(self) -> Optional[str]:
-        return self.agent_cfg.vertex.location if self.agent_cfg.vertex else "us-central1"
+        return (
+            self.agent_cfg.vertex.location if self.agent_cfg.vertex else "us-central1"
+        )
 
     @property
     def temperature(self) -> float:
@@ -228,7 +236,11 @@ class Profile(BaseModel):
             "anthropic": ["ANTHROPIC_API_KEY"],
             "openai": ["OPENAI_API_KEY"],
             "openrouter": ["OPENROUTER_API_KEY"],
-            "opencode": ["OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY"],
+            "opencode": [
+                "OPENCODE_API_KEY",
+                "OPENCODE_ZEN_API_KEY",
+                "OPENCODE_GO_API_KEY",
+            ],
             "opencode_go": ["OPENCODE_GO_API_KEY", "OPENCODE_API_KEY"],
             "opencode_zen": ["OPENCODE_ZEN_API_KEY", "OPENCODE_API_KEY"],
             "deepseek": ["DEEPSEEK_API_KEY"],
@@ -252,7 +264,12 @@ class Profile(BaseModel):
 
         # 3. Generic fallback
         if prov in ("openai_compatible", "opencode", "opencode_go", "opencode_zen"):
-            return self.env_vars.get("OPENCODE_API_KEY") or os.getenv("OPENCODE_API_KEY") or self.env_vars.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+            return (
+                self.env_vars.get("OPENCODE_API_KEY")
+                or os.getenv("OPENCODE_API_KEY")
+                or self.env_vars.get("OPENAI_API_KEY")
+                or os.getenv("OPENAI_API_KEY")
+            )
         if prov in ("gemini", "antigravity_sdk"):
             return (
                 self.env_vars.get("GOOGLE_API_KEY")
@@ -287,8 +304,8 @@ class Profile(BaseModel):
             result = result.replace(f"{{{k}}}", str(v))
         return result
 
-    def effective_system_prompt(self) -> str:
-        """Combine role-specific system prompt, profile SOUL.md, root SOUL.md, and skills summary."""
+    def effective_system_prompt(self, workspace_path: Optional[Path] = None) -> str:
+        """Combine role-specific system prompt, profile SOUL.md, root SOUL.md, workspace doctrine, stack rules, and skills summary."""
         parts = []
         if self.system_prompt.strip():
             parts.append(self.interpolate_soul_text(self.system_prompt.strip()))
@@ -296,24 +313,56 @@ class Profile(BaseModel):
         # Profile-specific SOUL doctrine (profiles/<name>/SOUL.md)
         if self.soul_content and self.soul_content.strip():
             interpolated_soul = self.interpolate_soul_text(self.soul_content.strip())
-            parts.append("\n---\n## Profile Operating Doctrine (SOUL.md)\n" + interpolated_soul)
+            parts.append(
+                "\n---\n## Profile Operating Doctrine (SOUL.md)\n" + interpolated_soul
+            )
 
         # Global personal doctrine (~/.config/maulness/SOUL.md)
         if self.inject_soul:
             soul = get_soul_content()
             if soul:
                 interpolated_global_soul = self.interpolate_soul_text(soul)
-                parts.append("\n---\n## Personal Operating Doctrine (SOUL.md)\n" + interpolated_global_soul)
+                parts.append(
+                    "\n---\n## Personal Operating Doctrine (SOUL.md)\n"
+                    + interpolated_global_soul
+                )
 
         # User-specific operating preferences (USER.md)
         if self.user_content and self.user_content.strip():
             interpolated_user = self.interpolate_soul_text(self.user_content.strip())
-            parts.append("\n---\n## User Profile & Working Style (USER.md)\n" + interpolated_user)
+            parts.append(
+                "\n---\n## User Profile & Working Style (USER.md)\n" + interpolated_user
+            )
 
         # Durable workspace memory & lessons learned (MEMORY.md)
         if self.memory_content and self.memory_content.strip():
             interpolated_mem = self.interpolate_soul_text(self.memory_content.strip())
-            parts.append("\n---\n## Workspace Knowledge & Lessons Learned (MEMORY.md)\n" + interpolated_mem)
+            parts.append(
+                "\n---\n## Workspace Knowledge & Lessons Learned (MEMORY.md)\n"
+                + interpolated_mem
+            )
+
+        # Workspace Doctrine (repo/AGENTS.md)
+        if workspace_path:
+            ws = Path(workspace_path).resolve()
+            agents_md = ws / "AGENTS.md"
+            if not agents_md.exists():
+                agents_md = ws / ".agents" / "AGENTS.md"
+            if agents_md.exists():
+                try:
+                    agents_content = agents_md.read_text(encoding="utf-8").strip()
+                    if agents_content:
+                        parts.append(
+                            "\n---\n## Workspace Doctrine (AGENTS.md)\n"
+                            + self.interpolate_soul_text(agents_content)
+                        )
+                except Exception:
+                    pass
+
+            # Stack-Specific Rules (max 3-5 rules capped)
+            stack_doc = get_stack_doctrine(ws)
+            if stack_doc:
+                parts.append("\n---\n" + stack_doc)
 
         # Append effective skills index
         skill_mgr = SkillManager()
@@ -326,7 +375,10 @@ class Profile(BaseModel):
         parts.append(
             "---\n## Tool Calling Doctrine\n"
             "- You have real workspace tools available via function calling: "
-            "`run_command`, `read_file`, `write_file`, `list_dir`, `git_status`.\n"
+            "`run_command`, `read_file`, `write_file`, `replace_file_content`, `patch_file`, "
+            "`list_dir`, `search_files`, `git_status`, `get_outline`, `find_symbol`, `web_search`, `fetch_doc_markdown`.\n"
+            "- Structural inspection: Use `get_outline` for inspecting file class/function signatures without reading entire files, and `find_symbol` to locate symbol definitions across workspace.\n"
+            "- External knowledge: Use `web_search` and `fetch_doc_markdown` for online documentation, API signatures, and library references.\n"
             "- NEVER simulate, fabricate, or hallucinate tool execution syntax (such as `> **tool_name**` or markdown breadcrumbs) in plain text.\n"
             "- When you need to inspect files, execute shell commands, or check git status, you MUST call the appropriate function tool. Never guess, assume, or invent filesystem contents."
         )
@@ -366,14 +418,24 @@ class ProfileManager:
         base_env: dict[str, str] = {}
         root_env = config.config_dir / ".env"
         if root_env.exists():
-            base_env.update({k: v for k, v in dotenv_values(root_env).items() if v is not None})
+            base_env.update(
+                {k: v for k, v in dotenv_values(root_env).items() if v is not None}
+            )
         else:
             default_env = config.config_dir / "profiles" / "default" / ".env"
             if default_env.exists():
-                base_env.update({k: v for k, v in dotenv_values(default_env).items() if v is not None})
+                base_env.update(
+                    {
+                        k: v
+                        for k, v in dotenv_values(default_env).items()
+                        if v is not None
+                    }
+                )
 
         return Profile(
-            identity=IdentityConfig(name=name, description="Ephemeral default fallback profile"),
+            identity=IdentityConfig(
+                name=name, description="Ephemeral default fallback profile"
+            ),
             agent=AgentConfig(
                 provider="acp" if name in ("default", "builder") else "gemini",
                 model="gemini-3.6-flash",
@@ -382,7 +444,9 @@ class ProfileManager:
             env_vars=base_env,
         )
 
-    def resolve_workspace_for_profile(self, profile: Profile, fallback_workspace: Path) -> Path:
+    def resolve_workspace_for_profile(
+        self, profile: Profile, fallback_workspace: Path
+    ) -> Path:
         """Resolve effective workspace path for a profile."""
         if profile.workspace and profile.workspace.strip().lower() != "inherit":
             rel_candidate = (fallback_workspace / profile.workspace.strip()).resolve()
@@ -407,7 +471,9 @@ class ProfileManager:
 
         return discovered
 
-    def _load_directory_profile(self, profile_dir: Path, config_file: Path) -> Optional[Profile]:
+    def _load_directory_profile(
+        self, profile_dir: Path, config_file: Path
+    ) -> Optional[Profile]:
         try:
             data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
@@ -442,15 +508,25 @@ class ProfileManager:
             env_vars: dict[str, str] = {}
             root_env = config.config_dir / ".env"
             if root_env.exists():
-                env_vars.update({k: v for k, v in dotenv_values(root_env).items() if v is not None})
+                env_vars.update(
+                    {k: v for k, v in dotenv_values(root_env).items() if v is not None}
+                )
             else:
                 default_env = config.config_dir / "profiles" / "default" / ".env"
                 if default_env.exists():
-                    env_vars.update({k: v for k, v in dotenv_values(default_env).items() if v is not None})
+                    env_vars.update(
+                        {
+                            k: v
+                            for k, v in dotenv_values(default_env).items()
+                            if v is not None
+                        }
+                    )
 
             env_file = profile_dir / ".env"
             if env_file.exists():
-                env_vars.update({k: v for k, v in dotenv_values(env_file).items() if v is not None})
+                env_vars.update(
+                    {k: v for k, v in dotenv_values(env_file).items() if v is not None}
+                )
 
             skills_dir = profile_dir / "skills"
             if not skills_dir.exists():
