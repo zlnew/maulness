@@ -1,6 +1,5 @@
 import contextlib
 import logging
-import os
 import shutil
 import subprocess
 import uuid
@@ -44,7 +43,15 @@ class WorktreeManager:
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
-        cmd = ["git", "worktree", "add", "-b", branch_name, str(target_path), base_commit]
+        cmd = [
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            branch_name,
+            str(target_path),
+            base_commit,
+        ]
         res = subprocess.run(cmd, cwd=str(repo_path), capture_output=True, text=True)
 
         if res.returncode != 0:
@@ -91,7 +98,9 @@ class WorktreeManager:
         res = subprocess.run(cmd, cwd=str(repo_path), capture_output=True, text=True)
 
         # Always prune stale metadata
-        subprocess.run(["git", "worktree", "prune"], cwd=str(repo_path), capture_output=True)
+        subprocess.run(
+            ["git", "worktree", "prune"], cwd=str(repo_path), capture_output=True
+        )
 
         # Fallback directory cleanup if git worktree remove left artifacts
         if worktree_path.exists():
@@ -146,7 +155,12 @@ class WorktreeManager:
                             capture_output=True,
                         )
                         subprocess.run(
-                            ["git", "commit", "-m", f"chore(pipeline): snapshot changes for {branch_name}"],
+                            [
+                                "git",
+                                "commit",
+                                "-m",
+                                f"chore(pipeline): snapshot changes for {branch_name}",
+                            ],
                             cwd=str(worktree_dir),
                             capture_output=True,
                         )
@@ -174,7 +188,12 @@ class WorktreeManager:
             )
             has_changes = bool(status_res.stdout.strip())
             if has_changes:
-                subprocess.run(["git", "add", "-A"], cwd=str(repo_path), capture_output=True, timeout=10)
+                subprocess.run(
+                    ["git", "add", "-A"],
+                    cwd=str(repo_path),
+                    capture_output=True,
+                    timeout=10,
+                )
                 subprocess.run(
                     ["git", "commit", "-m", f"checkpoint: {label}", "--allow-empty"],
                     cwd=str(repo_path),
@@ -203,7 +222,9 @@ class WorktreeManager:
         if not self.is_git_repo(repo_path) or not commit_hash:
             return False
         try:
-            logger.info("Rolling back working tree in '%s' to %s", repo_path, commit_hash[:8])
+            logger.info(
+                "Rolling back working tree in '%s' to %s", repo_path, commit_hash[:8]
+            )
             reset_res = subprocess.run(
                 ["git", "reset", "--hard", commit_hash],
                 cwd=str(repo_path),
@@ -223,7 +244,9 @@ class WorktreeManager:
             logger.error("Failed to rollback to checkpoint %s: %s", commit_hash, e)
             return False
 
-    def milestone_checkpoint(self, repo_path: Path, milestone_id: str, title: str) -> Optional[str]:
+    def milestone_checkpoint(
+        self, repo_path: Path, milestone_id: str, title: str
+    ) -> Optional[str]:
         """Commit an explicit milestone checkpoint in the git worktree."""
         label = f"maulness(checkpoint): {milestone_id} - {title}"
         return self.create_checkpoint(repo_path, label)

@@ -881,7 +881,7 @@ class MaulnessBot(commands.Bot):
                     text=True,
                 )
                 dirty_count = len(
-                    [l for l in diff_proc.stdout.splitlines() if l.strip()]
+                    [line for line in diff_proc.stdout.splitlines() if line.strip()]
                 )
                 dirty_str = (
                     f"{dirty_count} uncommitted changes" if dirty_count > 0 else "clean"
@@ -1369,7 +1369,9 @@ class MaulnessBot(commands.Bot):
                 capture_output=True,
                 text=True,
             )
-            dirty_count = len([l for l in diff_proc.stdout.splitlines() if l.strip()])
+            dirty_count = len(
+                [line for line in diff_proc.stdout.splitlines() if line.strip()]
+            )
             dirty_str = (
                 f"{dirty_count} uncommitted changes" if dirty_count > 0 else "clean"
             )
@@ -1737,11 +1739,11 @@ class MaulnessBot(commands.Bot):
                     )
 
             if not created_in_forum:
-                status_msg = await interaction.followup.send(
+                await interaction.followup.send(
                     f"**Launching Pipeline `{effective_pipe_name}` for `{effective_title}`{repo_desc}...**"
                 )
             else:
-                status_msg = await exec_channel.send(
+                await exec_channel.send(
                     f"**Launching Pipeline `{effective_pipe_name}` for `{effective_title}`{repo_desc}...**"
                 )
 

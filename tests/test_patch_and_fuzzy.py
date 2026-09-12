@@ -1,4 +1,3 @@
-import pytest
 from pathlib import Path
 from maulness.core.tools import _execute_replace_file_content, _execute_patch_file
 

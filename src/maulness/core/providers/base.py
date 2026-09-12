@@ -25,10 +25,18 @@ class BaseProvider(ABC):
         workspace_path: Optional[Path] = None,
         conversation_id: Optional[str] = None,
         on_init: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None,
-        on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
-        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
-        on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
-        on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
+        on_thought: Optional[
+            Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_message: Optional[
+            Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_tool_call: Optional[
+            Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_approval: Optional[
+            Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]
+        ] = None,
     ) -> str:
         """Execute a prompt and stream responses through registered callbacks."""
         pass

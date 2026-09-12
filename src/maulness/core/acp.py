@@ -31,9 +31,15 @@ class AcpClient:
         self._is_running = False
 
         # Event Callbacks
-        self.on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None
-        self.on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None
-        self.on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None
+        self.on_thought: Optional[
+            Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]
+        ] = None
+        self.on_message: Optional[
+            Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]
+        ] = None
+        self.on_tool_call: Optional[
+            Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]
+        ] = None
         self.on_approval_request: Optional[
             Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]
         ] = None
@@ -92,7 +98,9 @@ class AcpClient:
                 fut.set_exception(ConnectionResetError("ACP connection closed"))
         self._pending_requests.clear()
 
-    async def send_request(self, method: str, params: Optional[dict[str, Any]] = None) -> Any:
+    async def send_request(
+        self, method: str, params: Optional[dict[str, Any]] = None
+    ) -> Any:
         """Send a JSON-RPC request and wait for the matching result."""
         if not self.writer or self.writer.is_closing():
             raise ConnectionError("ACP writer stream is closed")
@@ -191,7 +199,9 @@ class AcpClient:
             if not fut.done():
                 exit_code = self.process.returncode if self.process else "unknown"
                 fut.set_exception(
-                    ConnectionResetError(f"ACP stream closed unexpectedly (exit code {exit_code})")
+                    ConnectionResetError(
+                        f"ACP stream closed unexpectedly (exit code {exit_code})"
+                    )
                 )
         self._pending_requests.clear()
 
@@ -205,7 +215,9 @@ class AcpClient:
             fut = self._pending_requests.pop(msg_id, None)
             if fut and not fut.done():
                 if "error" in message:
-                    fut.set_exception(RuntimeError(message["error"].get("message", "ACP RPC Error")))
+                    fut.set_exception(
+                        RuntimeError(message["error"].get("message", "ACP RPC Error"))
+                    )
                 else:
                     fut.set_result(message.get("result"))
             return
@@ -233,7 +245,8 @@ class AcpClient:
             else:
                 # Unknown agent request, return method not found
                 await self.send_response(
-                    msg_id, error={"code": -32601, "message": f"Method {method} not found"}
+                    msg_id,
+                    error={"code": -32601, "message": f"Method {method} not found"},
                 )
             return
 
@@ -244,11 +257,15 @@ class AcpClient:
 
             if method == "session/thought" and self.on_thought:
                 delta = params.get("delta", "")
-                await self.on_thought(AgentThoughtEvent(delta=delta, session_id=session_id))
+                await self.on_thought(
+                    AgentThoughtEvent(delta=delta, session_id=session_id)
+                )
 
             elif method == "session/message" and self.on_message:
                 delta = params.get("delta", "")
-                await self.on_message(AgentMessageEvent(delta=delta, session_id=session_id))
+                await self.on_message(
+                    AgentMessageEvent(delta=delta, session_id=session_id)
+                )
 
             elif method == "session/toolCall" and self.on_tool_call:
                 event = AgentToolCallEvent(

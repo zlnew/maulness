@@ -9,9 +9,11 @@ from maulness.core.models import (
     AgentToolCallEvent,
     ApprovalRequestEvent,
 )
-from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
-from maulness.core.providers.circuit import ProviderHealthRegistry, classify_provider_error
+from maulness.core.providers.circuit import (
+    ProviderHealthRegistry,
+    classify_provider_error,
+)
 from maulness.core.tools import clear_turn_tools, get_turn_executed_tools
 
 logger = logging.getLogger("maulness.providers.fallback")
@@ -51,10 +53,18 @@ class FallbackProviderChain(BaseProvider):
         workspace_path: Optional[Path] = None,
         conversation_id: Optional[str] = None,
         on_init: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None,
-        on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
-        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
-        on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
-        on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
+        on_thought: Optional[
+            Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_message: Optional[
+            Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_tool_call: Optional[
+            Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_approval: Optional[
+            Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]
+        ] = None,
     ) -> str:
         registry = self.registry
         full_chain = [self.primary] + self.fallbacks
@@ -112,7 +122,9 @@ class FallbackProviderChain(BaseProvider):
             for idx, provider in enumerate(available_chain):
                 prov_name = provider.profile.name
                 prov_type = provider.profile.provider
-                prov_model = provider.profile.model or provider.profile.command or "default"
+                prov_model = (
+                    provider.profile.model or provider.profile.command or "default"
+                )
                 prov_key = get_prov_key(provider)
                 try:
                     effective_prompt = prompt
@@ -148,7 +160,9 @@ class FallbackProviderChain(BaseProvider):
                         on_approval=on_approval,
                     )
                     if not res or not res.strip():
-                        raise RuntimeError(f"Provider {prov_key} completed but returned an empty response")
+                        raise RuntimeError(
+                            f"Provider {prov_key} completed but returned an empty response"
+                        )
 
                     # Succeeded: reset circuit breaker
                     registry.record_success(prov_key)
@@ -157,13 +171,15 @@ class FallbackProviderChain(BaseProvider):
                 except Exception as e:
                     last_error = e
                     tripped, friendly_msg, cd = registry.record_failure(prov_key, e)
-                    self.chain_errors.append({
-                        "profile": prov_name,
-                        "provider": prov_type,
-                        "model": prov_model,
-                        "error": friendly_msg,
-                        "raw_error": str(e),
-                    })
+                    self.chain_errors.append(
+                        {
+                            "profile": prov_name,
+                            "provider": prov_type,
+                            "model": prov_model,
+                            "error": friendly_msg,
+                            "raw_error": str(e),
+                        }
+                    )
                     logger.warning(
                         "Provider %s (%s) failed for session %s: %s (cooldown: %ds)",
                         prov_name,
@@ -183,7 +199,9 @@ class FallbackProviderChain(BaseProvider):
                         )
                         if on_thought:
                             await on_thought(
-                                AgentThoughtEvent(delta=f"{notice}\n", session_id=session_id)
+                                AgentThoughtEvent(
+                                    delta=f"{notice}\n", session_id=session_id
+                                )
                             )
 
                     if idx == len(available_chain) - 1:
@@ -191,7 +209,9 @@ class FallbackProviderChain(BaseProvider):
                             f"- {item['provider']}:{item['model']} -> {item['error']}"
                             for item in self.chain_errors
                         )
-                        raise RuntimeError(f"All configured providers failed:\n{summary}") from last_error
+                        raise RuntimeError(
+                            f"All configured providers failed:\n{summary}"
+                        ) from last_error
 
             if last_error:
                 raise last_error

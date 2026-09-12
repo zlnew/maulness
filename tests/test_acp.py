@@ -118,7 +118,7 @@ async def test_acp_approval_request_flow():
 
 @pytest.mark.asyncio
 async def test_agy_stream_conversation_persistence(monkeypatch):
-    from unittest.mock import AsyncMock, MagicMock
+    from unittest.mock import AsyncMock
     from maulness.core.profiles import Profile
     from maulness.core.providers.acp_provider import AcpProvider
 
@@ -426,7 +426,6 @@ async def test_acp_client_send_response_closed_and_pending_exceptions():
 async def test_acp_provider_agy_stream_full_coverage(tmp_path: Path):
     from maulness.core.profiles import Profile
     from maulness.core.providers.acp_provider import AcpProvider
-    from maulness.core.models import AgentThoughtEvent, AgentMessageEvent, AgentToolCallEvent
 
     # 1. Profile missing command raises ValueError (lines 41-42)
     p_no_cmd = Profile(identity={"name": "no_cmd"}, agent={"provider": "acp", "command": "agy"})

@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Optional
 
 from maulness.config import config
-from maulness.core.models import AgentMessageEvent
 from maulness.core.profiles import Profile, ProfileManager
 
 logger = logging.getLogger("maulness.memory.extractor")
@@ -56,7 +55,11 @@ class AutonomousMemoryExtractor:
 
             extract_profile = Profile(
                 identity={"name": "memory-librarian"},
-                agent={"provider": "gemini", "model": "gemini-3.6-flash", "temperature": 0.1},
+                agent={
+                    "provider": "gemini",
+                    "model": "gemini-3.6-flash",
+                    "temperature": 0.1,
+                },
             )
             # Inherit API keys from profile or config
             active_p = self.profile_manager.get_profile(profile_name)
@@ -76,7 +79,8 @@ class AutonomousMemoryExtractor:
 
             # Extract bullet lines
             new_bullets = [
-                line.strip() for line in result.splitlines()
+                line.strip()
+                for line in result.splitlines()
                 if line.strip().startswith(("-", "*")) and len(line.strip()) > 5
             ]
 
@@ -85,7 +89,11 @@ class AutonomousMemoryExtractor:
 
             added = self._append_facts_to_memory(new_bullets)
             if added:
-                logger.info("AutonomousMemoryExtractor added %d facts to %s", len(added), self.memory_file)
+                logger.info(
+                    "AutonomousMemoryExtractor added %d facts to %s",
+                    len(added),
+                    self.memory_file,
+                )
             return added
 
         except Exception as e:
@@ -95,9 +103,17 @@ class AutonomousMemoryExtractor:
     def _append_facts_to_memory(self, facts: list[str]) -> list[str]:
         """Append new non-duplicate facts to MEMORY.md."""
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
-        current_content = self.memory_file.read_text(encoding="utf-8") if self.memory_file.exists() else "# Workspace Memory\n"
+        current_content = (
+            self.memory_file.read_text(encoding="utf-8")
+            if self.memory_file.exists()
+            else "# Workspace Memory\n"
+        )
 
-        existing_lines_lower = {l.strip().lower() for l in current_content.splitlines() if l.strip()}
+        existing_lines_lower = {
+            line.strip().lower()
+            for line in current_content.splitlines()
+            if line.strip()
+        }
 
         facts_to_add = []
         for fact in facts:
@@ -111,9 +127,17 @@ class AutonomousMemoryExtractor:
 
         section_header = "\n## Auto-Learned Knowledge & Decisions\n"
         if section_header.strip() not in current_content:
-            updated_content = current_content.rstrip() + "\n" + section_header + "\n".join(facts_to_add) + "\n"
+            updated_content = (
+                current_content.rstrip()
+                + "\n"
+                + section_header
+                + "\n".join(facts_to_add)
+                + "\n"
+            )
         else:
-            updated_content = current_content.rstrip() + "\n" + "\n".join(facts_to_add) + "\n"
+            updated_content = (
+                current_content.rstrip() + "\n" + "\n".join(facts_to_add) + "\n"
+            )
 
         self.memory_file.write_text(updated_content, encoding="utf-8")
         return facts_to_add

@@ -124,6 +124,14 @@ class Profile(BaseModel):
         return self.identity.name
 
     @property
+    def identity_name(self) -> str:
+        return self.identity.name
+
+    @property
+    def agent(self) -> AgentConfig:
+        return self.agent_cfg
+
+    @property
     def description(self) -> str:
         return self.identity.description
 
@@ -432,14 +440,28 @@ class ProfileManager:
                     }
                 )
 
+        if "default" in profiles:
+            default_prof = profiles["default"]
+            fallback_agent = default_prof.agent.model_copy()
+            fallback_env = dict(default_prof.env_vars)
+            fallback_env.update(base_env)
+            return Profile(
+                identity=IdentityConfig(
+                    name=name,
+                    description=f"Ephemeral fallback profile '{name}' derived from default",
+                ),
+                agent=fallback_agent,
+                env_vars=fallback_env,
+            )
+
         return Profile(
             identity=IdentityConfig(
                 name=name, description="Ephemeral default fallback profile"
             ),
             agent=AgentConfig(
-                provider="acp" if name in ("default", "builder") else "gemini",
+                provider="gemini",
                 model="gemini-3.6-flash",
-                command="agy" if name in ("default", "builder") else None,
+                command=None,
             ),
             env_vars=base_env,
         )

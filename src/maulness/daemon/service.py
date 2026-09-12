@@ -2,7 +2,7 @@ import asyncio
 import logging
 import signal
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 from maulness.config import config
 from maulness.storage.db import StorageManager
@@ -48,9 +48,13 @@ async def main(profile_filter: Optional[str] = None):
 
     if profile_filter:
         target_profile = pm.get_profile(profile_filter)
-        token = target_profile.env_vars.get("DISCORD_BOT_TOKEN") or config.discord_bot_token
+        token = (
+            target_profile.env_vars.get("DISCORD_BOT_TOKEN") or config.discord_bot_token
+        )
         if token:
-            logger.info("Starting Discord Gateway for profile '%s'...", target_profile.name)
+            logger.info(
+                "Starting Discord Gateway for profile '%s'...", target_profile.name
+            )
             bot = MaulnessBot(storage=storage, profile=target_profile)
             bots.append(bot)
             discord_tasks.append(asyncio.create_task(bot.start(token)))
@@ -61,8 +65,7 @@ async def main(profile_filter: Optional[str] = None):
         logger.info("Gateway multiplexing enabled (gateway.multiplex_profiles: true)")
         allowlist = config.gateway_multiplex_profile_allowlist
         served_profiles = [
-            p for p in all_profiles
-            if not allowlist or p.name in allowlist
+            p for p in all_profiles if not allowlist or p.name in allowlist
         ]
         logger.info("Multiplexing profiles: %s", [p.name for p in served_profiles])
 
@@ -76,11 +79,16 @@ async def main(profile_filter: Optional[str] = None):
             if token:
                 token_groups.setdefault(token, []).append(p)
             else:
-                logger.debug("Profile '%s' has no DISCORD_BOT_TOKEN configured, skipping adapter.", p.name)
+                logger.debug(
+                    "Profile '%s' has no DISCORD_BOT_TOKEN configured, skipping adapter.",
+                    p.name,
+                )
 
         for token, group in token_groups.items():
             profile_names = [p.name for p in group]
-            logger.info("Spawning Discord bot adapter for profile(s) %s...", profile_names)
+            logger.info(
+                "Spawning Discord bot adapter for profile(s) %s...", profile_names
+            )
             bot = MaulnessBot(storage=storage, profiles=group)
             bots.append(bot)
             discord_tasks.append(asyncio.create_task(bot.start(token)))
@@ -103,10 +111,14 @@ async def main(profile_filter: Optional[str] = None):
                 "Daemon running in CLI/background standby mode."
             )
 
-    logger.info("Maulness daemon is ready and listening (%d bot adapters active).", len(discord_tasks))
+    logger.info(
+        "Maulness daemon is ready and listening (%d bot adapters active).",
+        len(discord_tasks),
+    )
 
     # Start background scheduler
     from maulness.daemon.scheduler import DaemonScheduler
+
     scheduler = DaemonScheduler(storage=storage, bots=bots)
     scheduler.start()
 
@@ -117,7 +129,11 @@ async def main(profile_filter: Optional[str] = None):
 
     for bot, task in zip(bots, discord_tasks):
         if not task.done():
-            p_names = [p.name for p in bot.profiles] if hasattr(bot, "profiles") else [bot.profile_name]
+            p_names = (
+                [p.name for p in bot.profiles]
+                if hasattr(bot, "profiles")
+                else [bot.profile_name]
+            )
             logger.info("Closing Discord connection for profile(s) %s...", p_names)
             await bot.close()
             task.cancel()
@@ -133,7 +149,9 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Maulness Daemon Service")
-    parser.add_argument("--profile", "-p", default=None, help="Target a specific profile")
+    parser.add_argument(
+        "--profile", "-p", default=None, help="Target a specific profile"
+    )
     args = parser.parse_args()
 
     asyncio.run(main(profile_filter=args.profile))

@@ -1,4 +1,3 @@
-import pytest
 from maulness.config import Config
 from maulness.core.profiles import Profile
 from maulness.discord.bot import MaulnessBot

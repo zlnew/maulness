@@ -5,7 +5,7 @@ from pathlib import Path
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
 from maulness.core.providers.fallback import FallbackProviderChain
-from maulness.core.tools import execute_tool_call, get_turn_executed_tools, clear_turn_tools
+from maulness.core.tools import execute_tool_call, get_turn_executed_tools
 from maulness.core.debouncer import MessageStreamDebouncer
 
 

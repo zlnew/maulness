@@ -3,7 +3,6 @@ import hashlib
 import logging
 import os
 import re
-import shlex
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -19,6 +18,7 @@ logger = logging.getLogger("maulness.kernel.gates")
 
 class GateFailureItem(BaseModel):
     """Details of an individual test or validation failure."""
+
     identifier: str
     message: str
     details: Optional[str] = None
@@ -26,6 +26,7 @@ class GateFailureItem(BaseModel):
 
 class GateResult(BaseModel):
     """Normalized result of a deterministic verification gate execution."""
+
     passed: bool
     command: str
     exit_code: int
@@ -77,7 +78,9 @@ class GateResult(BaseModel):
             lines.append("```")
             lines.append("")
 
-        lines.append("Please resolve the deterministic failures shown above before completing the stage.")
+        lines.append(
+            "Please resolve the deterministic failures shown above before completing the stage."
+        )
         return "\n".join(lines)
 
 
@@ -94,7 +97,10 @@ class SemanticErrorNormalizer:
     ) -> GateResult:
         """Analyze command execution output and extract normalized failures."""
         if exit_code == 0:
-            summary = cls._extract_success_summary(stdout, stderr) or "All checks passed successfully."
+            summary = (
+                cls._extract_success_summary(stdout, stderr)
+                or "All checks passed successfully."
+            )
             return GateResult(
                 passed=True,
                 command=command,
@@ -116,7 +122,6 @@ class SemanticErrorNormalizer:
         ):
             return cls._normalize_pytest(command, exit_code, stdout, stderr)
 
-
         # 2. Python unittest
         if "unittest" in cmd_lower:
             return cls._normalize_unittest(command, exit_code, stdout, stderr)
@@ -130,11 +135,16 @@ class SemanticErrorNormalizer:
             return cls._normalize_go(command, exit_code, stdout, stderr)
 
         # 5. Jest / Vitest / npm test
-        if any(tool in cmd_lower for tool in ("jest", "vitest", "npm test", "yarn test", "pnpm test")):
+        if any(
+            tool in cmd_lower
+            for tool in ("jest", "vitest", "npm test", "yarn test", "pnpm test")
+        ):
             return cls._normalize_javascript_tests(command, exit_code, stdout, stderr)
 
         # 6. Static Analysis / Linters (ruff, mypy, flake8, tsc)
-        if any(tool in cmd_lower for tool in ("ruff", "mypy", "flake8", "tsc", "pylint")):
+        if any(
+            tool in cmd_lower for tool in ("ruff", "mypy", "flake8", "tsc", "pylint")
+        ):
             return cls._normalize_linter(command, exit_code, stdout, stderr)
 
         # 7. Generic Fallback
@@ -189,7 +199,16 @@ class SemanticErrorNormalizer:
             for identifier, block in block_matches:
                 err_line = ""
                 for line in reversed(block.strip().splitlines()):
-                    if any(line.startswith(p) for p in ("E   ", "AssertionError", "TypeError", "ValueError", "KeyError")):
+                    if any(
+                        line.startswith(p)
+                        for p in (
+                            "E   ",
+                            "AssertionError",
+                            "TypeError",
+                            "ValueError",
+                            "KeyError",
+                        )
+                    ):
                         err_line = line.strip()
                         break
                 failures.append(
@@ -233,7 +252,9 @@ class SemanticErrorNormalizer:
             re.MULTILINE | re.DOTALL,
         )
         for test_fn, test_cls, trace in matches:
-            last_line = trace.strip().splitlines()[-1] if trace.strip() else "AssertionError"
+            last_line = (
+                trace.strip().splitlines()[-1] if trace.strip() else "AssertionError"
+            )
             failures.append(
                 GateFailureItem(
                     identifier=f"{test_cls}.{test_fn}",
@@ -243,7 +264,11 @@ class SemanticErrorNormalizer:
             )
 
         summary_match = re.search(r"^FAILED \((.*?)\)$", combined, re.MULTILINE)
-        summary = summary_match.group(1).strip() if summary_match else f"{len(failures)} tests failed"
+        summary = (
+            summary_match.group(1).strip()
+            if summary_match
+            else f"{len(failures)} tests failed"
+        )
 
         return GateResult(
             passed=False,
@@ -275,8 +300,11 @@ class SemanticErrorNormalizer:
                     break
             if not panic_line:
                 non_empty = [
-                    l.strip() for l in details.strip().splitlines()
-                    if l.strip() and not l.strip().startswith("failures:") and l.strip() != identifier.strip()
+                    item.strip()
+                    for item in details.strip().splitlines()
+                    if item.strip()
+                    and not item.strip().startswith("failures:")
+                    and item.strip() != identifier.strip()
                 ]
                 panic_line = non_empty[-1] if non_empty else "Test failure"
 
@@ -288,9 +316,10 @@ class SemanticErrorNormalizer:
                 )
             )
 
-
         summary_match = re.search(r"test result:\s*FAILED\.\s*([^\n]+)", combined)
-        summary = summary_match.group(1).strip() if summary_match else "Cargo test failed"
+        summary = (
+            summary_match.group(1).strip() if summary_match else "Cargo test failed"
+        )
 
         return GateResult(
             passed=False,
@@ -309,7 +338,9 @@ class SemanticErrorNormalizer:
         combined = stdout + "\n" + stderr
         failures: list[GateFailureItem] = []
 
-        matches = re.findall(r"^--- FAIL:\s+([^\s]+)\s+\(([^\)]+)\)", combined, re.MULTILINE)
+        matches = re.findall(
+            r"^--- FAIL:\s+([^\s]+)\s+\(([^\)]+)\)", combined, re.MULTILINE
+        )
         for test_name, duration in matches:
             failures.append(
                 GateFailureItem(
@@ -318,7 +349,9 @@ class SemanticErrorNormalizer:
                 )
             )
 
-        summary = f"{len(failures)} Go tests failed" if failures else "Go test suite failed"
+        summary = (
+            f"{len(failures)} Go tests failed" if failures else "Go test suite failed"
+        )
         return GateResult(
             passed=False,
             command=command,
@@ -346,7 +379,11 @@ class SemanticErrorNormalizer:
             )
 
         summary_match = re.search(r"Tests:\s*([^\n]+)", combined)
-        summary = summary_match.group(1).strip() if summary_match else "JavaScript tests failed"
+        summary = (
+            summary_match.group(1).strip()
+            if summary_match
+            else "JavaScript tests failed"
+        )
 
         return GateResult(
             passed=False,
@@ -379,7 +416,11 @@ class SemanticErrorNormalizer:
                 )
             )
 
-        summary = f"{len(failures)} lint/type diagnostics found" if failures else "Linter check failed"
+        summary = (
+            f"{len(failures)} lint/type diagnostics found"
+            if failures
+            else "Linter check failed"
+        )
         return GateResult(
             passed=False,
             command=command,
@@ -394,24 +435,32 @@ class SemanticErrorNormalizer:
     def _normalize_generic(
         cls, command: str, exit_code: int, stdout: str, stderr: str
     ) -> GateResult:
-        combined = (stderr.strip() or stdout.strip())
+        combined = stderr.strip() or stdout.strip()
         lines = [line.strip() for line in combined.splitlines() if line.strip()]
 
         # Identify explicit error lines
         error_lines = [
-            line for line in lines
-            if any(term in line.lower() for term in ("error", "exception", "failed", "fatal", "panic"))
+            line
+            for line in lines
+            if any(
+                term in line.lower()
+                for term in ("error", "exception", "failed", "fatal", "panic")
+            )
         ]
 
         failures = [
             GateFailureItem(
-                identifier=f"error_{idx+1}",
+                identifier=f"error_{idx + 1}",
                 message=line,
             )
             for idx, line in enumerate(error_lines[:5])
         ]
 
-        summary = error_lines[0] if error_lines else f"Command failed with exit code {exit_code}"
+        summary = (
+            error_lines[0]
+            if error_lines
+            else f"Command failed with exit code {exit_code}"
+        )
         return GateResult(
             passed=False,
             command=command,
@@ -450,7 +499,6 @@ class DeterministicGateRunner:
             cwd=workspace,
             sandbox_mode=sandbox_mode,
         )
-
 
         try:
             if is_shell:
@@ -550,23 +598,37 @@ class DeterministicGateRunner:
                 payload=payload,
             )
         except Exception as e:
-            logger.warning("[gate] Failed to record gate_eval event for task %s: %s", task_id, e)
+            logger.warning(
+                "[gate] Failed to record gate_eval event for task %s: %s", task_id, e
+            )
 
 
 class TestTamperingDetectedError(Exception):
     """Raised when the agent deletes or modifies baseline tests without authorization."""
+
     __test__ = False
 
     def __init__(self, modified_or_deleted: list[str]):
-        super().__init__(f"TEST_TAMPERING_DETECTED: Pre-existing tests were modified or deleted: {', '.join(modified_or_deleted)}")
+        super().__init__(
+            f"TEST_TAMPERING_DETECTED: Pre-existing tests were modified or deleted: {', '.join(modified_or_deleted)}"
+        )
         self.modified_or_deleted = modified_or_deleted
 
 
 class TestFreezeGate:
     """Computes and enforces immutable SHA256 checksums on baseline test files."""
+
     __test__ = False
 
-    TEST_PATTERNS = ("test_*.py", "*_test.py", "*_test.go", "*.test.ts", "*.test.js", "*.spec.ts", "*.spec.js")
+    TEST_PATTERNS = (
+        "test_*.py",
+        "*_test.py",
+        "*_test.go",
+        "*.test.ts",
+        "*.test.js",
+        "*.spec.ts",
+        "*.spec.js",
+    )
 
     def __init__(self, workspace_path: Path):
         self.workspace_path = workspace_path.resolve()
@@ -586,22 +648,43 @@ class TestFreezeGate:
 
         for root_dir in scan_roots:
             for root, dirs, files in os.walk(root_dir):
-                dirs[:] = [d for d in dirs if d not in (".git", ".venv", "__pycache__", "node_modules", ".worktrees")]
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if d
+                    not in (
+                        ".git",
+                        ".venv",
+                        "__pycache__",
+                        "node_modules",
+                        ".worktrees",
+                    )
+                ]
                 for f in files:
-                    if any(re.search(pat.replace("*", ".*"), f) for pat in self.TEST_PATTERNS):
+                    if any(
+                        re.search(pat.replace("*", ".*"), f)
+                        for pat in self.TEST_PATTERNS
+                    ):
                         fpath = Path(root) / f
                         try:
                             rel_p = str(fpath.relative_to(self.workspace_path))
-                            hashes[rel_p] = hashlib.sha256(fpath.read_bytes()).hexdigest()
+                            hashes[rel_p] = hashlib.sha256(
+                                fpath.read_bytes()
+                            ).hexdigest()
                         except Exception as e:
-                            logger.debug("[test_freeze] Unable to hash %s: %e", fpath, e)
+                            logger.debug(
+                                "[test_freeze] Unable to hash %s: %e", fpath, e
+                            )
 
-        logger.info("[test_freeze] Baseline test snapshot recorded with %d test files", len(hashes))
+        logger.info(
+            "[test_freeze] Baseline test snapshot recorded with %d test files",
+            len(hashes),
+        )
         return hashes
 
     def verify_no_tampering(self) -> list[str]:
         """Check current workspace against baseline test hashes.
-        
+
         Returns list of violated test paths (modified or deleted).
         """
         violations: list[str] = []

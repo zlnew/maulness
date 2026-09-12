@@ -347,15 +347,14 @@ class PipelineOrchestrator:
                         stage, context
                     )
 
-                    # Pre-flight repo map injection for planner stage
+                    # Pre-flight repo map injection if stage requests it or prompt has placeholder
                     if (
-                        stage.profile == "planner"
-                        and "{repo_map}" not in stage.prompt
-                        and repo_map_content
-                    ):
-                        stage_prompt += (
-                            f"\n\n## Repository Structural Map\n{repo_map_content}"
-                        )
+                        stage.include_repo_map or "{repo_map}" in stage.prompt
+                    ) and repo_map_content:
+                        if "{repo_map}" not in stage.prompt:
+                            stage_prompt += (
+                                f"\n\n## Repository Structural Map\n{repo_map_content}"
+                            )
 
                     profile = self.profile_manager.get_profile(stage.profile)
                     stage_workspace = (
@@ -376,8 +375,8 @@ class PipelineOrchestrator:
                     )
                     parsed_plan = parse_milestone_plan(plan_candidate, task_id)
 
-                    if stage.run_milestones or (
-                        stage.profile == "builder"
+                    if (
+                        stage.run_milestones
                         and parsed_plan
                         and len(parsed_plan.milestones) > 1
                     ):

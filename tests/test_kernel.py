@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 
 from maulness.core.kernel.loop import DurableAgentKernel
-from maulness.core.kernel.models import KernelEventType, ModelTurnOutput, StepResult
+from maulness.core.kernel.models import KernelEventType, ModelTurnOutput
 from maulness.core.kernel.step_runner import DurableStepRunner, canonical_json
 from maulness.core.profiles import Profile
 from maulness.storage.db import StorageManager

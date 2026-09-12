@@ -18,13 +18,15 @@ from maulness.core.models import (
 from maulness.core.kernel import DurableAgentKernel, ModelTurnOutput
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
-from maulness.core.tools import TOOL_DEFINITIONS, tombstone_tool_output
+from maulness.core.tools import tombstone_tool_output
 from maulness.storage.db import StorageManager
 
 logger = logging.getLogger("maulness.providers.gemini")
 
 
-def compact_gemini_in_flight_contents(contents: list[Any], keep_recent: int = 3) -> None:
+def compact_gemini_in_flight_contents(
+    contents: list[Any], keep_recent: int = 3
+) -> None:
     """Compact older Gemini function_response parts in place to protect context window."""
     resp_entries = []
     for c_idx, content in enumerate(contents):
@@ -95,7 +97,9 @@ def messages_to_gemini_contents(messages: list[dict[str, Any]]) -> list[types.Co
                         call_args = json.loads(call_args)
                     except Exception:
                         call_args = {}
-                parts.append(types.Part.from_function_call(name=call_name, args=call_args))
+                parts.append(
+                    types.Part.from_function_call(name=call_name, args=call_args)
+                )
             if parts:
                 contents.append(types.Content(role="model", parts=parts))
         elif role == "tool":
@@ -132,14 +136,25 @@ class GeminiProvider(BaseProvider):
             return self._client
         if self.profile.vertex:
             project = self.profile.project or os.getenv("GOOGLE_CLOUD_PROJECT")
-            location = self.profile.location or os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
-            self._client = genai.Client(vertexai=True, project=project, location=location)
+            location = self.profile.location or os.getenv(
+                "GOOGLE_CLOUD_LOCATION", "us-central1"
+            )
+            self._client = genai.Client(
+                vertexai=True, project=project, location=location
+            )
             return self._client
         else:
-            api_key = self.profile.get_api_key() or config.gemini_api_key or os.getenv("GOOGLE_API_KEY")
+            api_key = (
+                self.profile.get_api_key()
+                or config.gemini_api_key
+                or os.getenv("GOOGLE_API_KEY")
+            )
             if not api_key:
                 import shutil
-                if self.profile.command and shutil.which(self.profile.command.split()[0]):
+
+                if self.profile.command and shutil.which(
+                    self.profile.command.split()[0]
+                ):
                     return None
                 raise ValueError(
                     f"Missing API key for profile '{self.profile.name}'. "
@@ -155,10 +170,18 @@ class GeminiProvider(BaseProvider):
         workspace_path: Optional[Path] = None,
         conversation_id: Optional[str] = None,
         on_init: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None,
-        on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
-        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
-        on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
-        on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
+        on_thought: Optional[
+            Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_message: Optional[
+            Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_tool_call: Optional[
+            Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_approval: Optional[
+            Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]
+        ] = None,
         **kwargs: Any,
     ) -> str:
         conv_id = conversation_id or str(uuid.uuid4())
@@ -169,6 +192,7 @@ class GeminiProvider(BaseProvider):
         client = self._get_client()
         if client is None:
             from maulness.core.providers.acp_provider import AcpProvider
+
             fallback_provider = AcpProvider(self.profile)
             return await fallback_provider.run(
                 session_id=session_id,
@@ -203,8 +227,12 @@ class GeminiProvider(BaseProvider):
         messages: list[dict[str, Any]],
         tools: Optional[list[dict[str, Any]]],
         session_id: str,
-        on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
-        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
+        on_thought: Optional[
+            Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_message: Optional[
+            Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]
+        ] = None,
         **kwargs: Any,
     ) -> ModelTurnOutput:
         client = self._get_client()
@@ -222,7 +250,9 @@ class GeminiProvider(BaseProvider):
         }
         if effort:
             budget = _EFFORT_BUDGET.get(effort.lower(), 8192)
-            gen_config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
+            gen_config_kwargs["thinking_config"] = types.ThinkingConfig(
+                thinking_budget=budget
+            )
             max_tokens = max(max_tokens, budget + 4096)
 
         gen_config_kwargs["max_output_tokens"] = max_tokens
@@ -239,7 +269,9 @@ class GeminiProvider(BaseProvider):
                     )
                 )
             if tool_declarations:
-                gen_config_kwargs["tools"] = [types.Tool(function_declarations=tool_declarations)]
+                gen_config_kwargs["tools"] = [
+                    types.Tool(function_declarations=tool_declarations)
+                ]
 
         gen_config = types.GenerateContentConfig(**gen_config_kwargs)
         current_contents = messages_to_gemini_contents(messages)
@@ -272,7 +304,9 @@ class GeminiProvider(BaseProvider):
         while True:
             try:
                 chunk_timeout = first_chunk_timeout if is_first_chunk else idle_timeout
-                chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=chunk_timeout)
+                chunk = await asyncio.wait_for(
+                    stream_iter.__anext__(), timeout=chunk_timeout
+                )
                 is_first_chunk = False
             except StopAsyncIteration:
                 break
@@ -297,11 +331,13 @@ class GeminiProvider(BaseProvider):
                                 call_sig = f"{call_name}::{json.dumps(call_args, sort_keys=True)}"
                                 if call_sig not in executed_in_turn:
                                     executed_in_turn.add(call_sig)
-                                    tool_calls.append({
-                                        "id": f"call_{call_name}",
-                                        "name": call_name,
-                                        "arguments": call_args,
-                                    })
+                                    tool_calls.append(
+                                        {
+                                            "id": f"call_{call_name}",
+                                            "name": call_name,
+                                            "arguments": call_args,
+                                        }
+                                    )
                                 has_parts = True
 
                             part_text = getattr(part, "text", None)
@@ -313,18 +349,28 @@ class GeminiProvider(BaseProvider):
                                 has_parts = True
                                 thought_chunks.append(part_text)
                                 if on_thought:
-                                    await on_thought(AgentThoughtEvent(delta=part_text, session_id=session_id))
+                                    await on_thought(
+                                        AgentThoughtEvent(
+                                            delta=part_text, session_id=session_id
+                                        )
+                                    )
                             else:
                                 has_parts = True
                                 streamed_turn_chunks.append(part_text)
                                 if on_message:
-                                    await on_message(AgentMessageEvent(delta=part_text, session_id=session_id))
+                                    await on_message(
+                                        AgentMessageEvent(
+                                            delta=part_text, session_id=session_id
+                                        )
+                                    )
 
             if not has_parts and hasattr(chunk, "text") and chunk.text:
                 text_cand = chunk.text
                 streamed_turn_chunks.append(text_cand)
                 if on_message:
-                    await on_message(AgentMessageEvent(delta=text_cand, session_id=session_id))
+                    await on_message(
+                        AgentMessageEvent(delta=text_cand, session_id=session_id)
+                    )
 
         return ModelTurnOutput(
             content="".join(streamed_turn_chunks),

@@ -33,13 +33,23 @@ class AcpProvider(BaseProvider):
         workspace_path: Optional[Path] = None,
         conversation_id: Optional[str] = None,
         on_init: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None,
-        on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
-        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
-        on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
-        on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
+        on_thought: Optional[
+            Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_message: Optional[
+            Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_tool_call: Optional[
+            Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_approval: Optional[
+            Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]
+        ] = None,
     ) -> str:
         if not self.profile.command or not self.profile.command.strip():
-            raise ValueError(f"Profile '{self.profile.name}' specifies provider 'acp' but has no 'command' configured in config.yaml")
+            raise ValueError(
+                f"Profile '{self.profile.name}' specifies provider 'acp' but has no 'command' configured in config.yaml"
+            )
         cmd_tokens = self.profile.command.split()
         cwd = str(workspace_path) if workspace_path else str(config.workspace_root)
 
@@ -127,7 +137,9 @@ class AcpProvider(BaseProvider):
         try:
             while True:
                 try:
-                    line_bytes = await asyncio.wait_for(proc.stdout.readline(), timeout=idle_timeout)
+                    line_bytes = await asyncio.wait_for(
+                        proc.stdout.readline(), timeout=idle_timeout
+                    )
                 except asyncio.TimeoutError:
                     proc.terminate()
                     try:
@@ -166,12 +178,20 @@ class AcpProvider(BaseProvider):
 
                     if step_type == "agent_thought" and text_delta:
                         if on_thought:
-                            await on_thought(AgentThoughtEvent(delta=text_delta, session_id=session_id))
+                            await on_thought(
+                                AgentThoughtEvent(
+                                    delta=text_delta, session_id=session_id
+                                )
+                            )
 
                     elif step_type in ("agent_response", None) and text_delta:
                         accumulated.append(text_delta)
                         if on_message:
-                            await on_message(AgentMessageEvent(delta=text_delta, session_id=session_id))
+                            await on_message(
+                                AgentMessageEvent(
+                                    delta=text_delta, session_id=session_id
+                                )
+                            )
 
                     elif step_type == "tool_call" and on_tool_call:
                         await on_tool_call(
@@ -192,16 +212,28 @@ class AcpProvider(BaseProvider):
                     if resp_text and not accumulated:
                         accumulated.append(resp_text)
                         if on_message:
-                            await on_message(AgentMessageEvent(delta=resp_text, session_id=session_id))
+                            await on_message(
+                                AgentMessageEvent(
+                                    delta=resp_text, session_id=session_id
+                                )
+                            )
 
             await proc.wait()
             if proc.returncode != 0:
                 stderr_text = ""
                 if proc.stderr:
-                    stderr_text = (await proc.stderr.read()).decode("utf-8", errors="replace").strip()
-                logger.warning("agy exited with code %s: %s", proc.returncode, stderr_text)
+                    stderr_text = (
+                        (await proc.stderr.read())
+                        .decode("utf-8", errors="replace")
+                        .strip()
+                    )
+                logger.warning(
+                    "agy exited with code %s: %s", proc.returncode, stderr_text
+                )
                 if not accumulated:
-                    raise RuntimeError(f"agy execution failed (code {proc.returncode}): {stderr_text or 'No output'}")
+                    raise RuntimeError(
+                        f"agy execution failed (code {proc.returncode}): {stderr_text or 'No output'}"
+                    )
 
         except asyncio.CancelledError:
             proc.terminate()
@@ -241,7 +273,11 @@ class AcpProvider(BaseProvider):
                 yolo=self.profile.execution.yolo,
             )
             if action == PolicyAction.DENY:
-                logger.warning("ACP tool '%s' blocked by security rule: %s", event.tool_name, reason)
+                logger.warning(
+                    "ACP tool '%s' blocked by security rule: %s",
+                    event.tool_name,
+                    reason,
+                )
                 return False
             if action == PolicyAction.ALLOW:
                 return True

@@ -219,7 +219,7 @@ def test_profile_inherits_root_env(tmp_path, monkeypatch):
     assert profile.get_api_key() == "shared-google-key-123"
 
 def test_profile_properties_and_coercion():
-    from maulness.core.profiles import AgentConfig, ParameterConfig, ExecutionConfig
+    from maulness.core.profiles import AgentConfig
 
     # Line 48: _coerce_string
     mc = AgentConfig.model_validate("gemini-2.5-pro")
@@ -305,7 +305,6 @@ def test_profile_manager_edge_cases_and_default_env(tmp_path, monkeypatch):
     assert pm._load_directory_profile(err_dir, err_dir / "config.yaml") is None
 
 def test_profile_all_properties_and_vertex_coverage(tmp_path: Path):
-    from maulness.core.profiles import VertexConfig
 
     # 1. Invalid ACP whitespace command (line 108)
     with pytest.raises(ValueError, match="has no 'command'"):

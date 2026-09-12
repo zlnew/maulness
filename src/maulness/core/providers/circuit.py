@@ -8,16 +8,16 @@ logger = logging.getLogger("maulness.providers.circuit")
 
 
 class CircuitState(str, Enum):
-    CLOSED = "CLOSED"        # Healthy: handles requests normally
-    OPEN = "OPEN"            # Tripped: requests fast-bypass to fallback
+    CLOSED = "CLOSED"  # Healthy: handles requests normally
+    OPEN = "OPEN"  # Tripped: requests fast-bypass to fallback
     HALF_OPEN = "HALF_OPEN"  # Probation: testing single probe request after cooldown
 
 
 class ErrorClassification(str, Enum):
-    RATE_LIMIT = "rate_limit"        # 429, RESOURCE_EXHAUSTED
-    TIMEOUT = "timeout"              # TimeoutError, stream idle
-    SERVER_ERROR = "server_error"    # 500, 502, 503, UNAVAILABLE
-    AUTH_ERROR = "auth_error"        # 401, 403, invalid key
+    RATE_LIMIT = "rate_limit"  # 429, RESOURCE_EXHAUSTED
+    TIMEOUT = "timeout"  # TimeoutError, stream idle
+    SERVER_ERROR = "server_error"  # 500, 502, 503, UNAVAILABLE
+    AUTH_ERROR = "auth_error"  # 401, 403, invalid key
     PAYLOAD_ERROR = "payload_error"  # 400, context length, bad prompt (DO NOT TRIP)
     UNKNOWN = "unknown"
 
@@ -26,7 +26,11 @@ def classify_provider_error(error: Exception) -> tuple[ErrorClassification, str]
     """Classify an exception and extract human-friendly error string."""
     err_str = str(error)
 
-    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
+    if (
+        "429" in err_str
+        or "RESOURCE_EXHAUSTED" in err_str
+        or "quota" in err_str.lower()
+    ):
         return ErrorClassification.RATE_LIMIT, "Rate limit / quota exceeded (429)"
 
     if isinstance(error, TimeoutError) or "timeout" in err_str.lower():
@@ -36,7 +40,10 @@ def classify_provider_error(error: Exception) -> tuple[ErrorClassification, str]
         return ErrorClassification.SERVER_ERROR, "Service temporarily unavailable (503)"
 
     if "502" in err_str or "504" in err_str or "BAD_GATEWAY" in err_str:
-        return ErrorClassification.SERVER_ERROR, "Gateway / upstream model error (502/504)"
+        return (
+            ErrorClassification.SERVER_ERROR,
+            "Gateway / upstream model error (502/504)",
+        )
 
     if "500" in err_str or "INTERNAL" in err_str:
         return ErrorClassification.SERVER_ERROR, "Internal server error (500)"
@@ -45,22 +52,33 @@ def classify_provider_error(error: Exception) -> tuple[ErrorClassification, str]
         return ErrorClassification.AUTH_ERROR, "Invalid or unauthorized API key"
 
     if "401" in err_str or "CreditsError" in err_str:
-        return ErrorClassification.AUTH_ERROR, "Authentication failure or insufficient credits (401)"
+        return (
+            ErrorClassification.AUTH_ERROR,
+            "Authentication failure or insufficient credits (401)",
+        )
 
     if "403" in err_str or "PERMISSION_DENIED" in err_str:
-        return ErrorClassification.AUTH_ERROR, "Permission denied / access restricted (403)"
+        return (
+            ErrorClassification.AUTH_ERROR,
+            "Permission denied / access restricted (403)",
+        )
 
     if "400" in err_str or "INVALID_ARGUMENT" in err_str:
-        return ErrorClassification.PAYLOAD_ERROR, "Bad request / payload argument error (400)"
+        return (
+            ErrorClassification.PAYLOAD_ERROR,
+            "Bad request / payload argument error (400)",
+        )
 
     # Clean generic string
     first_line = err_str.strip().split("\n")[0]
-    return ErrorClassification.UNKNOWN, first_line[:100] if len(first_line) > 100 else (first_line or "Unknown error")
+    return ErrorClassification.UNKNOWN, first_line[:100] if len(first_line) > 100 else (
+        first_line or "Unknown error"
+    )
 
 
 @dataclass
 class ProviderHealth:
-    provider_key: str        # e.g. "gemini:gemini-3.8-flash"
+    provider_key: str  # e.g. "gemini:gemini-3.8-flash"
     state: CircuitState = CircuitState.CLOSED
     consecutive_failures: int = 0
     cooldown_until: float = 0.0
@@ -102,7 +120,9 @@ class ProviderHealth:
                 self.provider_key,
             )
 
-    def record_failure(self, error: Exception, now: Optional[float] = None) -> tuple[bool, str, int]:
+    def record_failure(
+        self, error: Exception, now: Optional[float] = None
+    ) -> tuple[bool, str, int]:
         """Record a failure, update circuit breaker, and return (tripped, friendly_msg, cooldown_seconds)."""
         t = now if now is not None else time.time()
         err_type, friendly_msg = classify_provider_error(error)
@@ -189,22 +209,30 @@ class ProviderHealthRegistry:
     def record_success(self, provider_key: str, now: Optional[float] = None) -> None:
         self.get_or_create(provider_key).record_success(now)
 
-    def record_failure(self, provider_key: str, error: Exception, now: Optional[float] = None) -> tuple[bool, str, int]:
+    def record_failure(
+        self, provider_key: str, error: Exception, now: Optional[float] = None
+    ) -> tuple[bool, str, int]:
         return self.get_or_create(provider_key).record_failure(error, now)
 
     def get_status_summary(self) -> list[dict[str, Any]]:
         now = time.time()
         summary = []
         for key, health in sorted(self._registry.items()):
-            remaining = max(0, int(health.cooldown_until - now)) if health.state == CircuitState.OPEN else 0
-            summary.append({
-                "provider_key": key,
-                "state": health.state.value,
-                "consecutive_failures": health.consecutive_failures,
-                "cooldown_remaining_seconds": remaining,
-                "last_error": health.last_error_msg,
-                "last_success_time": health.last_success_time,
-            })
+            remaining = (
+                max(0, int(health.cooldown_until - now))
+                if health.state == CircuitState.OPEN
+                else 0
+            )
+            summary.append(
+                {
+                    "provider_key": key,
+                    "state": health.state.value,
+                    "consecutive_failures": health.consecutive_failures,
+                    "cooldown_remaining_seconds": remaining,
+                    "last_error": health.last_error_msg,
+                    "last_success_time": health.last_success_time,
+                }
+            )
         return summary
 
     def format_status_text(self) -> str:
@@ -218,7 +246,9 @@ class ProviderHealthRegistry:
             if st == CircuitState.CLOSED.value:
                 lines.append(f"• `{s['provider_key']}`: **HEALTHY** (CLOSED)")
             elif st == CircuitState.HALF_OPEN.value:
-                lines.append(f"• `{s['provider_key']}`: **PROBATION** (HALF_OPEN - next request probes recovery)")
+                lines.append(
+                    f"• `{s['provider_key']}`: **PROBATION** (HALF_OPEN - next request probes recovery)"
+                )
             else:
                 lines.append(
                     f"• `{s['provider_key']}`: **COOLDOWN** (OPEN - {s['cooldown_remaining_seconds']}s remaining) — `{s['last_error']}`"

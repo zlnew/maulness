@@ -16,4 +16,6 @@ def get_soul_content(custom_path: Optional[Path] = None) -> str:
     if FALLBACK_SOUL_PATH.exists():
         return FALLBACK_SOUL_PATH.read_text(encoding="utf-8").strip()
 
-    return "You are Maul's personal AI agent assistant. Keep replies concise and direct."
+    return (
+        "You are Maul's personal AI agent assistant. Keep replies concise and direct."
+    )

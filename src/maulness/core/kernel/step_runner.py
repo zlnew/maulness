@@ -2,7 +2,7 @@ import hashlib
 import inspect
 import json
 import logging
-from typing import Any, Callable, Coroutine, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 from maulness.core.kernel.models import AgentEventRecord, KernelEventType, StepResult
 from maulness.storage.db import StorageManager
@@ -39,7 +39,11 @@ class DurableStepRunner:
         action_payload: Any,
     ) -> str:
         """Generate a deterministic SHA-256 idempotency key for a step action."""
-        type_str = action_type.value if isinstance(action_type, KernelEventType) else str(action_type)
+        type_str = (
+            action_type.value
+            if isinstance(action_type, KernelEventType)
+            else str(action_type)
+        )
         payload_repr = canonical_json(action_payload)
         raw_key = f"{task_id}:{stage}:{step_index}:{type_str}:{payload_repr}"
         return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
@@ -71,7 +75,9 @@ class DurableStepRunner:
         )
 
         # 1. Check for existing memoized event
-        existing = await self.storage.get_agent_event_by_idempotency_key(idempotency_key)
+        existing = await self.storage.get_agent_event_by_idempotency_key(
+            idempotency_key
+        )
         if existing:
             logger.info(
                 "[kernel] Memoized step hit: task=%s stage=%s step=%s type=%s (id=%s)",
@@ -128,10 +134,14 @@ class DurableStepRunner:
 
     async def get_resumption_step_index(self, task_id: str, stage: str) -> int:
         """Get the next step index to execute upon crash resumption."""
-        latest = await self.storage.get_latest_agent_step_index(task_id=task_id, stage=stage)
+        latest = await self.storage.get_latest_agent_step_index(
+            task_id=task_id, stage=stage
+        )
         return latest + 1 if latest > 0 else 0
 
-    async def get_stage_events(self, task_id: str, stage: Optional[str] = None) -> list[AgentEventRecord]:
+    async def get_stage_events(
+        self, task_id: str, stage: Optional[str] = None
+    ) -> list[AgentEventRecord]:
         """Retrieve chronological event records for a task and stage."""
         raw_events = await self.storage.get_agent_events(task_id=task_id, stage=stage)
         return [

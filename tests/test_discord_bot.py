@@ -964,7 +964,6 @@ async def test_bot_update_forum_tags(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_bot_app_command_error_handler(tmp_path: Path):
-    import discord
     from discord.app_commands import AppCommandError
 
     storage = StorageManager(db_path=tmp_path / "bot_test.db")
@@ -1188,7 +1187,6 @@ async def test_bot_execute_chat_prompt_advanced_branches(tmp_path: Path):
         AgentThoughtEvent,
         AgentMessageEvent,
         AgentToolCallEvent,
-        ApprovalRequestEvent,
     )
 
     storage = StorageManager(db_path=tmp_path / "bot_test.db")
@@ -1285,7 +1283,6 @@ async def test_bot_execute_chat_prompt_advanced_branches(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_bot_stop_handler_extra_branches(tmp_path: Path):
-    from maulness.core.models import TaskMode, TaskStatus
     import discord
 
     storage = StorageManager(db_path=tmp_path / "bot_test.db")

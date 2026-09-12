@@ -3,7 +3,6 @@ import datetime
 import logging
 import os
 import subprocess
-from pathlib import Path
 from typing import Any, Optional
 
 import discord
@@ -44,7 +43,10 @@ class DaemonScheduler:
 
                 # 1. Morning Standup (08:00 Local Time)
                 target_time = os.getenv("STANDUP_TIME", "08:00")
-                if current_time == target_time and self._last_standup_date != current_date:
+                if (
+                    current_time == target_time
+                    and self._last_standup_date != current_date
+                ):
                     self._last_standup_date = current_date
                     await self.run_morning_standup()
 
@@ -81,17 +83,33 @@ class DaemonScheduler:
                             text=True,
                             timeout=5,
                         )
-                        dirty_lines = [l for l in status_proc.stdout.splitlines() if l.strip()]
-                        dirty_str = f"{len(dirty_lines)} uncommitted" if dirty_lines else "clean"
-                        repo_summaries.append(f"- **`{repo_path.name}`** (`{branch}`): {dirty_str}")
+                        dirty_lines = [
+                            line
+                            for line in status_proc.stdout.splitlines()
+                            if line.strip()
+                        ]
+                        dirty_str = (
+                            f"{len(dirty_lines)} uncommitted"
+                            if dirty_lines
+                            else "clean"
+                        )
+                        repo_summaries.append(
+                            f"- **`{repo_path.name}`** (`{branch}`): {dirty_str}"
+                        )
                     except Exception as e:
-                        repo_summaries.append(f"- **`{repo_path.name}`**: Error inspecting git: {e}")
+                        repo_summaries.append(
+                            f"- **`{repo_path.name}`**: Error inspecting git: {e}"
+                        )
 
         # Check DB backups
         backup_dir = config.workspace_root / "_backups" / "postgres"
         backup_status = "None found"
         if backup_dir.exists():
-            backup_files = sorted(backup_dir.glob("*.sql.gz"), key=lambda p: p.stat().st_mtime, reverse=True)
+            backup_files = sorted(
+                backup_dir.glob("*.sql.gz"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
             if backup_files:
                 latest = backup_files[0]
                 mtime = datetime.datetime.fromtimestamp(latest.stat().st_mtime)
@@ -106,7 +124,9 @@ class DaemonScheduler:
         )
         embed.add_field(
             name="Repositories Status",
-            value="\n".join(repo_summaries) if repo_summaries else "No repositories found.",
+            value="\n".join(repo_summaries)
+            if repo_summaries
+            else "No repositories found.",
             inline=False,
         )
         embed.add_field(
@@ -118,16 +138,27 @@ class DaemonScheduler:
         # Dispatch embed via first active bot that has a home channel
         sent = False
         for bot in self.bots:
-            if getattr(bot, "is_ready", lambda: False)() and getattr(bot, "home_channel_id", None):
+            if getattr(bot, "is_ready", lambda: False)() and getattr(
+                bot, "home_channel_id", None
+            ):
                 ch = bot.get_channel(bot.home_channel_id)
                 if ch:
                     try:
                         await ch.send(embed=embed)
                         sent = True
-                        logger.info("Dispatched morning standup embed to channel %s", bot.home_channel_id)
+                        logger.info(
+                            "Dispatched morning standup embed to channel %s",
+                            bot.home_channel_id,
+                        )
                         break
                     except Exception as e:
-                        logger.warning("Failed to send standup embed to channel %s: %s", bot.home_channel_id, e)
+                        logger.warning(
+                            "Failed to send standup embed to channel %s: %s",
+                            bot.home_channel_id,
+                            e,
+                        )
 
         if not sent:
-            logger.info("Morning standup completed locally (no active Discord home channel found to post embed)")
+            logger.info(
+                "Morning standup completed locally (no active Discord home channel found to post embed)"
+            )

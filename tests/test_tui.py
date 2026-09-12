@@ -239,7 +239,7 @@ async def test_tui_new_slash_commands():
         cmd_keys = [c[0] for c in app.get_dynamic_commands()]
         assert "/new" in cmd_keys
         assert "/stop" in cmd_keys
-        assert "/diff" not in cmd_keys
+        assert "/diff" in cmd_keys
         assert "/cancel" not in cmd_keys
         assert "/clear" not in cmd_keys
 
@@ -343,10 +343,7 @@ async def test_tui_modals_direct_interaction(tmp_path: Path):
     from maulness.cli.tui import (
         ApprovalModal,
         GateModal,
-        HelpModal,
         ProfileModal,
-        CommandPaletteModal,
-        DiffModal,
     )
     from maulness.core.profiles import Profile
 
@@ -459,8 +456,7 @@ async def test_tui_cards_state_and_rendering():
 
 @pytest.mark.asyncio
 async def test_tui_additional_commands_and_shell_execution(tmp_path: Path):
-    from maulness.cli.tui import MaulnessTUIApp, SystemCard, UserCard
-    from maulness.core.providers.circuit import ProviderHealthRegistry
+    from maulness.cli.tui import MaulnessTUIApp, SystemCard
     from textual.widgets import Input
 
     app = MaulnessTUIApp(initial_profile="default")
@@ -554,10 +550,7 @@ async def test_tui_modals_mounted_lifecycle(tmp_path: Path):
     from unittest.mock import MagicMock
     from maulness.cli.tui import (
         MaulnessTUIApp,
-        HelpModal,
-        DiffModal,
         ProfileModal,
-        CommandPaletteModal,
         ApprovalModal,
         GateModal,
     )
@@ -907,9 +900,7 @@ async def test_tui_complete_coverage_edges(tmp_path):
     from textual import events
     from maulness.cli.tui import (
         MaulnessTUIApp,
-        CommandPaletteModal,
         ApprovalModal,
-        SystemCard,
     )
     from maulness.core.models import ApprovalRequestEvent, TaskStatus
 

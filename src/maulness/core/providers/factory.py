@@ -45,7 +45,11 @@ def get_provider_for_profile(profile: Profile) -> BaseProvider:
 
     fallback_providers: list[BaseProvider] = []
     for fb in profile.fallbacks:
-        fb_dict = fb.model_dump(exclude_none=True) if hasattr(fb, "model_dump") else (fb if isinstance(fb, dict) else {"provider": str(fb)})
+        fb_dict = (
+            fb.model_dump(exclude_none=True)
+            if hasattr(fb, "model_dump")
+            else (fb if isinstance(fb, dict) else {"provider": str(fb)})
+        )
         fb_profile = profile.model_copy(deep=True)
         fb_profile.resilience.fallbacks = []
 

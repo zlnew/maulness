@@ -93,12 +93,16 @@ class MessageStreamDebouncer:
                 chunk_to_flush, prefix = balance_code_blocks(self._current_text)
                 self._current_text = prefix
                 try:
-                    await self.flush_callback(chunk_to_flush, is_final=False, is_overflow=True)
+                    await self.flush_callback(
+                        chunk_to_flush, is_final=False, is_overflow=True
+                    )
                 except TypeError:
                     await self.flush_callback(chunk_to_flush, is_final=False)
             else:
                 try:
-                    await self.flush_callback(self._current_text, is_final=is_final, is_overflow=False)
+                    await self.flush_callback(
+                        self._current_text, is_final=is_final, is_overflow=False
+                    )
                 except TypeError:
                     await self.flush_callback(self._current_text, is_final=is_final)
 

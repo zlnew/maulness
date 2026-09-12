@@ -16,13 +16,9 @@ from maulness.core.models import (
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
 from maulness.core.kernel import DurableAgentKernel, ModelTurnOutput
-from maulness.core.kernel.loop import compact_in_flight_tool_messages
 from maulness.storage.db import StorageManager
 
 logger = logging.getLogger("maulness.providers.api")
-
-
-
 
 
 class UnifiedApiProvider(BaseProvider):
@@ -52,11 +48,13 @@ class UnifiedApiProvider(BaseProvider):
     def base_url(self) -> Optional[str]:
         if self.profile.base_url:
             return self.profile.base_url
-        endpoint = self.BASE_URLS.get(self.profile.provider.lower().strip().replace("-", "_"))
+        endpoint = self.BASE_URLS.get(
+            self.profile.provider.lower().strip().replace("-", "_")
+        )
         if endpoint:
             for suffix in ("/chat/completions", "/messages"):
                 if endpoint.endswith(suffix):
-                    return endpoint[:-len(suffix)]
+                    return endpoint[: -len(suffix)]
         return endpoint
 
     @property
@@ -70,10 +68,18 @@ class UnifiedApiProvider(BaseProvider):
         workspace_path: Optional[Path] = None,
         conversation_id: Optional[str] = None,
         on_init: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None,
-        on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
-        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
-        on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
-        on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
+        on_thought: Optional[
+            Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_message: Optional[
+            Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_tool_call: Optional[
+            Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_approval: Optional[
+            Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]
+        ] = None,
         **kwargs: Any,
     ) -> str:
         api_key = self.profile.get_api_key()
@@ -81,7 +87,10 @@ class UnifiedApiProvider(BaseProvider):
 
         # Ollama usually does not require an API key
         if not api_key and provider_type != "ollama":
-            key_name = self.profile.api_key_env or f"{self.profile.provider.upper().replace('-', '_')}_API_KEY"
+            key_name = (
+                self.profile.api_key_env
+                or f"{self.profile.provider.upper().replace('-', '_')}_API_KEY"
+            )
             raise ValueError(
                 f"Missing API key for profile '{self.profile.name}'. "
                 f"Set {key_name} in ~/.config/maulness/env or profile .env"
@@ -93,7 +102,11 @@ class UnifiedApiProvider(BaseProvider):
             await on_init(conv_id)
 
         kernel = DurableAgentKernel(self.profile, self.storage)
-        generator_fn = self._generate_anthropic_turn if provider_type == "anthropic" else self._generate_openai_turn
+        generator_fn = (
+            self._generate_anthropic_turn
+            if provider_type == "anthropic"
+            else self._generate_openai_turn
+        )
 
         return await kernel.run(
             turn_generator_fn=generator_fn,
@@ -114,12 +127,18 @@ class UnifiedApiProvider(BaseProvider):
         messages: list[dict[str, Any]],
         tools: Optional[list[dict[str, Any]]],
         session_id: str,
-        on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
-        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
+        on_thought: Optional[
+            Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_message: Optional[
+            Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]
+        ] = None,
         **kwargs: Any,
     ) -> ModelTurnOutput:
         provider_type = self.profile.provider.lower().strip().replace("-", "_")
-        url = self.profile.base_url or self.BASE_URLS.get(provider_type, self.BASE_URLS["openai"])
+        url = self.profile.base_url or self.BASE_URLS.get(
+            provider_type, self.BASE_URLS["openai"]
+        )
         if not url.endswith("/chat/completions"):
             url = f"{url.rstrip('/')}/chat/completions"
         headers = {
@@ -165,7 +184,9 @@ class UnifiedApiProvider(BaseProvider):
             try:
                 stream_ctx = client.stream("POST", url, headers=headers, json=payload)
             except Exception as e:
-                raise RuntimeError(f"Failed to initiate stream with {provider_type} ({url}): {e}")
+                raise RuntimeError(
+                    f"Failed to initiate stream with {provider_type} ({url}): {e}"
+                )
 
             async with stream_ctx as response:
                 if response.is_error:
@@ -178,8 +199,14 @@ class UnifiedApiProvider(BaseProvider):
                 lines_iter = response.aiter_lines().__aiter__()
                 while True:
                     try:
-                        chunk_timeout = 60.0 if (is_first_chunk and provider_type == "ollama") else (30.0 if is_first_chunk else idle_timeout)
-                        line = await asyncio.wait_for(lines_iter.__anext__(), timeout=chunk_timeout)
+                        chunk_timeout = (
+                            60.0
+                            if (is_first_chunk and provider_type == "ollama")
+                            else (30.0 if is_first_chunk else idle_timeout)
+                        )
+                        line = await asyncio.wait_for(
+                            lines_iter.__anext__(), timeout=chunk_timeout
+                        )
                         is_first_chunk = False
                     except StopAsyncIteration:
                         break
@@ -204,12 +231,16 @@ class UnifiedApiProvider(BaseProvider):
                     finish_reason = choice.get("finish_reason") or finish_reason
 
                     # 1. Capture reasoning / thoughts (Ollama, DeepSeek, OpenCode)
-                    reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content")
+                    reasoning_delta = delta.get("reasoning") or delta.get(
+                        "reasoning_content"
+                    )
                     if reasoning_delta:
                         thought_chunks.append(reasoning_delta)
                         if on_thought:
                             await on_thought(
-                                AgentThoughtEvent(delta=reasoning_delta, session_id=session_id)
+                                AgentThoughtEvent(
+                                    delta=reasoning_delta, session_id=session_id
+                                )
                             )
 
                     # 2. Capture tool calls (OpenAI format)
@@ -218,7 +249,9 @@ class UnifiedApiProvider(BaseProvider):
                         for tc in tool_calls_delta:
                             idx = tc.get("index", 0)
                             while len(captured_tool_calls) <= idx:
-                                captured_tool_calls.append({"id": "", "name": "", "arguments": ""})
+                                captured_tool_calls.append(
+                                    {"id": "", "name": "", "arguments": ""}
+                                )
                             if tc.get("id"):
                                 captured_tool_calls[idx]["id"] += tc["id"]
                             fn = tc.get("function", {})
@@ -233,7 +266,9 @@ class UnifiedApiProvider(BaseProvider):
                         streamed_text_chunks.append(text_delta)
                         if on_message:
                             await on_message(
-                                AgentMessageEvent(delta=text_delta, session_id=session_id)
+                                AgentMessageEvent(
+                                    delta=text_delta, session_id=session_id
+                                )
                             )
 
         formatted_tool_calls = []
@@ -248,11 +283,13 @@ class UnifiedApiProvider(BaseProvider):
             except Exception:
                 call_args = {"raw": call_args_str}
 
-            formatted_tool_calls.append({
-                "id": call_id,
-                "name": call_name,
-                "arguments": call_args,
-            })
+            formatted_tool_calls.append(
+                {
+                    "id": call_id,
+                    "name": call_name,
+                    "arguments": call_args,
+                }
+            )
 
         return ModelTurnOutput(
             content="".join(streamed_text_chunks),
@@ -266,8 +303,12 @@ class UnifiedApiProvider(BaseProvider):
         messages: list[dict[str, Any]],
         tools: Optional[list[dict[str, Any]]],
         session_id: str,
-        on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
-        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
+        on_thought: Optional[
+            Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_message: Optional[
+            Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]
+        ] = None,
         **kwargs: Any,
     ) -> ModelTurnOutput:
         api_key = self.profile.get_api_key() or ""
@@ -284,10 +325,12 @@ class UnifiedApiProvider(BaseProvider):
         for turn in messages:
             if turn.get("role") == "system":
                 continue
-            anthropic_messages.append({
-                "role": "assistant" if turn["role"] == "assistant" else "user",
-                "content": turn.get("content", ""),
-            })
+            anthropic_messages.append(
+                {
+                    "role": "assistant" if turn["role"] == "assistant" else "user",
+                    "content": turn.get("content", ""),
+                }
+            )
 
         payload: dict[str, Any] = {
             "model": self.profile.model or "claude-3-7-sonnet-20250219",
@@ -300,7 +343,10 @@ class UnifiedApiProvider(BaseProvider):
         _EFFORT_BUDGET = {"low": 1024, "medium": 8192, "high": 24576}
         effort = self.profile.reasoning_effort
         if effort:
-            payload["thinking"] = {"type": "enabled", "budget_tokens": _EFFORT_BUDGET.get(effort.lower(), 8192)}
+            payload["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": _EFFORT_BUDGET.get(effort.lower(), 8192),
+            }
             payload["temperature"] = 1
 
         idle_timeout = float(config.stream_idle_timeout_seconds)
@@ -313,7 +359,9 @@ class UnifiedApiProvider(BaseProvider):
             try:
                 stream_ctx = client.stream("POST", url, headers=headers, json=payload)
             except Exception as e:
-                raise RuntimeError(f"Failed to initiate stream with Anthropic ({url}): {e}")
+                raise RuntimeError(
+                    f"Failed to initiate stream with Anthropic ({url}): {e}"
+                )
 
             async with stream_ctx as response:
                 if response.is_error:
@@ -327,7 +375,9 @@ class UnifiedApiProvider(BaseProvider):
                 while True:
                     try:
                         chunk_timeout = 30.0 if is_first_chunk else idle_timeout
-                        line = await asyncio.wait_for(lines_iter.__anext__(), timeout=chunk_timeout)
+                        line = await asyncio.wait_for(
+                            lines_iter.__anext__(), timeout=chunk_timeout
+                        )
                         is_first_chunk = False
                     except StopAsyncIteration:
                         break
@@ -356,15 +406,21 @@ class UnifiedApiProvider(BaseProvider):
                                 thought_chunks.append(th_text)
                                 if on_thought:
                                     await on_thought(
-                                        AgentThoughtEvent(delta=th_text, session_id=session_id)
+                                        AgentThoughtEvent(
+                                            delta=th_text, session_id=session_id
+                                        )
                                     )
-                        elif delta_obj.get("type") == "text_delta" or "text" in delta_obj:
+                        elif (
+                            delta_obj.get("type") == "text_delta" or "text" in delta_obj
+                        ):
                             delta = delta_obj.get("text", "")
                             if delta:
                                 streamed_text_chunks.append(delta)
                                 if on_message:
                                     await on_message(
-                                        AgentMessageEvent(delta=delta, session_id=session_id)
+                                        AgentMessageEvent(
+                                            delta=delta, session_id=session_id
+                                        )
                                     )
 
         return ModelTurnOutput(

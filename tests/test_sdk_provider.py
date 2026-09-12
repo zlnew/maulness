@@ -1,5 +1,4 @@
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 import pytest
 
 from maulness.core.models import AgentMessageEvent, AgentThoughtEvent

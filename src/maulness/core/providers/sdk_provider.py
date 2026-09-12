@@ -30,10 +30,18 @@ class AntigravitySdkProvider(BaseProvider):
         workspace_path: Optional[Path] = None,
         conversation_id: Optional[str] = None,
         on_init: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None,
-        on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
-        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
-        on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
-        on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
+        on_thought: Optional[
+            Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_message: Optional[
+            Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_tool_call: Optional[
+            Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_approval: Optional[
+            Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]
+        ] = None,
     ) -> str:
         """Run an agent session using the in-process google.antigravity Agent."""
         try:
@@ -47,8 +55,11 @@ class AntigravitySdkProvider(BaseProvider):
         api_key = self.profile.get_api_key() or config.gemini_api_key
 
         from maulness.core.skills import SkillManager
+
         skill_mgr = SkillManager()
-        skills_paths = skill_mgr.get_skills_paths(profile_skills_dir=self.profile.skills_dir)
+        skills_paths = skill_mgr.get_skills_paths(
+            profile_skills_dir=self.profile.skills_dir
+        )
 
         sdk_config = LocalAgentConfig(
             system_instructions=self.profile.effective_system_prompt(),
@@ -80,7 +91,9 @@ class AntigravitySdkProvider(BaseProvider):
                     async for thought in response.thoughts:
                         if on_thought:
                             await on_thought(
-                                AgentThoughtEvent(delta=str(thought), session_id=session_id)
+                                AgentThoughtEvent(
+                                    delta=str(thought), session_id=session_id
+                                )
                             )
                 except Exception as e:
                     logger.debug("Thought streaming ended or error: %s", e)
@@ -107,7 +120,9 @@ class AntigravitySdkProvider(BaseProvider):
                 async for chunk in response.chunks:
                     accumulated.append(chunk)
                     if on_message:
-                        await on_message(AgentMessageEvent(delta=chunk, session_id=session_id))
+                        await on_message(
+                            AgentMessageEvent(delta=chunk, session_id=session_id)
+                        )
             finally:
                 await asyncio.gather(thought_task, tool_task, return_exceptions=True)
 

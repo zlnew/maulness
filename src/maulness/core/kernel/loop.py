@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import uuid
@@ -6,8 +5,8 @@ from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 
 from maulness.config import config
-from maulness.core.kernel.models import KernelEventType, ModelTurnOutput, StepResult
-from maulness.core.kernel.step_runner import DurableStepRunner, canonical_json
+from maulness.core.kernel.models import KernelEventType, ModelTurnOutput
+from maulness.core.kernel.step_runner import DurableStepRunner
 from maulness.core.models import (
     AgentMessageEvent,
     AgentThoughtEvent,
@@ -15,7 +14,6 @@ from maulness.core.models import (
     ApprovalRequestEvent,
 )
 from maulness.core.profiles import Profile
-from maulness.core.rules import RuleEngine
 from maulness.core.tools import (
     TOOL_DEFINITIONS,
     ActionLoopDetector,
@@ -45,7 +43,9 @@ def parse_session_scope(session_id: str) -> tuple[str, str]:
     return session_id, "default"
 
 
-def compact_in_flight_tool_messages(messages: list[dict[str, Any]], keep_recent: int = 3) -> None:
+def compact_in_flight_tool_messages(
+    messages: list[dict[str, Any]], keep_recent: int = 3
+) -> None:
     """Compact older tool observation messages in-place while preserving API schema envelopes."""
     tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
     if len(tool_indices) <= keep_recent:
@@ -93,10 +93,18 @@ class DurableAgentKernel:
         workspace_path: Optional[Path] = None,
         conversation_id: Optional[str] = None,
         on_init: Optional[Callable[[str], Coroutine[Any, Any, None]]] = None,
-        on_thought: Optional[Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]] = None,
-        on_message: Optional[Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]] = None,
-        on_tool_call: Optional[Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]] = None,
-        on_approval: Optional[Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]] = None,
+        on_thought: Optional[
+            Callable[[AgentThoughtEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_message: Optional[
+            Callable[[AgentMessageEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_tool_call: Optional[
+            Callable[[AgentToolCallEvent], Coroutine[Any, Any, None]]
+        ] = None,
+        on_approval: Optional[
+            Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]
+        ] = None,
         **kwargs: Any,
     ) -> str:
         """Drive multi-turn execution loop with durable step memoization."""
@@ -105,11 +113,20 @@ class DurableAgentKernel:
             await on_init(conv_id)
 
         task_id, stage = parse_session_scope(session_id)
-        effective_workspace = workspace_path or (Path(self.profile.workspace) if self.profile.workspace and self.profile.workspace != "inherit" else config.workspace_root)
+        effective_workspace = workspace_path or (
+            Path(self.profile.workspace)
+            if self.profile.workspace and self.profile.workspace != "inherit"
+            else config.workspace_root
+        )
         sandbox_mode = kwargs.get("sandbox_mode", self.profile.sandbox_mode)
         yolo = kwargs.get("yolo", self.profile.yolo)
-        max_relays = kwargs.get("max_relays", getattr(self.profile, "max_relays", config.max_relays))
-        max_tool_turns = kwargs.get("max_tool_turns", getattr(self.profile, "max_tool_turns", config.max_tool_turns))
+        max_relays = kwargs.get(
+            "max_relays", getattr(self.profile, "max_relays", config.max_relays)
+        )
+        max_tool_turns = kwargs.get(
+            "max_tool_turns",
+            getattr(self.profile, "max_tool_turns", config.max_tool_turns),
+        )
 
         # 1. Load multi-turn history from storage
         history = await self.storage.get_conversation_messages(conv_id, limit=20)
@@ -117,10 +134,12 @@ class DurableAgentKernel:
             {"role": "system", "content": self.profile.effective_system_prompt()}
         ]
         for turn in history:
-            base_messages.append({
-                "role": turn["role"],
-                "content": clean_history_message(turn["content"]),
-            })
+            base_messages.append(
+                {
+                    "role": turn["role"],
+                    "content": clean_history_message(turn["content"]),
+                }
+            )
         base_messages.append({"role": "user", "content": prompt})
 
         # Memoize initial prompt event if not present
@@ -156,10 +175,12 @@ class DurableAgentKernel:
 
                 # If loop intervention was tripped, append system instruction
                 if loop_intervention_active:
-                    current_messages.append({
-                        "role": "system",
-                        "content": loop_intervention_active,
-                    })
+                    current_messages.append(
+                        {
+                            "role": "system",
+                            "content": loop_intervention_active,
+                        }
+                    )
                     loop_intervention_active = None
 
                 # Step 1: Model Generation Step (Memoized)
@@ -203,9 +224,17 @@ class DurableAgentKernel:
                 # If retrieved from cache, replay visible streaming events for UI
                 if turn_res.from_cache:
                     if turn_output.thought and on_thought:
-                        await on_thought(AgentThoughtEvent(delta=turn_output.thought, session_id=session_id))
+                        await on_thought(
+                            AgentThoughtEvent(
+                                delta=turn_output.thought, session_id=session_id
+                            )
+                        )
                     if turn_output.content and on_message:
-                        await on_message(AgentMessageEvent(delta=turn_output.content, session_id=session_id))
+                        await on_message(
+                            AgentMessageEvent(
+                                delta=turn_output.content, session_id=session_id
+                            )
+                        )
 
                 # Step 2: Handle completion or simulated tools
                 tool_calls = turn_output.tool_calls
@@ -215,11 +244,13 @@ class DurableAgentKernel:
                         call_name, call_args = simulated
                         if accumulated and accumulated[-1] == turn_output.content:
                             accumulated.pop()
-                        tool_calls = [{
-                            "id": f"call_intercepted_{turn_count}_{call_name}",
-                            "name": call_name,
-                            "arguments": call_args,
-                        }]
+                        tool_calls = [
+                            {
+                                "id": f"call_intercepted_{turn_count}_{call_name}",
+                                "name": call_name,
+                                "arguments": call_args,
+                            }
+                        ]
 
                 # If no tool calls produced, turn cycle completed
                 if not tool_calls or forcing_synthesis:
@@ -235,7 +266,9 @@ class DurableAgentKernel:
                             "type": "function",
                             "function": {
                                 "name": tc["name"],
-                                "arguments": tc["arguments"] if isinstance(tc["arguments"], str) else json.dumps(tc["arguments"]),
+                                "arguments": tc["arguments"]
+                                if isinstance(tc["arguments"], str)
+                                else json.dumps(tc["arguments"]),
                             },
                         }
                         for tc in tool_calls
@@ -257,12 +290,14 @@ class DurableAgentKernel:
                         call_args_dict = call_args
 
                     if on_tool_call:
-                        await on_tool_call(AgentToolCallEvent(
-                            call_id=call_id,
-                            tool_name=call_name,
-                            args=call_args_dict,
-                            session_id=session_id,
-                        ))
+                        await on_tool_call(
+                            AgentToolCallEvent(
+                                call_id=call_id,
+                                tool_name=call_name,
+                                args=call_args_dict,
+                                session_id=session_id,
+                            )
+                        )
 
                     # Tool execution wrapper
                     async def _run_tool() -> str:
@@ -284,24 +319,34 @@ class DurableAgentKernel:
                         step_index=step_counter,
                         action_type=KernelEventType.TOOL_RESULT,
                         action_fn=_run_tool,
-                        action_meta={"call_id": call_id, "name": call_name, "args": call_args_dict},
+                        action_meta={
+                            "call_id": call_id,
+                            "name": call_name,
+                            "args": call_args_dict,
+                        },
                     )
 
                     result_str = str(tool_step_res.value)
-                    breadcrumb = format_lean_tool_breadcrumb(call_name, call_args_dict, result_str)
+                    breadcrumb = format_lean_tool_breadcrumb(
+                        call_name, call_args_dict, result_str
+                    )
                     accumulated.append(breadcrumb)
                     if on_message:
-                        await on_message(AgentMessageEvent(delta=breadcrumb, session_id=session_id))
+                        await on_message(
+                            AgentMessageEvent(delta=breadcrumb, session_id=session_id)
+                        )
 
                     # Check for action loop intervention
                     if "[LOOP INTERVENTION:" in result_str:
                         loop_intervention_active = result_str
 
-                    current_messages.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": result_str,
-                    })
+                    current_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": result_str,
+                        }
+                    )
 
                 # In-flight microcompaction of historical observations
                 compact_in_flight_tool_messages(current_messages, keep_recent=3)
@@ -336,15 +381,19 @@ class DurableAgentKernel:
                             "Formulate and output your final, comprehensive answer to the user now based on all information and tool results above. "
                             "Do not attempt to call any more tools.]"
                         )
-                    current_messages.append({
-                        "role": "user",
-                        "content": eval_prompt,
-                    })
+                    current_messages.append(
+                        {
+                            "role": "user",
+                            "content": eval_prompt,
+                        }
+                    )
                     continue
 
             # Check for Natural Progress Checkpoints / Relays
             if forcing_synthesis and relay_count < max_relays:
-                is_in_progress, checkpoint_body, next_step = extract_checkpoint_info(last_streamed_turn_text)
+                is_in_progress, checkpoint_body, next_step = extract_checkpoint_info(
+                    last_streamed_turn_text
+                )
                 if is_in_progress and next_step:
                     logger.info(
                         "[kernel] Relay %d/%d produced IN_PROGRESS checkpoint: %s. Auto-advancing to next relay.",
@@ -358,12 +407,18 @@ class DurableAgentKernel:
                     )
                     accumulated.append(checkpoint_notice)
                     if on_message:
-                        await on_message(AgentMessageEvent(delta=checkpoint_notice, session_id=session_id))
+                        await on_message(
+                            AgentMessageEvent(
+                                delta=checkpoint_notice, session_id=session_id
+                            )
+                        )
                     if on_thought:
-                        await on_thought(AgentThoughtEvent(
-                            delta=f"Relay Checkpoint {relay_count}/{max_relays}: {next_step}",
-                            session_id=session_id,
-                        ))
+                        await on_thought(
+                            AgentThoughtEvent(
+                                delta=f"Relay Checkpoint {relay_count}/{max_relays}: {next_step}",
+                                session_id=session_id,
+                            )
+                        )
 
                     relay_checkpoints.append(
                         f"### Relay {relay_count} Checkpoint\n{checkpoint_body}"
@@ -372,20 +427,24 @@ class DurableAgentKernel:
 
                     # Compact context: prune bulky prior tool payloads, preserve doctrine, history, and checkpoint ledger
                     current_messages = list(base_messages)
-                    current_messages.append({
-                        "role": "assistant",
-                        "content": f"[AUTONOMOUS RELAY CHECKPOINTS]\n{checkpoints_summary}",
-                    })
-                    current_messages.append({
-                        "role": "user",
-                        "content": (
-                            f"[SYSTEM NOTE: Autonomous relay {relay_count + 1} of {max_relays} initiated.\n"
-                            f"Original user task: {prompt}\n"
-                            f"Target for this burst: {next_step}\n"
-                            "Prior bulky tool outputs have been compacted to retain focus. "
-                            "Tools are re-enabled. Continue executing the task now.]"
-                        ),
-                    })
+                    current_messages.append(
+                        {
+                            "role": "assistant",
+                            "content": f"[AUTONOMOUS RELAY CHECKPOINTS]\n{checkpoints_summary}",
+                        }
+                    )
+                    current_messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"[SYSTEM NOTE: Autonomous relay {relay_count + 1} of {max_relays} initiated.\n"
+                                f"Original user task: {prompt}\n"
+                                f"Target for this burst: {next_step}\n"
+                                "Prior bulky tool outputs have been compacted to retain focus. "
+                                "Tools are re-enabled. Continue executing the task now.]"
+                            ),
+                        }
+                    )
                     continue
 
             # Task finished or maximum relay ceiling reached
@@ -397,7 +456,9 @@ class DurableAgentKernel:
                 pause_note = f"\n\n*(Maximum relay budget of {max_relays} relays reached. Task paused at checkpoint.)*"
                 accumulated.append(pause_note)
                 if on_message:
-                    await on_message(AgentMessageEvent(delta=pause_note, session_id=session_id))
+                    await on_message(
+                        AgentMessageEvent(delta=pause_note, session_id=session_id)
+                    )
 
         final_text = "".join(accumulated).strip()
         final_text = clean_relay_completion_tags(final_text)
@@ -406,7 +467,9 @@ class DurableAgentKernel:
             fallback_note = "\n\n*(Agent completed tool executions but did not produce a final textual summary.)*"
             final_text += fallback_note
             if on_message:
-                await on_message(AgentMessageEvent(delta=fallback_note, session_id=session_id))
+                await on_message(
+                    AgentMessageEvent(delta=fallback_note, session_id=session_id)
+                )
 
         if not final_text:
             raise RuntimeError(
@@ -426,7 +489,9 @@ class DurableAgentKernel:
         # Persist conversation turns to storage
         try:
             await self.storage.add_conversation_message(conv_id, "user", prompt)
-            await self.storage.add_conversation_message(conv_id, "assistant", final_text)
+            await self.storage.add_conversation_message(
+                conv_id, "assistant", final_text
+            )
         except Exception as e:
             logger.debug("Failed to persist conversation turn: %s", e)
 

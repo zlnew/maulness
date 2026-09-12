@@ -1,4 +1,3 @@
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -545,7 +544,6 @@ def test_cli_soul_memory_user_missing_files(tmp_path: Path):
 
 
 def test_cli_dunder_main():
-    import runpy
 
     with (
         patch("maulness.cli.main.app") as mock_app,

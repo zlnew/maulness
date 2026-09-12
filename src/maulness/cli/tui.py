@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import os
 import subprocess
 import time
 import uuid
@@ -13,7 +12,7 @@ from rich.syntax import Syntax
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
@@ -1484,7 +1483,9 @@ class MaulnessTUIApp(App):
                 capture_output=True,
                 text=True,
             )
-            dirty_count = len([l for l in diff_proc.stdout.splitlines() if l.strip()])
+            dirty_count = len(
+                [line for line in diff_proc.stdout.splitlines() if line.strip()]
+            )
             dirty_str = (
                 f"[red]{dirty_count} uncommitted changes[/red]"
                 if dirty_count > 0

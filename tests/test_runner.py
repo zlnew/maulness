@@ -1,4 +1,3 @@
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -7,10 +6,8 @@ import pytest
 from maulness.core.models import (
     AgentMessageEvent,
     AgentThoughtEvent,
-    AgentToolCallEvent,
     ApprovalRequestEvent,
     TaskMode,
-    TaskRecord,
     TaskStatus,
 )
 from maulness.core.runner import TaskRunner

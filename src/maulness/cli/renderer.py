@@ -1,4 +1,3 @@
-import asyncio
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
@@ -56,17 +55,24 @@ class TerminalLiveRenderer:
         if self.thoughts:
             thought_text = "".join(self.thoughts)
             if self._is_thinking:
-                spinner = Spinner("dots", text=f" [dim italic]Thinking: {thought_text[-120:].strip()}[/dim italic]")
+                spinner = Spinner(
+                    "dots",
+                    text=f" [dim italic]Thinking: {thought_text[-120:].strip()}[/dim italic]",
+                )
                 content.append(spinner)
             else:
-                content.append(f"[dim italic grey70][thought] {thought_text[-150:].strip()}[/dim italic grey70]")
+                content.append(
+                    f"[dim italic grey70][thought] {thought_text[-150:].strip()}[/dim italic grey70]"
+                )
 
         # Render message tokens as Markdown
         msg_text = "".join(self.tokens)
         if msg_text.strip():
             content.append(Markdown(msg_text))
         elif not self.thoughts:
-            content.append(Spinner("dots", text=" [dim]Waiting for agent response...[/dim]"))
+            content.append(
+                Spinner("dots", text=" [dim]Waiting for agent response...[/dim]")
+            )
 
         return Panel(
             content[0] if len(content) == 1 else content[-1],

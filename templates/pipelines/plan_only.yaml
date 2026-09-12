@@ -5,6 +5,7 @@ stages:
     profile: planner
     status: planning
     output_key: plan
+    include_repo_map: true
     prompt: |
       You are the lead architect drafting an implementation plan for '{repo_name}'.
       Goal: {title}

@@ -221,7 +221,7 @@ async def test_fallback_provider_chain_rejects_empty_response():
 @pytest.mark.asyncio
 async def test_unified_api_provider_tool_loop(tmp_path):
     import json
-    from unittest.mock import patch, MagicMock, AsyncMock
+    from unittest.mock import patch, MagicMock
     from maulness.core.providers.api_provider import UnifiedApiProvider
     from maulness.storage.db import StorageManager
 
@@ -1093,8 +1093,6 @@ def test_compact_in_flight_tool_messages():
 
 @pytest.mark.asyncio
 async def test_anthropic_turn_streaming(monkeypatch):
-    import json
-    from unittest.mock import AsyncMock, MagicMock
     import httpx
     from maulness.core.profiles import Profile
     from maulness.core.providers.api_provider import UnifiedApiProvider

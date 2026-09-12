@@ -68,7 +68,6 @@ stages:
 
 @pytest.mark.asyncio
 async def test_orchestrator_execution(tmp_path: Path, monkeypatch):
-    from unittest.mock import AsyncMock
     from maulness.core.models import TaskStatus
     from maulness.core.pipeline import PipelineOrchestrator
     from maulness.storage.db import StorageManager
@@ -323,7 +322,6 @@ async def test_orchestrator_cyclic_max_reworks_cap(tmp_path: Path, monkeypatch):
 async def test_pipeline_rework_with_rollback(tmp_path: Path, monkeypatch):
     from maulness.core.pipeline import PipelineOrchestrator
     from maulness.core.worktree import WorktreeManager
-    from maulness.core.models import TaskStatus
     from maulness.storage.db import StorageManager
 
     repo_path = tmp_path / "rollback_repo"
@@ -1180,3 +1178,55 @@ def test_pipelines_manager_fallbacks_and_errors(tmp_path: Path):
     bad_yaml = tmp_path / "broken.yaml"
     bad_yaml.write_text(": bad yaml")
     assert mgr_empty._load_file(bad_yaml) is None
+
+
+@pytest.mark.asyncio
+async def test_stage_include_repo_map(tmp_path: Path):
+    storage = StorageManager(db_path=tmp_path / "test_repo_map.db")
+    await storage.initialize()
+
+    pipe_def = PipelineDefinition(
+        name="repo_map_pipeline",
+        stages=[
+            PipelineStage(
+                name="custom_architect",
+                profile="custom_profile",
+                prompt="Design for {title}",
+                output_key="design",
+                include_repo_map=True,
+            ),
+        ],
+    )
+
+    captured_prompts = []
+    mock_provider = MagicMock()
+
+    async def mock_run(prompt, **kwargs):
+        captured_prompts.append(prompt)
+        return "Architecture complete"
+
+    mock_provider.run = mock_run
+
+    orchestrator = PipelineOrchestrator(storage=storage)
+
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile",
+        return_value=mock_provider,
+    ), patch(
+        "maulness.core.pipeline.get_repo_map",
+        return_value="repo/structure/mock.py",
+    ):
+
+        task = await orchestrator.run_pipeline(
+            title="Design System",
+            prompt="Build a clean API",
+            workspace_path=tmp_path,
+            pipeline_def=pipe_def,
+            auto_proceed=True,
+        )
+
+        assert task.status == TaskStatus.DONE
+        assert len(captured_prompts) == 1
+        assert "## Repository Structural Map" in captured_prompts[0]
+        assert "repo/structure/mock.py" in captured_prompts[0]
+

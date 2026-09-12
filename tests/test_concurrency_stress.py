@@ -1,5 +1,4 @@
 import asyncio
-import os
 import random
 import time
 from pathlib import Path
@@ -9,7 +8,6 @@ from maulness.core.debouncer import MessageStreamDebouncer
 from maulness.core.models import TaskMode, TaskStatus
 from maulness.core.providers.circuit import (
     CircuitState,
-    ProviderHealth,
     ProviderHealthRegistry,
 )
 from maulness.core.tools import ActionLoopDetector

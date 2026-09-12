@@ -5,6 +5,7 @@ stages:
     profile: planner
     status: planning
     output_key: plan
+    include_repo_map: true
     prompt: |
       You are drafting an implementation plan for repository '{repo_name}'.
       Goal: {title}
@@ -22,6 +23,7 @@ stages:
     status: building
     output_key: build_summary
     use_worktree: true
+    run_milestones: true
     prompt: |
       Goal: {title}
 

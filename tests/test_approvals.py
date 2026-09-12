@@ -1,4 +1,3 @@
-import pytest
 from maulness.core.approvals import ApprovalClassifier
 
 

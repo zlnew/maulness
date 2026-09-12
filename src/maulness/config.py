@@ -10,6 +10,7 @@ ENV_FILE = CONFIG_DIR / "env"
 DOTENV_FILE = CONFIG_DIR / ".env"
 LOCAL_ENV_FILE = Path.cwd() / ".env"
 
+
 def load_env_files() -> None:
     # Load ~/.config/maulness/.env or ~/.config/maulness/env, then local .env
     if DOTENV_FILE.exists():
@@ -19,21 +20,28 @@ def load_env_files() -> None:
     elif LOCAL_ENV_FILE.exists():
         load_dotenv(LOCAL_ENV_FILE)
 
+
 load_env_files()
 
 
 class Config:
     def __init__(self):
         self.config_dir: Path = CONFIG_DIR
-        self.db_path: Path = Path(os.getenv("MAULNESS_DB_PATH", str(CONFIG_DIR / "maulness.db")))
+        self.db_path: Path = Path(
+            os.getenv("MAULNESS_DB_PATH", str(CONFIG_DIR / "maulness.db"))
+        )
         self.skills_dir: Path = CONFIG_DIR / "skills"
-        self.workspace_root: Path = Path(os.getenv("WORKSPACE_ROOT", "/home/zlnew/www/personal"))
+        self.workspace_root: Path = Path(
+            os.getenv("WORKSPACE_ROOT", "/home/zlnew/www/personal")
+        )
         self.repo_dir: Path = self.workspace_root / "repo"
 
         # Discord (Optional at startup)
         self.discord_bot_token: Optional[str] = os.getenv("DISCORD_BOT_TOKEN")
         self.discord_guild_id: Optional[int] = (
-            int(os.getenv("DISCORD_GUILD_ID")) if os.getenv("DISCORD_GUILD_ID") else None
+            int(os.getenv("DISCORD_GUILD_ID"))
+            if os.getenv("DISCORD_GUILD_ID")
+            else None
         )
         self.discord_forum_channel_id: Optional[int] = (
             int(os.getenv("DISCORD_FORUM_CHANNEL_ID"))
@@ -41,11 +49,15 @@ class Config:
             else None
         )
         self.owner_discord_id: Optional[int] = (
-            int(os.getenv("OWNER_DISCORD_ID")) if os.getenv("OWNER_DISCORD_ID") else None
+            int(os.getenv("OWNER_DISCORD_ID"))
+            if os.getenv("OWNER_DISCORD_ID")
+            else None
         )
 
         # Gemini API Key (Optional)
-        self.gemini_api_key: Optional[str] = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        self.gemini_api_key: Optional[str] = os.getenv("GEMINI_API_KEY") or os.getenv(
+            "GOOGLE_API_KEY"
+        )
 
         # Streaming & Execution Watchdog
         self.stream_idle_timeout_seconds: float = float(
@@ -79,6 +91,7 @@ class Config:
         if cfg_yaml.exists():
             try:
                 import yaml
+
                 data = yaml.safe_load(cfg_yaml.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
                     # Workspace group
@@ -96,7 +109,9 @@ class Config:
                     exec_cfg = data.get("execution", {})
                     if isinstance(exec_cfg, dict):
                         if "stream_idle_timeout_seconds" in exec_cfg:
-                            self.stream_idle_timeout_seconds = float(exec_cfg["stream_idle_timeout_seconds"])
+                            self.stream_idle_timeout_seconds = float(
+                                exec_cfg["stream_idle_timeout_seconds"]
+                            )
                         if "max_tool_turns" in exec_cfg:
                             self.max_tool_turns = int(exec_cfg["max_tool_turns"])
                         if "max_relays" in exec_cfg:
@@ -104,11 +119,15 @@ class Config:
                         if "sandbox" in exec_cfg:
                             val = str(exec_cfg["sandbox"]).lower().strip()
                             if val in ("true", "1", "bwrap", "auto"):
-                                self.sandbox_mode = "bwrap" if val == "bwrap" else "auto"
+                                self.sandbox_mode = (
+                                    "bwrap" if val == "bwrap" else "auto"
+                                )
                             elif val in ("false", "0", "none", "disabled"):
                                 self.sandbox_mode = "none"
                         elif "sandbox_mode" in exec_cfg:
-                            self.sandbox_mode = str(exec_cfg["sandbox_mode"]).lower().strip()
+                            self.sandbox_mode = (
+                                str(exec_cfg["sandbox_mode"]).lower().strip()
+                            )
                         rules_raw = exec_cfg.get("rules", {})
                         default_policy = exec_cfg.get("default_policy")
                         if isinstance(rules_raw, dict):
@@ -116,17 +135,23 @@ class Config:
                             if default_policy and "default_policy" not in rules_payload:
                                 rules_payload["default_policy"] = default_policy
                             try:
-                                self.global_rules = ExecutionRulesConfig.model_validate(rules_payload)
+                                self.global_rules = ExecutionRulesConfig.model_validate(
+                                    rules_payload
+                                )
                             except Exception:
                                 pass
 
                     # Gateway group
                     gw = data.get("gateway", {})
                     if isinstance(gw, dict):
-                        self.gateway_multiplex_profiles = bool(gw.get("multiplex_profiles", False))
+                        self.gateway_multiplex_profiles = bool(
+                            gw.get("multiplex_profiles", False)
+                        )
                         allowlist = gw.get("multiplex_profile_allowlist", [])
                         if isinstance(allowlist, list):
-                            self.gateway_multiplex_profile_allowlist = [str(x) for x in allowlist]
+                            self.gateway_multiplex_profile_allowlist = [
+                                str(x) for x in allowlist
+                            ]
                         routes = gw.get("profile_routes", [])
                         if isinstance(routes, list):
                             self.gateway_profile_routes = routes
@@ -136,13 +161,20 @@ class Config:
         # Environment variable override takes precedence
         env_multiplex = os.getenv("GATEWAY_MULTIPLEX_PROFILES")
         if env_multiplex is not None:
-            self.gateway_multiplex_profiles = env_multiplex.strip().lower() in ("1", "true", "yes", "on")
+            self.gateway_multiplex_profiles = env_multiplex.strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
 
     @property
     def has_discord(self) -> bool:
         return bool(self.discord_bot_token and self.owner_discord_id)
 
-    def get_current_workspace(self, custom_path: Optional[Path] = None) -> tuple[str, Path]:
+    def get_current_workspace(
+        self, custom_path: Optional[Path] = None
+    ) -> tuple[str, Path]:
         """Detect repository name and directory from current working directory (cwd)."""
         target = (custom_path or Path.cwd()).resolve()
 

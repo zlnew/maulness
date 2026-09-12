@@ -1,4 +1,4 @@
-import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Optional
@@ -8,10 +8,10 @@ from pydantic import BaseModel, Field
 from maulness.config import config
 
 USER_PIPELINES_DIR = config.config_dir / "pipelines"
-TEMPLATE_PIPELINES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "templates" / "pipelines"
+TEMPLATE_PIPELINES_DIR = (
+    Path(__file__).resolve().parent.parent.parent.parent / "templates" / "pipelines"
+)
 
-
-import re
 
 class PipelineGate(BaseModel):
     type: str = "confirm"  # "confirm" (requires explicit confirmation) or "none"
@@ -20,6 +20,7 @@ class PipelineGate(BaseModel):
 
 class VerificationGate(BaseModel):
     """Deterministic command verification gate executed before transition or review."""
+
     command: str
     cwd: Optional[str] = None
     timeout_seconds: int = 120
@@ -46,11 +47,11 @@ class PipelineStage(BaseModel):
     checkpoint_before_stage: bool = False
     is_gate_only: bool = False
     prompt: str = ""
+    include_repo_map: bool = False
     run_milestones: bool = False
     gate: Optional[PipelineGate] = None
     verification_gate: Optional[VerificationGate] = None
     transitions: Optional[StageTransitions] = None
-
 
 
 def check_is_rework_verdict(text: str) -> bool:
