@@ -14,10 +14,11 @@ from maulness.core.models import (
     ApprovalRequestEvent,
     TaskMode,
     TaskRecord,
+    TaskRetrospective,
     TaskStatus,
 )
 from maulness.core.approvals import ApprovalClassifier
-from maulness.core.kernel.budgets import BudgetExceededError, BudgetGuard, BudgetLimits
+from maulness.core.kernel.budgets import BudgetExceededError, BudgetGuard
 from maulness.core.kernel.gates import TestFreezeGate, TestTamperingDetectedError
 from maulness.core.profiles import ProfileManager
 from maulness.core.providers.factory import get_provider_for_profile
@@ -65,11 +66,23 @@ class TaskRunner:
 
         profile = self.profile_manager.get_profile(profile_name)
         if repo_name:
-            fallback_workspace = Path(workspace_path).resolve() if workspace_path else config.resolve_repo_path(repo_name)
+            fallback_workspace = (
+                Path(workspace_path).resolve()
+                if workspace_path
+                else config.resolve_repo_path(repo_name)
+            )
         else:
-            fallback_workspace = Path(workspace_path).resolve() if workspace_path else config.workspace_root
-        target_workspace = self.profile_manager.resolve_workspace_for_profile(profile, fallback_workspace)
-        effective_repo = repo_name or (target_workspace.name if target_workspace != config.workspace_root else None)
+            fallback_workspace = (
+                Path(workspace_path).resolve()
+                if workspace_path
+                else config.workspace_root
+            )
+        target_workspace = self.profile_manager.resolve_workspace_for_profile(
+            profile, fallback_workspace
+        )
+        effective_repo = repo_name or (
+            target_workspace.name if target_workspace != config.workspace_root else None
+        )
         task_id = f"task_{uuid.uuid4().hex[:10]}"
 
         # Record task in database
@@ -95,7 +108,9 @@ class TaskRunner:
                 acp_session_id=conversation_id,
             )
 
-        effective_conv_id = conversation_id or (session.acp_session_id if session else None)
+        effective_conv_id = conversation_id or (
+            session.acp_session_id if session else None
+        )
 
         async def internal_init_handler(conv_id: str):
             self.last_conversation_id = conv_id
@@ -115,7 +130,9 @@ class TaskRunner:
         # Set task to BUILDING
         await self.storage.update_task_status(task_id, TaskStatus.BUILDING)
 
-        classifier = ApprovalClassifier(yolo_mode=yolo, rule_engine=profile.get_rule_engine())
+        classifier = ApprovalClassifier(
+            yolo_mode=yolo, rule_engine=profile.get_rule_engine()
+        )
 
         # Default terminal approval handler if none provided
         async def terminal_approval_handler(event: ApprovalRequestEvent) -> bool:
@@ -131,11 +148,15 @@ class TaskRunner:
 
             details = f"[bold yellow]Tool:[/bold yellow] {event.tool_name}\n"
             if event.tool_name == "run_command":
-                details += f"[bold green]Command:[/bold green] {event.args.get('command')}\n"
+                details += (
+                    f"[bold green]Command:[/bold green] {event.args.get('command')}\n"
+                )
                 if "cwd" in event.args:
                     details += f"[dim]Directory: {event.args.get('cwd')}[/dim]"
             elif event.tool_name in ("write_file", "read_file"):
-                details += f"[bold magenta]Path:[/bold magenta] {event.args.get('path')}\n"
+                details += (
+                    f"[bold magenta]Path:[/bold magenta] {event.args.get('path')}\n"
+                )
                 if "bytes" in event.args:
                     details += f"[dim]Size: {event.args.get('bytes')} bytes[/dim]"
             else:
@@ -149,7 +170,9 @@ class TaskRunner:
                 )
             )
             loop = asyncio.get_running_loop()
-            answer = await loop.run_in_executor(None, input, "Approve execution? [y/N]: ")
+            answer = await loop.run_in_executor(
+                None, input, "Approve execution? [y/N]: "
+            )
             approved = answer.strip().lower() in ("y", "yes")
             if approved:
                 console.print("[green]Approved[/green]\n")
@@ -161,7 +184,9 @@ class TaskRunner:
             if on_thought:
                 await on_thought(event)
             else:
-                console.print(f"[dim italic grey70][thought] {event.delta}[/dim italic grey70]")
+                console.print(
+                    f"[dim italic grey70][thought] {event.delta}[/dim italic grey70]"
+                )
 
         async def default_message_handler(event: AgentMessageEvent):
             if on_message:
@@ -169,8 +194,20 @@ class TaskRunner:
             else:
                 console.print(event.delta, end="")
 
-        test_freeze = TestFreezeGate(target_workspace)
         budget_guard = BudgetGuard()
+
+        # Pre-task Query: Inject active commit-anchored gotchas
+        active_gotchas = await self.storage.get_active_gotchas(
+            str(target_workspace), limit=3
+        )
+        effective_prompt = prompt
+        if active_gotchas:
+            gotcha_lines = ["\n[Known Workspace Gotchas]:"]
+            for g in active_gotchas:
+                gotcha_lines.append(
+                    f"- **{g.component}**: {g.symptom} -> {g.resolution} (commit {g.commit_hash[:7]})"
+                )
+            effective_prompt = f"{prompt}\n" + "\n".join(gotcha_lines)
 
         try:
             provider = get_provider_for_profile(profile)
@@ -187,7 +224,7 @@ class TaskRunner:
 
                 await provider.run(
                     session_id=task_id,
-                    prompt=prompt,
+                    prompt=effective_prompt,
                     workspace_path=ws,
                     conversation_id=effective_conv_id,
                     on_init=internal_init_handler,
@@ -210,18 +247,74 @@ class TaskRunner:
             else:
                 await _execute_on(target_workspace)
 
+            # Invalidate gotchas if modified files touched components
+            if self.worktree_manager.is_git_repo(target_workspace):
+                import subprocess
+
+                diff_res = subprocess.run(
+                    ["git", "diff", "--name-only", "HEAD~1"],
+                    cwd=str(target_workspace),
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if diff_res.returncode == 0 and diff_res.stdout.strip():
+                    mod_files = [
+                        f.strip() for f in diff_res.stdout.splitlines() if f.strip()
+                    ]
+                    await self.storage.invalidate_gotchas_for_files(
+                        str(target_workspace), mod_files
+                    )
+
+            # Record task retrospective
+            retro = TaskRetrospective(
+                task_id=task_id,
+                repo_path=str(target_workspace),
+                summary=prompt[:100],
+                passed=True,
+                total_steps=budget_guard.total_turns,
+                cost_usd=budget_guard.accumulated_cost_usd,
+            )
+            await self.storage.save_task_retrospective(retro)
+
             await self.storage.update_task_status(task_id, TaskStatus.DONE)
             if verbose:
-                console.print(f"\n[bold green]Task {task_id} completed successfully.[/bold green]")
+                console.print(
+                    f"\n[bold green]Task {task_id} completed successfully.[/bold green]"
+                )
 
         except BudgetExceededError as e:
             if verbose:
-                console.print(f"\n[bold yellow]Task suspended (budget exceeded): {e}[/bold yellow]")
+                console.print(
+                    f"\n[bold yellow]Task suspended (budget exceeded): {e}[/bold yellow]"
+                )
+            await self.storage.save_task_retrospective(
+                TaskRetrospective(
+                    task_id=task_id,
+                    repo_path=str(target_workspace),
+                    summary=f"Suspended: {e}",
+                    passed=False,
+                    total_steps=budget_guard.total_turns,
+                    cost_usd=budget_guard.accumulated_cost_usd,
+                )
+            )
             await self.storage.update_task_status(task_id, TaskStatus.SUSPENDED_AFK)
             raise
         except TestTamperingDetectedError as e:
             if verbose:
-                console.print(f"\n[bold red]Task failed (test tampering): {e}[/bold red]")
+                console.print(
+                    f"\n[bold red]Task failed (test tampering): {e}[/bold red]"
+                )
+            await self.storage.save_task_retrospective(
+                TaskRetrospective(
+                    task_id=task_id,
+                    repo_path=str(target_workspace),
+                    summary=f"Failed (tampering): {e}",
+                    passed=False,
+                    total_steps=budget_guard.total_turns,
+                    cost_usd=budget_guard.accumulated_cost_usd,
+                )
+            )
             await self.storage.update_task_status(task_id, TaskStatus.FAILED)
             raise
         except FileNotFoundError as e:
@@ -232,6 +325,16 @@ class TaskRunner:
         except Exception as e:
             if verbose:
                 console.print(f"\n[bold red]Task failed: {e}[/bold red]")
+            await self.storage.save_task_retrospective(
+                TaskRetrospective(
+                    task_id=task_id,
+                    repo_path=str(target_workspace),
+                    summary=f"Failed: {e}",
+                    passed=False,
+                    total_steps=budget_guard.total_turns,
+                    cost_usd=budget_guard.accumulated_cost_usd,
+                )
+            )
             await self.storage.update_task_status(task_id, TaskStatus.FAILED)
             raise
 

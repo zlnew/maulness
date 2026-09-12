@@ -10,9 +10,11 @@ import aiosqlite
 from maulness.core.models import (
     ApprovalRecord,
     ApprovalStatus,
+    RepoGotcha,
     SessionRecord,
     TaskMode,
     TaskRecord,
+    TaskRetrospective,
     TaskStatus,
 )
 
@@ -55,7 +57,9 @@ class StorageManager:
             )
             row = await cursor.fetchone()
             if row and "origin_platform" not in row[0]:
-                logger.info("Migrating storage: recreating tables with multi-platform schema")
+                logger.info(
+                    "Migrating storage: recreating tables with multi-platform schema"
+                )
                 await db.execute("PRAGMA foreign_keys = OFF;")
                 await db.execute("DROP TABLE IF EXISTS task_events;")
                 await db.execute("DROP TABLE IF EXISTS approvals;")
@@ -155,9 +159,15 @@ class StorageManager:
                 workspace_path=row["workspace_path"],
                 mode=TaskMode(row["mode"]),
                 status=TaskStatus(row["status"]),
-                origin_platform=row["origin_platform"] if "origin_platform" in row.keys() else "cli",
-                origin_channel_id=row["origin_channel_id"] if "origin_channel_id" in row.keys() else None,
-                origin_thread_id=row["origin_thread_id"] if "origin_thread_id" in row.keys() else None,
+                origin_platform=row["origin_platform"]
+                if "origin_platform" in row.keys()
+                else "cli",
+                origin_channel_id=row["origin_channel_id"]
+                if "origin_channel_id" in row.keys()
+                else None,
+                origin_thread_id=row["origin_thread_id"]
+                if "origin_thread_id" in row.keys()
+                else None,
             )
 
     async def list_tasks(self, limit: int = 20) -> list[TaskRecord]:
@@ -176,9 +186,15 @@ class StorageManager:
                     workspace_path=row["workspace_path"],
                     mode=TaskMode(row["mode"]),
                     status=TaskStatus(row["status"]),
-                    origin_platform=row["origin_platform"] if "origin_platform" in row.keys() else "cli",
-                    origin_channel_id=row["origin_channel_id"] if "origin_channel_id" in row.keys() else None,
-                    origin_thread_id=row["origin_thread_id"] if "origin_thread_id" in row.keys() else None,
+                    origin_platform=row["origin_platform"]
+                    if "origin_platform" in row.keys()
+                    else "cli",
+                    origin_channel_id=row["origin_channel_id"]
+                    if "origin_channel_id" in row.keys()
+                    else None,
+                    origin_thread_id=row["origin_thread_id"]
+                    if "origin_thread_id" in row.keys()
+                    else None,
                 )
                 for row in rows
             ]
@@ -239,7 +255,9 @@ class StorageManager:
 
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM agent_sessions WHERE id = ?", (session_id,))
+            cursor = await db.execute(
+                "SELECT * FROM agent_sessions WHERE id = ?", (session_id,)
+            )
             row = await cursor.fetchone()
             if not row:
                 return None
@@ -261,7 +279,8 @@ class StorageManager:
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT * FROM agent_sessions ORDER BY created_at DESC LIMIT ?", (limit,)
+                "SELECT * FROM agent_sessions ORDER BY created_at DESC LIMIT ?",
+                (limit,),
             )
             rows = await cursor.fetchall()
             return [
@@ -293,7 +312,11 @@ class StorageManager:
     ) -> ApprovalRecord:
         """Create a new pending approval record."""
         eff_platform = platform
-        eff_msg_id = str(platform_message_id or discord_message_id) if (platform_message_id or discord_message_id) is not None else None
+        eff_msg_id = (
+            str(platform_message_id or discord_message_id)
+            if (platform_message_id or discord_message_id) is not None
+            else None
+        )
         args_str = tool_args if isinstance(tool_args, str) else json.dumps(tool_args)
 
         async with self._connect() as db:
@@ -302,7 +325,15 @@ class StorageManager:
                 INSERT INTO approvals (id, task_id, rpc_request_id, tool_name, tool_args, status, platform, platform_message_id)
                 VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
-                (approval_id, task_id, rpc_request_id, tool_name, args_str, eff_platform, eff_msg_id),
+                (
+                    approval_id,
+                    task_id,
+                    rpc_request_id,
+                    tool_name,
+                    args_str,
+                    eff_platform,
+                    eff_msg_id,
+                ),
             )
             await db.commit()
 
@@ -337,7 +368,9 @@ class StorageManager:
         """Fetch approval record by ID."""
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,))
+            cursor = await db.execute(
+                "SELECT * FROM approvals WHERE id = ?", (approval_id,)
+            )
             row = await cursor.fetchone()
             if not row:
                 return None
@@ -350,7 +383,13 @@ class StorageManager:
                 tool_args=row["tool_args"],
                 status=ApprovalStatus(row["status"]),
                 platform=row["platform"] if "platform" in row.keys() else "discord",
-                platform_message_id=row["platform_message_id"] if "platform_message_id" in row.keys() else (str(row["discord_message_id"]) if "discord_message_id" in row.keys() and row["discord_message_id"] else None),
+                platform_message_id=row["platform_message_id"]
+                if "platform_message_id" in row.keys()
+                else (
+                    str(row["discord_message_id"])
+                    if "discord_message_id" in row.keys() and row["discord_message_id"]
+                    else None
+                ),
             )
 
     async def list_approvals(
@@ -378,7 +417,14 @@ class StorageManager:
                     tool_args=row["tool_args"],
                     status=ApprovalStatus(row["status"]),
                     platform=row["platform"] if "platform" in row.keys() else "discord",
-                    platform_message_id=row["platform_message_id"] if "platform_message_id" in row.keys() else (str(row["discord_message_id"]) if "discord_message_id" in row.keys() and row["discord_message_id"] else None),
+                    platform_message_id=row["platform_message_id"]
+                    if "platform_message_id" in row.keys()
+                    else (
+                        str(row["discord_message_id"])
+                        if "discord_message_id" in row.keys()
+                        and row["discord_message_id"]
+                        else None
+                    ),
                 )
                 for row in rows
             ]
@@ -536,7 +582,9 @@ class StorageManager:
                 (conversation_id, limit),
             )
             rows = await cursor.fetchall()
-            return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+            return [
+                {"role": r["role"], "content": r["content"]} for r in reversed(rows)
+            ]
 
     async def clear_conversation_messages(self, conversation_id: str) -> int:
         """Clear message history for a conversation UUID."""
@@ -670,16 +718,18 @@ class StorageManager:
                     payload_val = json.loads(p)
                 except Exception:
                     payload_val = p
-                events.append({
-                    "id": r["id"],
-                    "task_id": r["task_id"],
-                    "stage": r["stage"],
-                    "step_index": r["step_index"],
-                    "event_type": r["event_type"],
-                    "payload": payload_val,
-                    "idempotency_key": r["idempotency_key"],
-                    "created_at": r["created_at"],
-                })
+                events.append(
+                    {
+                        "id": r["id"],
+                        "task_id": r["task_id"],
+                        "stage": r["stage"],
+                        "step_index": r["step_index"],
+                        "event_type": r["event_type"],
+                        "payload": payload_val,
+                        "idempotency_key": r["idempotency_key"],
+                        "created_at": r["created_at"],
+                    }
+                )
             return events
 
     async def get_latest_agent_step_index(self, task_id: str, stage: str) -> int:
@@ -696,4 +746,126 @@ class StorageManager:
             row = await cursor.fetchone()
             return row[0] if row else 0
 
+    async def save_repo_gotcha(self, gotcha: RepoGotcha) -> None:
+        """Persist or update a commit-anchored gotcha for a repository."""
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO repo_gotchas (id, repo_path, component, symptom, resolution, commit_hash, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    gotcha.id,
+                    gotcha.repo_path,
+                    gotcha.component,
+                    gotcha.symptom,
+                    gotcha.resolution,
+                    gotcha.commit_hash,
+                    1 if gotcha.is_active else 0,
+                ),
+            )
+            await db.commit()
 
+    async def get_active_gotchas(
+        self, repo_path: str, limit: int = 3
+    ) -> list[RepoGotcha]:
+        """Fetch active commit-anchored gotchas for a workspace path."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, repo_path, component, symptom, resolution, commit_hash, is_active, created_at
+                FROM repo_gotchas
+                WHERE repo_path = ? AND is_active = 1
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (repo_path, limit),
+            )
+            rows = await cursor.fetchall()
+            return [
+                RepoGotcha(
+                    id=r["id"],
+                    repo_path=r["repo_path"],
+                    component=r["component"],
+                    symptom=r["symptom"],
+                    resolution=r["resolution"],
+                    commit_hash=r["commit_hash"],
+                    is_active=bool(r["is_active"]),
+                )
+                for r in rows
+            ]
+
+    async def invalidate_gotchas_for_files(
+        self, repo_path: str, modified_files: list[str]
+    ) -> int:
+        """Mark gotchas as inactive if subsequent commits modify related components/files."""
+        if not modified_files:
+            return 0
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT id, component FROM repo_gotchas WHERE repo_path = ? AND is_active = 1",
+                (repo_path,),
+            )
+            rows = await cursor.fetchall()
+            invalidated = 0
+            for r in rows:
+                comp = r["component"].lower()
+                if any(comp in f.lower() or f.lower() in comp for f in modified_files):
+                    await db.execute(
+                        "UPDATE repo_gotchas SET is_active = 0 WHERE id = ?",
+                        (r["id"],),
+                    )
+                    invalidated += 1
+            if invalidated > 0:
+                await db.commit()
+            return invalidated
+
+    async def save_task_retrospective(self, retro: TaskRetrospective) -> None:
+        """Save a post-task retrospective outcome and cost metrics."""
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO task_retrospectives (task_id, repo_path, summary, passed, total_steps, cost_usd)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    retro.task_id,
+                    retro.repo_path,
+                    retro.summary,
+                    1 if retro.passed else 0,
+                    retro.total_steps,
+                    retro.cost_usd,
+                ),
+            )
+            await db.commit()
+
+    async def get_task_retrospectives(
+        self, repo_path: str, limit: int = 5
+    ) -> list[TaskRetrospective]:
+        """Fetch past task retrospectives for a repository."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT task_id, repo_path, summary, passed, total_steps, cost_usd, created_at
+                FROM task_retrospectives
+                WHERE repo_path = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (repo_path, limit),
+            )
+            rows = await cursor.fetchall()
+            return [
+                TaskRetrospective(
+                    task_id=r["task_id"],
+                    repo_path=r["repo_path"],
+                    summary=r["summary"],
+                    passed=bool(r["passed"]),
+                    total_steps=r["total_steps"],
+                    cost_usd=float(r["cost_usd"]),
+                )
+                for r in rows
+            ]

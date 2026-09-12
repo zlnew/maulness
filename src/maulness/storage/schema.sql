@@ -85,4 +85,30 @@ CREATE TABLE IF NOT EXISTS session_memories (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Commit-Anchored Gotchas Table
+CREATE TABLE IF NOT EXISTS repo_gotchas (
+    id TEXT PRIMARY KEY,
+    repo_path TEXT NOT NULL,
+    component TEXT NOT NULL,
+    symptom TEXT NOT NULL,
+    resolution TEXT NOT NULL,
+    commit_hash TEXT NOT NULL,
+    is_active INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_repo_gotchas_repo ON repo_gotchas(repo_path, is_active);
+
+-- Task Retrospectives Table
+CREATE TABLE IF NOT EXISTS task_retrospectives (
+    task_id TEXT PRIMARY KEY,
+    repo_path TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    passed INTEGER NOT NULL,
+    total_steps INTEGER NOT NULL,
+    cost_usd REAL NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_task_retrospectives_repo ON task_retrospectives(repo_path);
+
+
 

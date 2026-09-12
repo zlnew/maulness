@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 
-from maulness.discord.views import ApprovalView
+from maulness.discord.views import ApprovalView, SuspendedAfkView
 
 
 @pytest.mark.asyncio
@@ -66,7 +66,9 @@ async def test_approval_view_approve_without_embed():
     mock_interaction.user.display_name = "Maul"
     mock_interaction.response.edit_message = AsyncMock()
     mock_interaction.message.embeds = []
-    mock_interaction.message.content = "Please approve: rm -rf [green]Approved by Maul[/green]"
+    mock_interaction.message.content = (
+        "Please approve: rm -rf [green]Approved by Maul[/green]"
+    )
 
     await view.approve_button.callback(mock_interaction)
 
@@ -106,7 +108,9 @@ async def test_approval_view_deny_without_embed():
     mock_interaction.user.display_name = "Maul"
     mock_interaction.response.edit_message = AsyncMock()
     mock_interaction.message.embeds = []
-    mock_interaction.message.content = "Please approve: drop database [red]Denied by Maul[/red]"
+    mock_interaction.message.content = (
+        "Please approve: drop database [red]Denied by Maul[/red]"
+    )
 
     await view.deny_button.callback(mock_interaction)
 
@@ -128,3 +132,36 @@ async def test_approval_view_on_timeout():
     for child in view.children:
         if isinstance(child, discord.ui.Button):
             assert child.disabled is True
+
+
+@pytest.mark.asyncio
+async def test_suspended_afk_view_buttons():
+    fut = asyncio.Future()
+    view = SuspendedAfkView(task_id="task-afk-99", future=fut)
+
+    mock_interaction = MagicMock()
+    mock_interaction.user.display_name = "Maul"
+    mock_interaction.response.edit_message = AsyncMock()
+
+    embed = discord.Embed(title="Task Suspended", description="Details")
+    mock_interaction.message.embeds = [embed]
+
+    # Test resume
+    await view.resume_button.callback(mock_interaction)
+    assert view.action == "resume"
+    assert fut.done() and fut.result() == "resume"
+    mock_interaction.response.edit_message.assert_awaited_once()
+
+    # Test merge on fresh view
+    fut2 = asyncio.Future()
+    view2 = SuspendedAfkView(task_id="task-afk-99", future=fut2)
+    await view2.merge_button.callback(mock_interaction)
+    assert view2.action == "merge"
+    assert fut2.done() and fut2.result() == "merge"
+
+    # Test abort on fresh view
+    fut3 = asyncio.Future()
+    view3 = SuspendedAfkView(task_id="task-afk-99", future=fut3)
+    await view3.abort_button.callback(mock_interaction)
+    assert view3.action == "abort"
+    assert fut3.done() and fut3.result() == "abort"

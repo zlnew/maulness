@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
@@ -118,8 +118,10 @@ class ApprovalRecord:
 # Phase 2: Decoupled Multi-Agent Artifact Contracts & Milestone Sub-Sessions
 # ==============================================================================
 
+
 class Milestone(BaseModel):
     """An atomic, verifiable unit of work within a larger task."""
+
     id: str
     title: str
     files_to_modify: list[str] = Field(default_factory=list)
@@ -129,6 +131,7 @@ class Milestone(BaseModel):
 
 class MilestonePlan(BaseModel):
     """Structured architectural plan partitioned into verifiable milestones."""
+
     task_id: str
     summary: str = ""
     milestones: list[Milestone] = Field(default_factory=list)
@@ -136,6 +139,7 @@ class MilestonePlan(BaseModel):
 
 class ChangeSet(BaseModel):
     """Structured change payload emitted by the builder."""
+
     task_id: str
     milestone_id: Optional[str] = None
     touched_files: list[str] = Field(default_factory=list)
@@ -146,9 +150,35 @@ class ChangeSet(BaseModel):
 
 class ReviewVerdict(BaseModel):
     """Structured evaluation returned by the reviewer."""
+
     decision: str  # "PASS" or "REWORK"
     flaws: list[str] = Field(default_factory=list)
     target_rework_files: list[str] = Field(default_factory=list)
     guidance: str = ""
 
 
+@dataclass
+class RepoGotcha:
+    """Commit-anchored associative knowledge about environment/repo quirks."""
+
+    id: str
+    repo_path: str
+    component: str
+    symptom: str
+    resolution: str
+    commit_hash: str
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+
+
+@dataclass
+class TaskRetrospective:
+    """Post-task retrospective record capturing outcome and execution metrics."""
+
+    task_id: str
+    repo_path: str
+    summary: str
+    passed: bool
+    total_steps: int
+    cost_usd: float
+    created_at: Optional[datetime] = None

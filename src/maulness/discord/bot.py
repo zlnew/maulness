@@ -1,5 +1,4 @@
 import asyncio
-import io
 import logging
 import re
 from typing import Any, Optional
@@ -21,7 +20,7 @@ from maulness.core.pipelines import PipelineStage
 from maulness.core.profiles import ProfileManager
 from maulness.core.providers.factory import get_provider_for_profile
 from maulness.core.runner import TaskRunner
-from maulness.discord.views import ApprovalView
+from maulness.discord.views import ApprovalView, SuspendedAfkView
 from maulness.storage.db import StorageManager
 
 import json
@@ -76,7 +75,9 @@ def format_discord_markdown(text: str) -> str:
     result = text
     for pattern, replacement in LATEX_REPLACEMENTS:
         result = pattern.sub(replacement, result)
-    result = re.sub(r"\$\s*(->|<-|<->|=>|<=|<=>|~|!=|\*|\+/-|\.\.\.)\s*\$", r"\1", result)
+    result = re.sub(
+        r"\$\s*(->|<-|<->|=>|<=|<=>|~|!=|\*|\+/-|\.\.\.)\s*\$", r"\1", result
+    )
     return result
 
 
@@ -99,7 +100,9 @@ class MaulnessBot(commands.Bot):
 
         if profiles:
             self.profiles = list(profiles)
-            default_prof = next((p for p in profiles if p.name == "default"), profiles[0])
+            default_prof = next(
+                (p for p in profiles if p.name == "default"), profiles[0]
+            )
             self.bound_profile = default_prof
             self.profile_name = default_prof.name
         elif profile:
@@ -118,7 +121,9 @@ class MaulnessBot(commands.Bot):
             self.profile_name = "default"
 
         self.runner = TaskRunner(storage=storage, profile_manager=self.profile_manager)
-        self.pipeline = PipelineOrchestrator(storage=storage, profile_manager=self.profile_manager)
+        self.pipeline = PipelineOrchestrator(
+            storage=storage, profile_manager=self.profile_manager
+        )
 
         # Scoped credentials from profile .env or config fallback
         self.owner_id = self._resolve_owner_id()
@@ -182,9 +187,17 @@ class MaulnessBot(commands.Bot):
         """Sync slash commands on startup and load persisted channel conversations."""
         try:
             self.channel_conversations = await self.storage.list_channel_conversations()
-            logger.info("[%s] Loaded %d active channel conversation mapping(s)", self.profile_name, len(self.channel_conversations))
+            logger.info(
+                "[%s] Loaded %d active channel conversation mapping(s)",
+                self.profile_name,
+                len(self.channel_conversations),
+            )
         except Exception as e:
-            logger.debug("[%s] Could not load persisted channel conversations: %s", self.profile_name, e)
+            logger.debug(
+                "[%s] Could not load persisted channel conversations: %s",
+                self.profile_name,
+                e,
+            )
 
         await self._register_slash_commands()
 
@@ -192,7 +205,10 @@ class MaulnessBot(commands.Bot):
         token_key = self.bound_profile.env_vars.get("DISCORD_BOT_TOKEN", "")[:24]
         if token_key:
             if token_key in _synced_tokens:
-                logger.info("[%s] Slash commands already synced for shared token", self.profile_name)
+                logger.info(
+                    "[%s] Slash commands already synced for shared token",
+                    self.profile_name,
+                )
                 return
             _synced_tokens.add(token_key)
 
@@ -200,7 +216,11 @@ class MaulnessBot(commands.Bot):
             guild = discord.Object(id=self.guild_id)
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
-            logger.info("[%s] Synced slash commands to guild %s", self.profile_name, self.guild_id)
+            logger.info(
+                "[%s] Synced slash commands to guild %s",
+                self.profile_name,
+                self.guild_id,
+            )
         else:
             await self.tree.sync()
             logger.info("[%s] Synced global slash commands", self.profile_name)
@@ -225,7 +245,9 @@ class MaulnessBot(commands.Bot):
                 interaction.user.id,
             )
 
-    def resolve_profile_for_channel(self, channel_id: int, parent_id: Optional[int] = None) -> Optional[Any]:
+    def resolve_profile_for_channel(
+        self, channel_id: int, parent_id: Optional[int] = None
+    ) -> Optional[Any]:
         """Find the matching profile from self.profiles for a given channel or thread."""
         channel_ids = {channel_id}
         if parent_id is not None:
@@ -243,7 +265,9 @@ class MaulnessBot(commands.Bot):
                 try:
                     if int(chat_id) in channel_ids:
                         prof_name = route.get("profile")
-                        matched = next((p for p in self.profiles if p.name == prof_name), None)
+                        matched = next(
+                            (p for p in self.profiles if p.name == prof_name), None
+                        )
                         if matched:
                             return matched
                 except (ValueError, TypeError):
@@ -315,7 +339,9 @@ class MaulnessBot(commands.Bot):
         target_profile = profile or self.bound_profile
         model_tag = target_profile.model or target_profile.command or "default"
         provider_tag = f"{target_profile.provider}:{model_tag}"
-        current_msg = await channel.send(f"**{target_profile.name}** is thinking... `[{provider_tag}]`\n> {prompt[:100]}")
+        current_msg = await channel.send(
+            f"**{target_profile.name}** is thinking... `[{provider_tag}]`\n> {prompt[:100]}"
+        )
         active_msgs = [current_msg]
         start_time = time.time()
         fallback_alerts: list[str] = []
@@ -337,14 +363,18 @@ class MaulnessBot(commands.Bot):
                         current_msg = await channel.send(clean_text)
                         active_msgs.append(current_msg)
                     except Exception as send_err:
-                        logger.error("Failed to send replacement Discord message: %s", send_err)
+                        logger.error(
+                            "Failed to send replacement Discord message: %s", send_err
+                        )
             else:
                 first_part = clean_text[:1950]
                 rest = clean_text[1950:]
                 try:
                     await current_msg.edit(content=first_part)
                 except Exception as e:
-                    logger.warning("Failed to edit Discord message with first part: %s", e)
+                    logger.warning(
+                        "Failed to edit Discord message with first part: %s", e
+                    )
                     try:
                         current_msg = await channel.send(first_part)
                         active_msgs.append(current_msg)
@@ -357,7 +387,9 @@ class MaulnessBot(commands.Bot):
                         current_msg = await channel.send(chunk)
                         active_msgs.append(current_msg)
                     except Exception as send_err:
-                        logger.error("Failed to send overflow Discord chunk: %s", send_err)
+                        logger.error(
+                            "Failed to send overflow Discord chunk: %s", send_err
+                        )
                         break
 
         debouncer = MessageStreamDebouncer(flush_callback=flush_chunk)
@@ -373,14 +405,24 @@ class MaulnessBot(commands.Bot):
                             content=f"**{target_profile.name}** is thinking... `[{provider_tag}]`\n> {prompt[:100]}\n\n{alert_block}"
                         )
                     except Exception as e:
-                        logger.debug("Failed to edit Discord thinking message with fallback notice: %s", e)
+                        logger.debug(
+                            "Failed to edit Discord thinking message with fallback notice: %s",
+                            e,
+                        )
 
         async def on_tool_call(event: AgentToolCallEvent):
-            logger.info("[%s] Tool call in channel %s: %s", target_profile.name, channel_id, event.tool_name)
+            logger.info(
+                "[%s] Tool call in channel %s: %s",
+                target_profile.name,
+                channel_id,
+                event.tool_name,
+            )
             tool_summary = event.tool_name
             if event.tool_name == "run_command" and "command" in event.args:
                 tool_summary = f"`{event.args['command'][:60]}`"
-            elif event.tool_name in ("read_file", "write_file") and "path" in event.args:
+            elif (
+                event.tool_name in ("read_file", "write_file") and "path" in event.args
+            ):
                 tool_summary = f"{event.tool_name} `{event.args['path'][:50]}`"
             if not debouncer.full_text.strip():
                 try:
@@ -388,7 +430,9 @@ class MaulnessBot(commands.Bot):
                         content=f"**{target_profile.name}** is thinking... `[{provider_tag}]`\n> {prompt[:100]}\n\n> *Running {tool_summary}...*"
                     )
                 except Exception as e:
-                    logger.debug("Failed to edit Discord thinking message with tool call: %s", e)
+                    logger.debug(
+                        "Failed to edit Discord thinking message with tool call: %s", e
+                    )
 
         async def on_message_chunk(event: AgentMessageEvent):
             self.total_chars_out += len(event.delta)
@@ -399,7 +443,11 @@ class MaulnessBot(commands.Bot):
         async def on_approval(event: ApprovalRequestEvent) -> bool:
             nonlocal current_msg
             if channel_id and self.channel_yolo.get(channel_id, False):
-                logger.info("[%s] Auto-approving tool %s due to channel YOLO mode", target_profile.name, event.tool_name)
+                logger.info(
+                    "[%s] Auto-approving tool %s due to channel YOLO mode",
+                    target_profile.name,
+                    event.tool_name,
+                )
                 return True
             loop = asyncio.get_running_loop()
             fut = loop.create_future()
@@ -413,15 +461,29 @@ class MaulnessBot(commands.Bot):
             embed.add_field(name="Tool", value=f"`{event.tool_name}`", inline=True)
             if event.tool_name == "run_command":
                 cmd = event.args.get("command", "")
-                embed.add_field(name="Command", value=f"```bash\n{cmd}\n```", inline=False)
+                embed.add_field(
+                    name="Command", value=f"```bash\n{cmd}\n```", inline=False
+                )
                 if "cwd" in event.args:
-                    embed.add_field(name="Directory", value=f"`{event.args['cwd']}`", inline=True)
+                    embed.add_field(
+                        name="Directory", value=f"`{event.args['cwd']}`", inline=True
+                    )
             elif event.tool_name == "write_file":
-                embed.add_field(name="Target File", value=f"`{event.args.get('path')}`", inline=True)
-                embed.add_field(name="Size", value=f"{event.args.get('bytes', 0)} bytes", inline=True)
+                embed.add_field(
+                    name="Target File", value=f"`{event.args.get('path')}`", inline=True
+                )
+                embed.add_field(
+                    name="Size",
+                    value=f"{event.args.get('bytes', 0)} bytes",
+                    inline=True,
+                )
             else:
                 formatted_args = json.dumps(event.args, indent=2)
-                embed.add_field(name="Arguments", value=f"```json\n{formatted_args[:1000]}\n```", inline=False)
+                embed.add_field(
+                    name="Arguments",
+                    value=f"```json\n{formatted_args[:1000]}\n```",
+                    inline=False,
+                )
 
             embed.set_footer(text="Maulness Security Gate • 10m timeout")
             await channel.send(embed=embed, view=view)
@@ -447,9 +509,13 @@ class MaulnessBot(commands.Bot):
 
             # Always spawn fresh message below approval card so all subsequent text streams sequentially
             if approved:
-                status_text = f"**{target_profile.name}** is running `{event.tool_name}`..."
+                status_text = (
+                    f"**{target_profile.name}** is running `{event.tool_name}`..."
+                )
             elif is_timeout:
-                status_text = f"**{target_profile.name}** action `{event.tool_name}` timed out."
+                status_text = (
+                    f"**{target_profile.name}** action `{event.tool_name}` timed out."
+                )
             else:
                 status_text = f"**{target_profile.name}** action `{event.tool_name}` was rejected by Maul."
 
@@ -457,19 +523,27 @@ class MaulnessBot(commands.Bot):
                 current_msg = await channel.send(status_text)
                 active_msgs.append(current_msg)
             except Exception as e:
-                logger.error("Failed to spawn sequential message after approval decision: %s", e)
+                logger.error(
+                    "Failed to spawn sequential message after approval decision: %s", e
+                )
 
             return approved
 
         provider = get_provider_for_profile(target_profile)
-        workspace = self.profile_manager.resolve_workspace_for_profile(target_profile, config.workspace_root)
+        workspace = self.profile_manager.resolve_workspace_for_profile(
+            target_profile, config.workspace_root
+        )
 
-        active_conv_id = self.channel_conversations.get(channel_id) if channel_id else None
+        active_conv_id = (
+            self.channel_conversations.get(channel_id) if channel_id else None
+        )
 
         # Re-inject compacted session memory into context upon starting a fresh conversation
         if channel_id and not active_conv_id:
             try:
-                compacted_summary = await self.storage.get_latest_compacted_memory(channel_id)
+                compacted_summary = await self.storage.get_latest_compacted_memory(
+                    channel_id
+                )
                 if compacted_summary and compacted_summary.strip():
                     prompt = (
                         f"[PREVIOUS COMPACTED SESSION CONTEXT]\n"
@@ -489,10 +563,17 @@ class MaulnessBot(commands.Bot):
             if channel_id and conv_id:
                 self.channel_conversations[channel_id] = conv_id
                 try:
-                    await self.storage.set_channel_conversation(channel_id, conv_id, target_profile.name)
+                    await self.storage.set_channel_conversation(
+                        channel_id, conv_id, target_profile.name
+                    )
                 except Exception as e:
                     logger.debug("Failed to persist channel conversation: %s", e)
-                logger.info("[%s] Bound channel %s to conversation UUID %s", target_profile.name, channel_id, conv_id)
+                logger.info(
+                    "[%s] Bound channel %s to conversation UUID %s",
+                    target_profile.name,
+                    channel_id,
+                    conv_id,
+                )
 
         try:
             async with channel.typing():
@@ -511,11 +592,17 @@ class MaulnessBot(commands.Bot):
                     await debouncer.write(res)
 
                 if not debouncer.full_text.strip():
-                    await debouncer.write("*(No visible output was generated by the model)*")
+                    await debouncer.write(
+                        "*(No visible output was generated by the model)*"
+                    )
 
                 # If response was fulfilled by a fallback provider, attach a subtle footnote
                 used_prov = getattr(provider, "last_used_provider", None)
-                if used_prov and hasattr(provider, "primary") and used_prov != getattr(provider, "primary", None):
+                if (
+                    used_prov
+                    and hasattr(provider, "primary")
+                    and used_prov != getattr(provider, "primary", None)
+                ):
                     used_tag = f"{used_prov.profile.provider}:{used_prov.profile.model or used_prov.profile.command or 'default'}"
                     footnote = f"\n\n*(Responded via fallback `{used_tag}` after primary provider failure)*"
                     await debouncer.write(footnote)
@@ -524,18 +611,26 @@ class MaulnessBot(commands.Bot):
                 if channel_id and last_cid:
                     self.channel_conversations[channel_id] = last_cid
                     try:
-                        await self.storage.set_channel_conversation(channel_id, last_cid, target_profile.name)
+                        await self.storage.set_channel_conversation(
+                            channel_id, last_cid, target_profile.name
+                        )
                     except Exception as e:
                         logger.debug("Failed to persist channel conversation: %s", e)
         except asyncio.CancelledError:
-            logger.info("[%s] Chat prompt cancelled by user in channel %s", target_profile.name, channel_id)
+            logger.info(
+                "[%s] Chat prompt cancelled by user in channel %s",
+                target_profile.name,
+                channel_id,
+            )
             try:
                 await channel.send("**Session stopped by user.**")
             except Exception:
                 pass
             raise
         except Exception as e:
-            logger.exception("[%s] Error executing chat prompt: %s", target_profile.name, e)
+            logger.exception(
+                "[%s] Error executing chat prompt: %s", target_profile.name, e
+            )
             try:
                 err_text = str(e).strip()
                 error_msg = f"**Execution Error [{target_profile.name}]:**\n```\n{err_text[:1500]}\n```"
@@ -563,17 +658,25 @@ class MaulnessBot(commands.Bot):
             if channel_id:
                 conv_id = self.channel_conversations.get(channel_id)
                 if conv_id:
+
                     async def _run_fact_extraction(cid: str, pname: str):
                         try:
                             from maulness.core.memory import AutonomousMemoryExtractor
-                            recent = await self.storage.get_conversation_messages(cid, limit=10)
+
+                            recent = await self.storage.get_conversation_messages(
+                                cid, limit=10
+                            )
                             if len(recent) >= 4:
                                 extractor = AutonomousMemoryExtractor()
-                                await extractor.extract_and_update(recent, profile_name=pname)
+                                await extractor.extract_and_update(
+                                    recent, profile_name=pname
+                                )
                         except Exception as ex:
                             logger.debug("Background fact extraction skipped: %s", ex)
 
-                    asyncio.create_task(_run_fact_extraction(conv_id, target_profile.name))
+                    asyncio.create_task(
+                        _run_fact_extraction(conv_id, target_profile.name)
+                    )
 
             # Process next queued prompt in channel if any
             if channel_id and self.channel_queues.get(channel_id):
@@ -632,7 +735,9 @@ class MaulnessBot(commands.Bot):
             value="• `/help`: Show this command reference",
             inline=False,
         )
-        embed.set_footer(text="Tip: You can also chat directly in designated channels, or type !new / !stop.")
+        embed.set_footer(
+            text="Tip: You can also chat directly in designated channels, or type !new / !stop."
+        )
         return embed
 
     async def on_message(self, message: discord.Message):
@@ -661,7 +766,10 @@ class MaulnessBot(commands.Bot):
                         task.cancel()
                 self.channel_queues.pop(message.channel.id, None)
 
-                target_profile = self.resolve_profile_for_channel(message.channel.id) or self.bound_profile
+                target_profile = (
+                    self.resolve_profile_for_channel(message.channel.id)
+                    or self.bound_profile
+                )
                 embed = discord.Embed(
                     title="Session Reset",
                     description=(
@@ -678,14 +786,20 @@ class MaulnessBot(commands.Bot):
             elif cmd_name == "stop":
                 target_id = self.channel_tasks.get(message.channel.id)
                 if not target_id or target_id not in self.active_tasks:
-                    await message.channel.send("[Info] No active task or agent execution running in this channel. (Use `/new` to reset context)")
+                    await message.channel.send(
+                        "[Info] No active task or agent execution running in this channel. (Use `/new` to reset context)"
+                    )
                     return
                 async_task = self.active_tasks.get(target_id)
                 if async_task and not async_task.done():
                     async_task.cancel()
-                    await message.channel.send(f"**Execution `{target_id}` stopped immediately by user.**")
+                    await message.channel.send(
+                        f"**Execution `{target_id}` stopped immediately by user.**"
+                    )
                 else:
-                    await message.channel.send(f"[Info] Execution `{target_id}` is already finished.")
+                    await message.channel.send(
+                        f"[Info] Execution `{target_id}` is already finished."
+                    )
                 return
 
             elif cmd_name == "interrupt":
@@ -697,8 +811,13 @@ class MaulnessBot(commands.Bot):
                     task = self.active_tasks.get(target_id)
                     if task and not task.done():
                         task.cancel()
-                target_profile = self.resolve_profile_for_channel(message.channel.id) or self.bound_profile
-                await message.channel.send(f"**Interrupted previous task to steer [{target_profile.name}]:**\n> {cmd_args[:200]}")
+                target_profile = (
+                    self.resolve_profile_for_channel(message.channel.id)
+                    or self.bound_profile
+                )
+                await message.channel.send(
+                    f"**Interrupted previous task to steer [{target_profile.name}]:**\n> {cmd_args[:200]}"
+                )
                 asyncio.create_task(
                     self._execute_chat_prompt(
                         channel=message.channel,
@@ -715,7 +834,11 @@ class MaulnessBot(commands.Bot):
                     await message.channel.send("Usage: `!queue <prompt>`")
                     return
                 target_id = self.channel_tasks.get(message.channel.id)
-                is_busy = bool(target_id and target_id in self.active_tasks and not self.active_tasks[target_id].done())
+                is_busy = bool(
+                    target_id
+                    and target_id in self.active_tasks
+                    and not self.active_tasks[target_id].done()
+                )
                 if is_busy:
                     q = self.channel_queues.setdefault(message.channel.id, [])
                     q.append(cmd_args)
@@ -723,8 +846,13 @@ class MaulnessBot(commands.Bot):
                         f"**Prompt Queued (#{len(q)})** — will auto-execute once current task completes:\n> {cmd_args[:200]}"
                     )
                 else:
-                    target_profile = self.resolve_profile_for_channel(message.channel.id) or self.bound_profile
-                    await message.channel.send(f"**Dispatching prompt directly [{target_profile.name}]:**\n> {cmd_args[:200]}")
+                    target_profile = (
+                        self.resolve_profile_for_channel(message.channel.id)
+                        or self.bound_profile
+                    )
+                    await message.channel.send(
+                        f"**Dispatching prompt directly [{target_profile.name}]:**\n> {cmd_args[:200]}"
+                    )
                     asyncio.create_task(
                         self._execute_chat_prompt(
                             channel=message.channel,
@@ -737,9 +865,14 @@ class MaulnessBot(commands.Bot):
                 return
 
             elif cmd_name == "context":
-                target_profile = self.resolve_profile_for_channel(message.channel.id) or self.bound_profile
+                target_profile = (
+                    self.resolve_profile_for_channel(message.channel.id)
+                    or self.bound_profile
+                )
                 conv_id = self.channel_conversations.get(message.channel.id)
-                workspace = self.profile_manager.resolve_workspace_for_profile(target_profile, config.workspace_root)
+                workspace = self.profile_manager.resolve_workspace_for_profile(
+                    target_profile, config.workspace_root
+                )
                 branch = get_git_branch(workspace)
                 diff_proc = subprocess.run(
                     ["git", "status", "--porcelain"],
@@ -747,31 +880,62 @@ class MaulnessBot(commands.Bot):
                     capture_output=True,
                     text=True,
                 )
-                dirty_count = len([l for l in diff_proc.stdout.splitlines() if l.strip()])
-                dirty_str = f"{dirty_count} uncommitted changes" if dirty_count > 0 else "clean"
+                dirty_count = len(
+                    [l for l in diff_proc.stdout.splitlines() if l.strip()]
+                )
+                dirty_str = (
+                    f"{dirty_count} uncommitted changes" if dirty_count > 0 else "clean"
+                )
 
                 embed = discord.Embed(title="Active Session Context", color=0x3B82F6)
-                embed.add_field(name="Profile", value=f"`{target_profile.name}` ({target_profile.provider})", inline=True)
+                embed.add_field(
+                    name="Profile",
+                    value=f"`{target_profile.name}` ({target_profile.provider})",
+                    inline=True,
+                )
                 target = target_profile.model or target_profile.command or "default"
-                embed.add_field(name="Model / Command", value=f"`{target}`", inline=True)
-                embed.add_field(name="Git Branch", value=f"`{branch}` ({dirty_str})", inline=True)
+                embed.add_field(
+                    name="Model / Command", value=f"`{target}`", inline=True
+                )
+                embed.add_field(
+                    name="Git Branch", value=f"`{branch}` ({dirty_str})", inline=True
+                )
                 embed.add_field(name="Workspace", value=f"`{workspace}`", inline=False)
                 embed.add_field(
                     name="Conversation UUID",
-                    value=f"`{conv_id}`" if conv_id else "*Fresh (starts on next message)*",
+                    value=f"`{conv_id}`"
+                    if conv_id
+                    else "*Fresh (starts on next message)*",
                     inline=False,
                 )
-                has_soul = bool(target_profile.soul_content and target_profile.soul_content.strip())
-                has_user = bool(target_profile.user_content and target_profile.user_content.strip())
-                has_mem = bool(target_profile.memory_content and target_profile.memory_content.strip())
+                has_soul = bool(
+                    target_profile.soul_content and target_profile.soul_content.strip()
+                )
+                has_user = bool(
+                    target_profile.user_content and target_profile.user_content.strip()
+                )
+                has_mem = bool(
+                    target_profile.memory_content
+                    and target_profile.memory_content.strip()
+                )
                 memory_status = (
                     f"• SOUL.md: {'Loaded' if has_soul else 'None'}\n"
                     f"• USER.md: {'Loaded' if has_user else 'None'}\n"
                     f"• MEMORY.md: {'Loaded' if has_mem else 'None'}"
                 )
-                embed.add_field(name="Memory & Identity", value=memory_status, inline=True)
-                yolo_status = "ENABLED" if self.channel_yolo.get(message.channel.id, False) else "DISABLED"
-                wt_status = "ENABLED" if self.channel_worktree.get(message.channel.id, False) else "DISABLED"
+                embed.add_field(
+                    name="Memory & Identity", value=memory_status, inline=True
+                )
+                yolo_status = (
+                    "ENABLED"
+                    if self.channel_yolo.get(message.channel.id, False)
+                    else "DISABLED"
+                )
+                wt_status = (
+                    "ENABLED"
+                    if self.channel_worktree.get(message.channel.id, False)
+                    else "DISABLED"
+                )
                 queue_count = len(self.channel_queues.get(message.channel.id, []))
                 embed.add_field(
                     name="Execution Modes",
@@ -784,8 +948,13 @@ class MaulnessBot(commands.Bot):
             elif cmd_name == "compact":
                 old_id = self.channel_conversations.pop(message.channel.id, None)
                 await self.storage.clear_channel_conversation(message.channel.id)
-                target_profile = self.resolve_profile_for_channel(message.channel.id) or self.bound_profile
-                workspace = self.profile_manager.resolve_workspace_for_profile(target_profile, config.workspace_root)
+                target_profile = (
+                    self.resolve_profile_for_channel(message.channel.id)
+                    or self.bound_profile
+                )
+                workspace = self.profile_manager.resolve_workspace_for_profile(
+                    target_profile, config.workspace_root
+                )
                 session_id = f"discord_{message.channel.id}_{int(time.time())}"
                 summary = (
                     f"Compacted Session Summary (Channel: {message.channel.id} - {time.strftime('%Y-%m-%d %H:%M:%S')})\n"
@@ -825,11 +994,18 @@ class MaulnessBot(commands.Bot):
                     )
                     return
                 profiles = self.profile_manager.list_profiles()
-                active_profile = self.resolve_profile_for_channel(message.channel.id) or self.bound_profile
+                active_profile = (
+                    self.resolve_profile_for_channel(message.channel.id)
+                    or self.bound_profile
+                )
                 embed = discord.Embed(title="Available Agent Profiles", color=0x9333EA)
                 for p in profiles:
                     target = p.model or p.command or "-"
-                    is_active = " [ACTIVE IN THIS CHANNEL]" if p.name == active_profile.name else ""
+                    is_active = (
+                        " [ACTIVE IN THIS CHANNEL]"
+                        if p.name == active_profile.name
+                        else ""
+                    )
                     embed.add_field(
                         name=f"`{p.name}` ({p.provider}){is_active}",
                         value=f"**Target:** `{target}`\n{p.description}",
@@ -842,7 +1018,11 @@ class MaulnessBot(commands.Bot):
                 current = self.channel_yolo.get(message.channel.id, False)
                 new_val = not current
                 self.channel_yolo[message.channel.id] = new_val
-                status = "ENABLED (Auto-approving mutating tool calls)" if new_val else "DISABLED (HITL confirmations active)"
+                status = (
+                    "ENABLED (Auto-approving mutating tool calls)"
+                    if new_val
+                    else "DISABLED (HITL confirmations active)"
+                )
                 color = 0xEF4444 if new_val else 0x10B981
                 embed = discord.Embed(
                     title=f"YOLO Mode: {status}",
@@ -856,7 +1036,11 @@ class MaulnessBot(commands.Bot):
                 current = self.channel_worktree.get(message.channel.id, False)
                 new_val = not current
                 self.channel_worktree[message.channel.id] = new_val
-                status = "ENABLED (Tasks execute in isolated git worktrees)" if new_val else "DISABLED (Tasks execute in direct repo workspace)"
+                status = (
+                    "ENABLED (Tasks execute in isolated git worktrees)"
+                    if new_val
+                    else "DISABLED (Tasks execute in direct repo workspace)"
+                )
                 color = 0x06B6D4 if new_val else 0x64748B
                 embed = discord.Embed(
                     title=f"Worktree Isolation: {status}",
@@ -871,17 +1055,42 @@ class MaulnessBot(commands.Bot):
                 m = int(uptime // 60)
                 s = int(uptime % 60)
                 est_tokens = self.total_chars_out // 4
-                target_profile = self.resolve_profile_for_channel(message.channel.id) or self.bound_profile
+                target_profile = (
+                    self.resolve_profile_for_channel(message.channel.id)
+                    or self.bound_profile
+                )
                 queue_len = len(self.channel_queues.get(message.channel.id, []))
 
                 embed = discord.Embed(title="Session Metrics & Usage", color=0x3B82F6)
-                embed.add_field(name="Prompts Executed", value=f"**{self.total_prompts}**", inline=True)
-                embed.add_field(name="Queued Prompts", value=f"**{queue_len}**", inline=True)
-                embed.add_field(name="Output Characters", value=f"**{self.total_chars_out:,}**", inline=True)
-                embed.add_field(name="Estimated Tokens", value=f"**~{est_tokens:,}**", inline=True)
-                embed.add_field(name="Active Profile", value=f"`{target_profile.name}` ({target_profile.provider})", inline=True)
-                embed.add_field(name="Session Uptime", value=f"**{m}m {s}s**", inline=True)
-                embed.add_field(name="Estimated Cost", value="**$0.00** (Local Antigravity ACP / Free Tier)", inline=False)
+                embed.add_field(
+                    name="Prompts Executed",
+                    value=f"**{self.total_prompts}**",
+                    inline=True,
+                )
+                embed.add_field(
+                    name="Queued Prompts", value=f"**{queue_len}**", inline=True
+                )
+                embed.add_field(
+                    name="Output Characters",
+                    value=f"**{self.total_chars_out:,}**",
+                    inline=True,
+                )
+                embed.add_field(
+                    name="Estimated Tokens", value=f"**~{est_tokens:,}**", inline=True
+                )
+                embed.add_field(
+                    name="Active Profile",
+                    value=f"`{target_profile.name}` ({target_profile.provider})",
+                    inline=True,
+                )
+                embed.add_field(
+                    name="Session Uptime", value=f"**{m}m {s}s**", inline=True
+                )
+                embed.add_field(
+                    name="Estimated Cost",
+                    value="**$0.00** (Local Antigravity ACP / Free Tier)",
+                    inline=False,
+                )
                 await message.channel.send(embed=embed)
                 return
 
@@ -897,7 +1106,11 @@ class MaulnessBot(commands.Bot):
 
         raw_prompt = message.content
         if self.user:
-            raw_prompt = raw_prompt.replace(f"<@{self.user.id}>", "").replace(f"<@!{self.user.id}>", "").strip()
+            raw_prompt = (
+                raw_prompt.replace(f"<@{self.user.id}>", "")
+                .replace(f"<@!{self.user.id}>", "")
+                .strip()
+            )
 
         if not raw_prompt:
             return
@@ -927,11 +1140,22 @@ class MaulnessBot(commands.Bot):
             new_tags = []
             for tag in thread.applied_tags:
                 # Keep repo or mode tags, replace status tag
-                if tag.name.lower() not in ("planning", "building", "review", "done", "failed", "suspended_afk", "suspended"):
+                if tag.name.lower() not in (
+                    "planning",
+                    "building",
+                    "review",
+                    "done",
+                    "failed",
+                    "suspended_afk",
+                    "suspended",
+                ):
                     new_tags.append(tag)
 
             target_tag = available.get(status_tag_name.lower())
-            if not target_tag and status_tag_name.lower() in ("suspended_afk", "suspended"):
+            if not target_tag and status_tag_name.lower() in (
+                "suspended_afk",
+                "suspended",
+            ):
                 target_tag = available.get("suspended") or available.get("failed")
             if target_tag and target_tag not in new_tags:
                 new_tags.append(target_tag)
@@ -941,7 +1165,9 @@ class MaulnessBot(commands.Bot):
             logger.debug("Could not update forum tags: %s", e)
 
     async def _register_slash_commands(self):
-        async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+        async def on_app_command_error(
+            interaction: discord.Interaction, error: app_commands.AppCommandError
+        ):
             logger.error(
                 "[%s] Slash command error in channel %s: %s",
                 self.profile_name,
@@ -960,7 +1186,10 @@ class MaulnessBot(commands.Bot):
 
         self.tree.on_error = on_app_command_error
 
-        @self.tree.command(name="new", description="Start a fresh conversation session in this channel/thread")
+        @self.tree.command(
+            name="new",
+            description="Start a fresh conversation session in this channel/thread",
+        )
         async def new_cmd(interaction: discord.Interaction):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
@@ -978,7 +1207,10 @@ class MaulnessBot(commands.Bot):
 
             self.channel_queues.pop(interaction.channel_id, None)
 
-            target_profile = self.resolve_profile_for_channel(interaction.channel_id) or self.bound_profile
+            target_profile = (
+                self.resolve_profile_for_channel(interaction.channel_id)
+                or self.bound_profile
+            )
             embed = discord.Embed(
                 title="Session Reset",
                 description=(
@@ -991,7 +1223,9 @@ class MaulnessBot(commands.Bot):
                 embed.set_footer(text=f"Previous session: {old_id}")
             await interaction.response.send_message(embed=embed)
 
-        async def _stop_task_handler(interaction: discord.Interaction, task_id: Optional[str] = None):
+        async def _stop_task_handler(
+            interaction: discord.Interaction, task_id: Optional[str] = None
+        ):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
@@ -1009,7 +1243,9 @@ class MaulnessBot(commands.Bot):
                 async_task.cancel()
                 if not target_id.startswith("chat_"):
                     try:
-                        await self.storage.update_task_status(target_id, TaskStatus.FAILED)
+                        await self.storage.update_task_status(
+                            target_id, TaskStatus.FAILED
+                        )
                     except Exception:
                         pass
                 if isinstance(interaction.channel, discord.Thread):
@@ -1019,16 +1255,26 @@ class MaulnessBot(commands.Bot):
                 )
             else:
                 await interaction.response.send_message(
-                    f"[Info] Execution `{target_id}` is already finished.", ephemeral=True
+                    f"[Info] Execution `{target_id}` is already finished.",
+                    ephemeral=True,
                 )
 
-        @self.tree.command(name="stop", description="Stop running task or prompt stream immediately")
+        @self.tree.command(
+            name="stop", description="Stop running task or prompt stream immediately"
+        )
         @app_commands.describe(task_id="Optional specific task ID to stop")
-        async def stop_cmd(interaction: discord.Interaction, task_id: Optional[str] = None):
+        async def stop_cmd(
+            interaction: discord.Interaction, task_id: Optional[str] = None
+        ):
             await _stop_task_handler(interaction, task_id)
 
-        @self.tree.command(name="interrupt", description="Cancel active task and steer agent immediately with new prompt")
-        @app_commands.describe(prompt="New instruction to steer the agent with immediately")
+        @self.tree.command(
+            name="interrupt",
+            description="Cancel active task and steer agent immediately with new prompt",
+        )
+        @app_commands.describe(
+            prompt="New instruction to steer the agent with immediately"
+        )
         async def interrupt_cmd(interaction: discord.Interaction, prompt: str):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
@@ -1040,7 +1286,10 @@ class MaulnessBot(commands.Bot):
                 if task and not task.done():
                     task.cancel()
 
-            target_profile = self.resolve_profile_for_channel(interaction.channel_id) or self.bound_profile
+            target_profile = (
+                self.resolve_profile_for_channel(interaction.channel_id)
+                or self.bound_profile
+            )
             await interaction.response.send_message(
                 f"**Interrupted previous task to steer [{target_profile.name}]:**\n> {prompt[:200]}"
             )
@@ -1054,7 +1303,10 @@ class MaulnessBot(commands.Bot):
                 )
             )
 
-        @self.tree.command(name="queue", description="Queue a prompt to execute after current task finishes")
+        @self.tree.command(
+            name="queue",
+            description="Queue a prompt to execute after current task finishes",
+        )
         @app_commands.describe(prompt="Instruction to queue for sequential execution")
         async def queue_cmd(interaction: discord.Interaction, prompt: str):
             if self.owner_id and interaction.user.id != self.owner_id:
@@ -1062,7 +1314,11 @@ class MaulnessBot(commands.Bot):
                 return
 
             target_id = self.channel_tasks.get(interaction.channel_id)
-            is_busy = bool(target_id and target_id in self.active_tasks and not self.active_tasks[target_id].done())
+            is_busy = bool(
+                target_id
+                and target_id in self.active_tasks
+                and not self.active_tasks[target_id].done()
+            )
 
             if is_busy:
                 q = self.channel_queues.setdefault(interaction.channel_id, [])
@@ -1071,8 +1327,13 @@ class MaulnessBot(commands.Bot):
                     f"**Prompt Queued (#{len(q)})** — will auto-execute once current task completes:\n> {prompt[:200]}"
                 )
             else:
-                target_profile = self.resolve_profile_for_channel(interaction.channel_id) or self.bound_profile
-                await interaction.response.send_message(f"**Dispatching prompt directly [{target_profile.name}]:**\n> {prompt[:200]}")
+                target_profile = (
+                    self.resolve_profile_for_channel(interaction.channel_id)
+                    or self.bound_profile
+                )
+                await interaction.response.send_message(
+                    f"**Dispatching prompt directly [{target_profile.name}]:**\n> {prompt[:200]}"
+                )
                 asyncio.create_task(
                     self._execute_chat_prompt(
                         channel=interaction.channel,
@@ -1083,15 +1344,23 @@ class MaulnessBot(commands.Bot):
                     )
                 )
 
-        @self.tree.command(name="context", description="Show active session context, profile, model, and memory")
+        @self.tree.command(
+            name="context",
+            description="Show active session context, profile, model, and memory",
+        )
         async def context_cmd(interaction: discord.Interaction):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
 
-            target_profile = self.resolve_profile_for_channel(interaction.channel_id) or self.bound_profile
+            target_profile = (
+                self.resolve_profile_for_channel(interaction.channel_id)
+                or self.bound_profile
+            )
             conv_id = self.channel_conversations.get(interaction.channel_id)
-            workspace = self.profile_manager.resolve_workspace_for_profile(target_profile, config.workspace_root)
+            workspace = self.profile_manager.resolve_workspace_for_profile(
+                target_profile, config.workspace_root
+            )
 
             branch = get_git_branch(workspace)
             diff_proc = subprocess.run(
@@ -1101,13 +1370,21 @@ class MaulnessBot(commands.Bot):
                 text=True,
             )
             dirty_count = len([l for l in diff_proc.stdout.splitlines() if l.strip()])
-            dirty_str = f"{dirty_count} uncommitted changes" if dirty_count > 0 else "clean"
+            dirty_str = (
+                f"{dirty_count} uncommitted changes" if dirty_count > 0 else "clean"
+            )
 
             embed = discord.Embed(title="Active Session Context", color=0x3B82F6)
-            embed.add_field(name="Profile", value=f"`{target_profile.name}` ({target_profile.provider})", inline=True)
+            embed.add_field(
+                name="Profile",
+                value=f"`{target_profile.name}` ({target_profile.provider})",
+                inline=True,
+            )
             target = target_profile.model or target_profile.command or "default"
             embed.add_field(name="Model / Command", value=f"`{target}`", inline=True)
-            embed.add_field(name="Git Branch", value=f"`{branch}` ({dirty_str})", inline=True)
+            embed.add_field(
+                name="Git Branch", value=f"`{branch}` ({dirty_str})", inline=True
+            )
             embed.add_field(name="Workspace", value=f"`{workspace}`", inline=False)
             embed.add_field(
                 name="Conversation UUID",
@@ -1115,9 +1392,15 @@ class MaulnessBot(commands.Bot):
                 inline=False,
             )
 
-            has_soul = bool(target_profile.soul_content and target_profile.soul_content.strip())
-            has_user = bool(target_profile.user_content and target_profile.user_content.strip())
-            has_mem = bool(target_profile.memory_content and target_profile.memory_content.strip())
+            has_soul = bool(
+                target_profile.soul_content and target_profile.soul_content.strip()
+            )
+            has_user = bool(
+                target_profile.user_content and target_profile.user_content.strip()
+            )
+            has_mem = bool(
+                target_profile.memory_content and target_profile.memory_content.strip()
+            )
 
             memory_status = (
                 f"• SOUL.md: {'Loaded' if has_soul else 'None'}\n"
@@ -1126,8 +1409,16 @@ class MaulnessBot(commands.Bot):
             )
             embed.add_field(name="Memory & Identity", value=memory_status, inline=True)
 
-            yolo_status = "ENABLED" if self.channel_yolo.get(interaction.channel_id, False) else "DISABLED"
-            wt_status = "ENABLED" if self.channel_worktree.get(interaction.channel_id, False) else "DISABLED"
+            yolo_status = (
+                "ENABLED"
+                if self.channel_yolo.get(interaction.channel_id, False)
+                else "DISABLED"
+            )
+            wt_status = (
+                "ENABLED"
+                if self.channel_worktree.get(interaction.channel_id, False)
+                else "DISABLED"
+            )
             queue_count = len(self.channel_queues.get(interaction.channel_id, []))
             embed.add_field(
                 name="Execution Modes",
@@ -1136,12 +1427,18 @@ class MaulnessBot(commands.Bot):
             )
 
             from maulness.core.providers.circuit import ProviderHealthRegistry
+
             circuit_text = ProviderHealthRegistry.get_instance().format_status_text()
-            embed.add_field(name="Circuit Breaker Status", value=circuit_text, inline=False)
+            embed.add_field(
+                name="Circuit Breaker Status", value=circuit_text, inline=False
+            )
 
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="compact", description="Compact conversation history into SQLite memory and reset context")
+        @self.tree.command(
+            name="compact",
+            description="Compact conversation history into SQLite memory and reset context",
+        )
         async def compact_cmd(interaction: discord.Interaction):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
@@ -1150,8 +1447,13 @@ class MaulnessBot(commands.Bot):
             old_id = self.channel_conversations.pop(interaction.channel_id, None)
             await self.storage.clear_channel_conversation(interaction.channel_id)
 
-            target_profile = self.resolve_profile_for_channel(interaction.channel_id) or self.bound_profile
-            workspace = self.profile_manager.resolve_workspace_for_profile(target_profile, config.workspace_root)
+            target_profile = (
+                self.resolve_profile_for_channel(interaction.channel_id)
+                or self.bound_profile
+            )
+            workspace = self.profile_manager.resolve_workspace_for_profile(
+                target_profile, config.workspace_root
+            )
 
             session_id = f"discord_{interaction.channel_id}_{int(time.time())}"
             summary = (
@@ -1181,7 +1483,9 @@ class MaulnessBot(commands.Bot):
                 embed.set_footer(text=f"Compacted session: {old_id}")
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="help", description="Show available commands and usage guide")
+        @self.tree.command(
+            name="help", description="Show available commands and usage guide"
+        )
         async def help_cmd(interaction: discord.Interaction):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
@@ -1190,7 +1494,9 @@ class MaulnessBot(commands.Bot):
             embed = self._create_help_embed()
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="thread", description="Create a new thread and start a session in it")
+        @self.tree.command(
+            name="thread", description="Create a new thread and start a session in it"
+        )
         @app_commands.describe(
             name="Thread name / topic",
             message="Optional first message or instruction to run in the thread",
@@ -1225,7 +1531,9 @@ class MaulnessBot(commands.Bot):
             elif isinstance(channel, discord.Thread):
                 created_thread = channel
             else:
-                await interaction.followup.send("Cannot create a thread in this channel type.", ephemeral=True)
+                await interaction.followup.send(
+                    "Cannot create a thread in this channel type.", ephemeral=True
+                )
                 return
 
             await interaction.followup.send(f"Created thread: {created_thread.mention}")
@@ -1233,7 +1541,10 @@ class MaulnessBot(commands.Bot):
             if message and created_thread:
                 channel_id = created_thread.id
                 parent_id = getattr(created_thread, "parent_id", None)
-                target_profile = self.resolve_profile_for_channel(channel_id, parent_id) or self.bound_profile
+                target_profile = (
+                    self.resolve_profile_for_channel(channel_id, parent_id)
+                    or self.bound_profile
+                )
                 await self._execute_chat_prompt(
                     channel=created_thread,
                     prompt=message,
@@ -1242,9 +1553,16 @@ class MaulnessBot(commands.Bot):
                     profile=target_profile,
                 )
 
-        @self.tree.command(name="profile", description="Inspect available profiles or switch active profile for this channel")
-        @app_commands.describe(name="Optional profile name to switch to (e.g. builder, planner, reviewer, default)")
-        async def profile_cmd(interaction: discord.Interaction, name: Optional[str] = None):
+        @self.tree.command(
+            name="profile",
+            description="Inspect available profiles or switch active profile for this channel",
+        )
+        @app_commands.describe(
+            name="Optional profile name to switch to (e.g. builder, planner, reviewer, default)"
+        )
+        async def profile_cmd(
+            interaction: discord.Interaction, name: Optional[str] = None
+        ):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
@@ -1260,11 +1578,16 @@ class MaulnessBot(commands.Bot):
                 return
 
             profiles = self.profile_manager.list_profiles()
-            active_profile = self.resolve_profile_for_channel(interaction.channel_id) or self.bound_profile
+            active_profile = (
+                self.resolve_profile_for_channel(interaction.channel_id)
+                or self.bound_profile
+            )
             embed = discord.Embed(title="Available Agent Profiles", color=0x9333EA)
             for p in profiles:
                 target = p.model or p.command or "-"
-                is_active = " [ACTIVE IN THIS CHANNEL]" if p.name == active_profile.name else ""
+                is_active = (
+                    " [ACTIVE IN THIS CHANNEL]" if p.name == active_profile.name else ""
+                )
                 embed.add_field(
                     name=f"`{p.name}` ({p.provider}){is_active}",
                     value=f"**Target:** `{target}`\n{p.description}",
@@ -1273,7 +1596,9 @@ class MaulnessBot(commands.Bot):
             await interaction.response.send_message(embed=embed)
 
         @profile_cmd.autocomplete("name")
-        async def profile_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        async def profile_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[app_commands.Choice[str]]:
             profiles = self.profile_manager.list_profiles()
             choices = []
             for p in profiles:
@@ -1293,7 +1618,10 @@ class MaulnessBot(commands.Bot):
             app_commands.Choice(name="gacha", value="gacha"),
         ]
 
-        @self.tree.command(name="pipeline", description="Execute a multi-stage Kanban pipeline (Planner -> Builder -> Reviewer)")
+        @self.tree.command(
+            name="pipeline",
+            description="Execute a multi-stage Kanban pipeline (Planner -> Builder -> Reviewer)",
+        )
         @app_commands.describe(
             prompt="Detailed task requirements and instructions",
             repo="Target repository name (optional, default inferred or maulness)",
@@ -1317,13 +1645,23 @@ class MaulnessBot(commands.Bot):
                 return
 
             effective_pipe_name = pipeline_name or "standard"
-            effective_worktree = self.channel_worktree.get(interaction.channel_id, False) if worktree is None else worktree
-            effective_yolo = self.channel_yolo.get(interaction.channel_id, False) if yolo is None else yolo
+            effective_worktree = (
+                self.channel_worktree.get(interaction.channel_id, False)
+                if worktree is None
+                else worktree
+            )
+            effective_yolo = (
+                self.channel_yolo.get(interaction.channel_id, False)
+                if yolo is None
+                else yolo
+            )
 
             # Infer repository if omitted
             effective_repo = repo
             if not effective_repo:
-                if isinstance(interaction.channel, discord.Thread) and isinstance(interaction.channel.parent, discord.ForumChannel):
+                if isinstance(interaction.channel, discord.Thread) and isinstance(
+                    interaction.channel.parent, discord.ForumChannel
+                ):
                     for tag in interaction.channel.applied_tags:
                         for choice in REPO_CHOICES:
                             if tag.name.lower() == choice.value.lower():
@@ -1337,8 +1675,14 @@ class MaulnessBot(commands.Bot):
             repo_prefix = f"[{effective_repo}] " if effective_repo else ""
 
             # Infer title if omitted
-            first_line = prompt.strip().splitlines()[0].strip() if prompt and prompt.strip() else "Pipeline Task"
-            effective_title = title.strip() if title and title.strip() else first_line[:70]
+            first_line = (
+                prompt.strip().splitlines()[0].strip()
+                if prompt and prompt.strip()
+                else "Pipeline Task"
+            )
+            effective_title = (
+                title.strip() if title and title.strip() else first_line[:70]
+            )
 
             await interaction.response.defer()
 
@@ -1346,14 +1690,21 @@ class MaulnessBot(commands.Bot):
             created_in_forum = False
             if not isinstance(interaction.channel, discord.Thread):
                 target_parent = None
-                if self.forum_channel_id and interaction.channel_id != self.forum_channel_id:
+                if (
+                    self.forum_channel_id
+                    and interaction.channel_id != self.forum_channel_id
+                ):
                     target_parent = self.get_channel(self.forum_channel_id)
                     if not target_parent:
                         try:
-                            target_parent = await self.fetch_channel(self.forum_channel_id)
+                            target_parent = await self.fetch_channel(
+                                self.forum_channel_id
+                            )
                         except Exception:
                             pass
-                if not target_parent and isinstance(interaction.channel, (discord.ForumChannel, discord.TextChannel)):
+                if not target_parent and isinstance(
+                    interaction.channel, (discord.ForumChannel, discord.TextChannel)
+                ):
                     target_parent = interaction.channel
 
                 if isinstance(target_parent, discord.ForumChannel):
@@ -1386,11 +1737,17 @@ class MaulnessBot(commands.Bot):
                     )
 
             if not created_in_forum:
-                status_msg = await interaction.followup.send(f"**Launching Pipeline `{effective_pipe_name}` for `{effective_title}`{repo_desc}...**")
+                status_msg = await interaction.followup.send(
+                    f"**Launching Pipeline `{effective_pipe_name}` for `{effective_title}`{repo_desc}...**"
+                )
             else:
-                status_msg = await exec_channel.send(f"**Launching Pipeline `{effective_pipe_name}` for `{effective_title}`{repo_desc}...**")
+                status_msg = await exec_channel.send(
+                    f"**Launching Pipeline `{effective_pipe_name}` for `{effective_title}`{repo_desc}...**"
+                )
 
-            thread_id = exec_channel.id if isinstance(exec_channel, discord.Thread) else None
+            thread_id = (
+                exec_channel.id if isinstance(exec_channel, discord.Thread) else None
+            )
             if isinstance(exec_channel, discord.Thread):
                 await self._update_forum_tags(exec_channel, "Planning")
 
@@ -1418,9 +1775,17 @@ class MaulnessBot(commands.Bot):
                     color=color,
                 )
                 if stage.use_worktree or effective_worktree:
-                    embed.add_field(name="Worktree Isolation", value="Active (isolated branch)", inline=True)
+                    embed.add_field(
+                        name="Worktree Isolation",
+                        value="Active (isolated branch)",
+                        inline=True,
+                    )
                 if stage.verification_gate:
-                    embed.add_field(name="Verification Gate", value=f"`{stage.verification_gate.command}`", inline=True)
+                    embed.add_field(
+                        name="Verification Gate",
+                        value=f"`{stage.verification_gate.command}`",
+                        inline=True,
+                    )
                 await exec_channel.send(embed=embed)
 
             async def on_stage_finish(stage: PipelineStage, stage_output: str):
@@ -1436,7 +1801,9 @@ class MaulnessBot(commands.Bot):
                         snippet = clean_text
                     embed.add_field(
                         name="Stage Output Excerpt",
-                        value=f"```markdown\n{snippet}\n```" if "```" not in snippet else snippet,
+                        value=f"```markdown\n{snippet}\n```"
+                        if "```" not in snippet
+                        else snippet,
                         inline=False,
                     )
                 await exec_channel.send(embed=embed)
@@ -1480,63 +1847,120 @@ class MaulnessBot(commands.Bot):
                     task_id = task_record.id
 
                     if isinstance(exec_channel, discord.Thread):
-                        status_tag = "Done" if task_record.status == TaskStatus.DONE else "Failed"
+                        if task_record.status == TaskStatus.SUSPENDED_AFK:
+                            status_tag = "Suspended"
+                        elif task_record.status == TaskStatus.DONE:
+                            status_tag = "Done"
+                        else:
+                            status_tag = "Failed"
                         await self._update_forum_tags(exec_channel, status_tag)
 
                     duration_s = int(time.time() - start_time)
                     mins, secs = divmod(duration_s, 60)
                     time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
 
-                    status_color = 0x10B981 if task_record.status == TaskStatus.DONE else 0xEF4444
-                    status_text = "Completed Successfully" if task_record.status == TaskStatus.DONE else "Failed"
+                    if task_record.status == TaskStatus.SUSPENDED_AFK:
+                        status_color = 0xF59E0B  # Amber
+                        status_text = "Parked in SUSPENDED_AFK (Budget Limit Reached)"
+                    elif task_record.status == TaskStatus.DONE:
+                        status_color = 0x10B981
+                        status_text = "Completed Successfully"
+                    else:
+                        status_color = 0xEF4444
+                        status_text = "Failed"
 
                     summary_embed = discord.Embed(
                         title=f"Pipeline {status_text}: {effective_title}",
                         color=status_color,
                     )
-                    summary_embed.add_field(name="Repository", value=f"`{repo_label}`", inline=True)
-                    summary_embed.add_field(name="Task ID", value=f"`{task_record.id}`", inline=True)
-                    summary_embed.add_field(name="Duration", value=time_str, inline=True)
-                    summary_embed.add_field(name="Pipeline", value=f"`{effective_pipe_name}`", inline=True)
-                    summary_embed.add_field(name="Final Status", value=f"**`{task_record.status.value.upper()}`**", inline=True)
+                    summary_embed.add_field(
+                        name="Repository", value=f"`{repo_label}`", inline=True
+                    )
+                    summary_embed.add_field(
+                        name="Task ID", value=f"`{task_record.id}`", inline=True
+                    )
+                    summary_embed.add_field(
+                        name="Duration", value=time_str, inline=True
+                    )
+                    summary_embed.add_field(
+                        name="Pipeline", value=f"`{effective_pipe_name}`", inline=True
+                    )
+                    summary_embed.add_field(
+                        name="Final Status",
+                        value=f"**`{task_record.status.value.upper()}`**",
+                        inline=True,
+                    )
 
                     # Extract reviewer scorecard and worktree branch from agent_events if available
                     try:
-                        events = await self.storage.get_agent_events(task_record.id, limit=50)
+                        events = await self.storage.get_agent_events(
+                            task_record.id, limit=50
+                        )
                         branch_event = next(
-                            (e for e in reversed(events) if e.get("event_type") == "worktree_branch"),
+                            (
+                                e
+                                for e in reversed(events)
+                                if e.get("event_type") == "worktree_branch"
+                            ),
                             None,
                         )
                         if branch_event:
                             bp = branch_event.get("event_payload")
-                            branch_name = bp.get("branch") if isinstance(bp, dict) else str(bp)
+                            branch_name = (
+                                bp.get("branch") if isinstance(bp, dict) else str(bp)
+                            )
                             if branch_name:
-                                summary_embed.add_field(name="Git Branch", value=f"`{branch_name}`", inline=True)
                                 summary_embed.add_field(
-                                    name="Inspect / Merge",
-                                    value=f"`git checkout {branch_name}` or `git merge {branch_name}`",
-                                    inline=False,
+                                    name="Git Branch",
+                                    value=f"`{branch_name}`",
+                                    inline=True,
                                 )
 
                         review_event = next(
-                            (e for e in reversed(events) if e.get("stage") == "review" and e.get("event_type") == "final_response"),
+                            (
+                                e
+                                for e in reversed(events)
+                                if e.get("stage") == "review"
+                                and e.get("event_type") == "final_response"
+                            ),
                             None,
                         )
                         if review_event:
                             p = review_event.get("event_payload")
-                            audit_text = p.get("content", "") if isinstance(p, dict) else str(p)
+                            audit_text = (
+                                p.get("content", "") if isinstance(p, dict) else str(p)
+                            )
                             if audit_text:
                                 clean_audit = format_discord_markdown(audit_text)
-                                summary_embed.add_field(name="Review Verdict", value=clean_audit[:1000], inline=False)
+                                summary_embed.add_field(
+                                    name="Review Verdict",
+                                    value=clean_audit[:1000],
+                                    inline=False,
+                                )
                     except Exception as ev_err:
-                        logger.debug("Could not attach review/branch events to summary embed: %s", ev_err)
+                        logger.debug(
+                            "Could not attach review/branch events to summary embed: %s",
+                            ev_err,
+                        )
 
-                    await exec_channel.send(embed=summary_embed)
+                    view = (
+                        SuspendedAfkView(task_record.id)
+                        if task_record.status == TaskStatus.SUSPENDED_AFK
+                        else None
+                    )
+                    await exec_channel.send(embed=summary_embed, view=view)
                 except asyncio.CancelledError:
-                    logger.info("Pipeline %s cancelled via /stop", task_id or effective_title)
+                    logger.info(
+                        "Pipeline %s cancelled via /stop", task_id or effective_title
+                    )
                     await exec_channel.send("**Pipeline was stopped by user.**")
                 except Exception as e:
-                    logger.exception("[%s] Pipeline execution failed for '%s': %s", self.profile_name, effective_title, e)
+                    logger.exception(
+                        "[%s] Pipeline execution failed for '%s': %s",
+                        self.profile_name,
+                        effective_title,
+                        e,
+                    )
                     await exec_channel.send(
                         f"**Pipeline Execution Error:** `{type(e).__name__}: {str(e)[:400]}`"
                     )
@@ -1550,9 +1974,16 @@ class MaulnessBot(commands.Bot):
             self.channel_tasks[exec_channel.id] = f"pipeline_{exec_channel.id}"
             self.active_tasks[f"pipeline_{exec_channel.id}"] = bg_task
 
-        @self.tree.command(name="yolo", description="Toggle or set YOLO mode (auto-approves mutating tool actions)")
-        @app_commands.describe(enabled="Optional explicit toggle (True to enable, False to disable)")
-        async def yolo_cmd(interaction: discord.Interaction, enabled: Optional[bool] = None):
+        @self.tree.command(
+            name="yolo",
+            description="Toggle or set YOLO mode (auto-approves mutating tool actions)",
+        )
+        @app_commands.describe(
+            enabled="Optional explicit toggle (True to enable, False to disable)"
+        )
+        async def yolo_cmd(
+            interaction: discord.Interaction, enabled: Optional[bool] = None
+        ):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
@@ -1561,7 +1992,11 @@ class MaulnessBot(commands.Bot):
             new_val = not current if enabled is None else enabled
             self.channel_yolo[interaction.channel_id] = new_val
 
-            status = "ENABLED (Auto-approving mutating tool calls)" if new_val else "DISABLED (HITL confirmations active)"
+            status = (
+                "ENABLED (Auto-approving mutating tool calls)"
+                if new_val
+                else "DISABLED (HITL confirmations active)"
+            )
             color = 0xEF4444 if new_val else 0x10B981
             embed = discord.Embed(
                 title=f"YOLO Mode: {status}",
@@ -1570,9 +2005,16 @@ class MaulnessBot(commands.Bot):
             )
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="worktree", description="Toggle or set Git worktree isolation for tasks in this channel")
-        @app_commands.describe(enabled="Optional explicit toggle (True to enable, False to disable)")
-        async def worktree_cmd(interaction: discord.Interaction, enabled: Optional[bool] = None):
+        @self.tree.command(
+            name="worktree",
+            description="Toggle or set Git worktree isolation for tasks in this channel",
+        )
+        @app_commands.describe(
+            enabled="Optional explicit toggle (True to enable, False to disable)"
+        )
+        async def worktree_cmd(
+            interaction: discord.Interaction, enabled: Optional[bool] = None
+        ):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
@@ -1581,7 +2023,11 @@ class MaulnessBot(commands.Bot):
             new_val = not current if enabled is None else enabled
             self.channel_worktree[interaction.channel_id] = new_val
 
-            status = "ENABLED (Tasks execute in isolated git worktrees)" if new_val else "DISABLED (Tasks execute in direct repo workspace)"
+            status = (
+                "ENABLED (Tasks execute in isolated git worktrees)"
+                if new_val
+                else "DISABLED (Tasks execute in direct repo workspace)"
+            )
             color = 0x06B6D4 if new_val else 0x64748B
             embed = discord.Embed(
                 title=f"Worktree Isolation: {status}",
@@ -1590,7 +2036,10 @@ class MaulnessBot(commands.Bot):
             )
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="usage", description="Display session token metrics, uptime, and cost estimation")
+        @self.tree.command(
+            name="usage",
+            description="Display session token metrics, uptime, and cost estimation",
+        )
         async def usage_cmd(interaction: discord.Interaction):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
@@ -1600,34 +2049,68 @@ class MaulnessBot(commands.Bot):
             m = int(uptime // 60)
             s = int(uptime % 60)
             est_tokens = self.total_chars_out // 4
-            target_profile = self.resolve_profile_for_channel(interaction.channel_id) or self.bound_profile
+            target_profile = (
+                self.resolve_profile_for_channel(interaction.channel_id)
+                or self.bound_profile
+            )
             queue_len = len(self.channel_queues.get(interaction.channel_id, []))
 
             embed = discord.Embed(title="Session Metrics & Usage", color=0x3B82F6)
-            embed.add_field(name="Prompts Executed", value=f"**{self.total_prompts}**", inline=True)
-            embed.add_field(name="Queued Prompts", value=f"**{queue_len}**", inline=True)
-            embed.add_field(name="Output Characters", value=f"**{self.total_chars_out:,}**", inline=True)
-            embed.add_field(name="Estimated Tokens", value=f"**~{est_tokens:,}**", inline=True)
-            embed.add_field(name="Active Profile", value=f"`{target_profile.name}` ({target_profile.provider})", inline=True)
+            embed.add_field(
+                name="Prompts Executed", value=f"**{self.total_prompts}**", inline=True
+            )
+            embed.add_field(
+                name="Queued Prompts", value=f"**{queue_len}**", inline=True
+            )
+            embed.add_field(
+                name="Output Characters",
+                value=f"**{self.total_chars_out:,}**",
+                inline=True,
+            )
+            embed.add_field(
+                name="Estimated Tokens", value=f"**~{est_tokens:,}**", inline=True
+            )
+            embed.add_field(
+                name="Active Profile",
+                value=f"`{target_profile.name}` ({target_profile.provider})",
+                inline=True,
+            )
             embed.add_field(name="Session Uptime", value=f"**{m}m {s}s**", inline=True)
-            embed.add_field(name="Estimated Cost", value="**$0.00** (Local Antigravity ACP / Free Tier)", inline=False)
+            embed.add_field(
+                name="Estimated Cost",
+                value="**$0.00** (Local Antigravity ACP / Free Tier)",
+                inline=False,
+            )
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(name="providers", description="Inspect provider circuit breaker health and cooldowns, or reset circuits")
+        @self.tree.command(
+            name="providers",
+            description="Inspect provider circuit breaker health and cooldowns, or reset circuits",
+        )
         @app_commands.describe(action="Optional action: 'status' (default) or 'reset'")
-        async def providers_cmd(interaction: discord.Interaction, action: Optional[str] = "status"):
+        async def providers_cmd(
+            interaction: discord.Interaction, action: Optional[str] = "status"
+        ):
             if self.owner_id and interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Unauthorized", ephemeral=True)
                 return
 
             from maulness.core.providers.circuit import ProviderHealthRegistry
+
             registry = ProviderHealthRegistry.get_instance()
 
             if action and action.lower() == "reset":
                 registry.reset_all()
-                await interaction.response.send_message("All provider circuit breakers have been reset to CLOSED (HEALTHY).", ephemeral=False)
+                await interaction.response.send_message(
+                    "All provider circuit breakers have been reset to CLOSED (HEALTHY).",
+                    ephemeral=False,
+                )
                 return
 
             summary_text = registry.format_status_text()
-            embed = discord.Embed(title="Provider Circuit Breaker Registry", description=summary_text, color=0x10B981)
+            embed = discord.Embed(
+                title="Provider Circuit Breaker Registry",
+                description=summary_text,
+                color=0x10B981,
+            )
             await interaction.response.send_message(embed=embed)

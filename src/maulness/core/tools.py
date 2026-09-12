@@ -1170,7 +1170,26 @@ async def _execute_tool_action(
         manager = SkillManager()
         return manager.get_skill_instruction(skill_name, workspace_path=cwd)
 
+    # 14. External Model Context Protocol (MCP) tool proxy
+    from maulness.core.mcp_client import MCPClientManager
+
+    mcp_mgr = MCPClientManager.get_instance()
+    if mcp_mgr.is_mcp_tool(name):
+        return await mcp_mgr.call_tool(name, args, workspace_path=cwd)
+
     return f"Error: Unknown tool '{name}'."
+
+
+async def get_effective_tool_definitions(
+    workspace_path: Optional[Path] = None,
+) -> list[dict[str, Any]]:
+    """Return all effective tool definitions, including dynamically discovered MCP server tools."""
+    from maulness.core.mcp_client import MCPClientManager
+
+    mcp_defs = await MCPClientManager.get_instance().get_tool_definitions(
+        workspace_path
+    )
+    return list(TOOL_DEFINITIONS) + mcp_defs
 
 
 async def _execute_web_search(query: str, max_results: int = 5) -> str:
