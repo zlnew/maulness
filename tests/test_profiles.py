@@ -1,3 +1,8 @@
+import os
+from pathlib import Path
+from unittest.mock import patch
+import pytest
+
 from maulness.core.profiles import ProfileManager, Profile
 
 
@@ -210,3 +215,155 @@ def test_profile_inherits_root_env(tmp_path, monkeypatch):
     profile = pm.get_profile("planner_test")
 
     assert profile.get_api_key() == "shared-google-key-123"
+
+def test_profile_properties_and_coercion():
+    from maulness.core.profiles import AgentConfig, ParameterConfig, ExecutionConfig
+
+    # Line 48: _coerce_string
+    mc = AgentConfig.model_validate("gemini-2.5-pro")
+    assert mc.model == "gemini-2.5-pro"
+
+    # Lines 181, 185, 197, 214: properties
+    p = Profile(
+        identity={"name": "prop_agent"},
+        agent={"provider": "gemini"},
+        parameters={"top_p": 0.95, "top_k": 40},
+        execution={"worktree": True, "sandbox": "bwrap"},
+    )
+    assert p.top_p == 0.95
+    assert p.top_k == 40
+    assert p.worktree is True
+    assert p.sandbox_mode == "bwrap"
+
+
+def test_profile_api_key_fallbacks_and_unknown_provider():
+    # Line 254: opencode / openai_compatible
+    p_opencode = Profile(
+        identity={"name": "coder"},
+        agent={"provider": "opencode"},
+        env_vars={"OPENCODE_API_KEY": "open-key-123"},
+    )
+    assert p_opencode.get_api_key() == "open-key-123"
+
+    # Line 264: unknown provider without key returns None
+    p_unknown = Profile(
+        identity={"name": "unknown"},
+        agent={"provider": "custom_unsupported"},
+    )
+    assert p_unknown.get_api_key() is None
+
+
+def test_profile_manager_edge_cases_and_default_env(tmp_path, monkeypatch):
+    from pathlib import Path
+    from maulness.config import config
+
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    default_dir = cfg_dir / "profiles" / "default"
+    default_dir.mkdir(parents=True)
+    (default_dir / ".env").write_text("DEFAULT_VAR=loaded_from_default\n", encoding="utf-8")
+    monkeypatch.setattr(config, "config_dir", cfg_dir)
+
+    pm = ProfileManager(profiles_dir=cfg_dir / "profiles")
+
+    # Lines 370-372: fallback profile default env
+    fb = pm.get_profile("new_fallback_agent")
+    assert fb.env_vars.get("DEFAULT_VAR") == "loaded_from_default"
+
+    # Line 390: resolve_workspace_for_profile fallback to resolve_repo_path
+    p_ws = Profile(
+        identity={"name": "ws_agent"},
+        agent={"provider": "gemini"},
+        execution={"workspace": "expense-tracker"},
+    )
+    monkeypatch.setattr(config, "resolve_repo_path", lambda target: Path("/resolved") / target)
+    resolved = pm.resolve_workspace_for_profile(p_ws, tmp_path)
+    assert resolved == Path("/resolved/expense-tracker")
+
+    # Line 397: _discover_in_dir on nonexistent
+    assert pm._discover_in_dir(tmp_path / "nonexistent") == []
+
+    # Line 413: _load_directory_profile non-dict config
+    bad_dir = tmp_path / "profiles" / "bad_profile"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "config.yaml").write_text("just a string\n", encoding="utf-8")
+    assert pm._load_directory_profile(bad_dir, bad_dir / "config.yaml") is None
+
+    # Lines 446-448: _load_directory_profile default_env
+    good_dir = tmp_path / "profiles" / "good_profile"
+    good_dir.mkdir(parents=True)
+    (good_dir / "config.yaml").write_text("agent:\n  provider: gemini\n", encoding="utf-8")
+    p_good = pm._load_directory_profile(good_dir, good_dir / "config.yaml")
+    assert p_good.env_vars.get("DEFAULT_VAR") == "loaded_from_default"
+
+    # Lines 467-469: _load_directory_profile exception
+    err_dir = tmp_path / "profiles" / "err_profile"
+    err_dir.mkdir(parents=True)
+    (err_dir / "config.yaml").write_text(": invalid yaml [\n", encoding="utf-8")
+    assert pm._load_directory_profile(err_dir, err_dir / "config.yaml") is None
+
+def test_profile_all_properties_and_vertex_coverage(tmp_path: Path):
+    from maulness.core.profiles import VertexConfig
+
+    # 1. Invalid ACP whitespace command (line 108)
+    with pytest.raises(ValueError, match="has no 'command'"):
+        Profile(identity={"name": "bad_acp"}, agent={"provider": "acp", "command": "   "})
+
+    # 2. Vertex properties (lines 162, 166, 170)
+    p_vert = Profile(
+        identity={"name": "vert_agent", "description": "A vertex agent"},
+        agent={
+            "provider": "gemini",
+            "vertex": {"enabled": True, "project": "my-gcp-project", "location": "europe-west1"},
+        },
+        execution={"max_tool_turns": 15, "max_relays": 3},
+    )
+    assert p_vert.description == "A vertex agent"
+    assert p_vert.vertex is True
+    assert p_vert.project == "my-gcp-project"
+    assert p_vert.location == "europe-west1"
+    assert p_vert.max_tool_turns == 15
+    assert p_vert.max_relays == 3
+
+    # 3. Default sandbox_mode, max_tool_turns, max_relays when None (lines 204, 210, 216)
+    from maulness.config import config
+    p_def = Profile(identity={"name": "def_agent"}, agent={"provider": "gemini"})
+    assert p_def.sandbox_mode == "auto"
+    assert p_def.max_tool_turns == config.max_tool_turns
+    assert p_def.max_relays == config.max_relays
+
+    # 4. get_api_key from custom api_key_env and system env (lines 239, 251)
+    p_custom_env = Profile(
+        identity={"name": "custom_env_agent"},
+        agent={"provider": "anthropic", "api_key_env": "MY_SPECIAL_ANTHROPIC_KEY"},
+    )
+    with patch.dict(os.environ, {"MY_SPECIAL_ANTHROPIC_KEY": "special-secret-key-123"}):
+        assert p_custom_env.get_api_key() == "special-secret-key-123"
+
+    # 5. Generic fallback for openai_compatible (line 255)
+    p_comp = Profile(identity={"name": "comp"}, agent={"provider": "openai_compatible"})
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "openai-generic-key"}):
+        assert p_comp.get_api_key() == "openai-generic-key"
+
+    # 6. Generic fallback for gemini (line 257) via config.gemini_api_key
+    p_gem = Profile(identity={"name": "gem"}, agent={"provider": "gemini"})
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch.object(config, "gemini_api_key", "cfg-gemini-key"),
+    ):
+        assert p_gem.get_api_key() == "cfg-gemini-key"
+
+    # 7. get_rule_engine (lines 269-271)
+    engine = p_vert.get_rule_engine()
+    assert engine is not None
+
+    # 8. resolve_workspace_for_profile relative folder exists (lines 389, 391)
+    pm = ProfileManager(profiles_dir=tmp_path)
+    sub_ws = tmp_path / "subfolder"
+    sub_ws.mkdir()
+    p_sub = Profile(identity={"name": "sub"}, agent={"provider": "gemini"}, execution={"workspace": "subfolder"})
+    assert pm.resolve_workspace_for_profile(p_sub, tmp_path) == sub_ws
+
+    # workspace is inherit or None
+    p_inherit = Profile(identity={"name": "inh"}, agent={"provider": "gemini"}, execution={"workspace": "inherit"})
+    assert pm.resolve_workspace_for_profile(p_inherit, tmp_path) == tmp_path

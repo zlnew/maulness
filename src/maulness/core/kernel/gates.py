@@ -180,7 +180,7 @@ class SemanticErrorNormalizer:
         # Also search for '___ test_name ___' blocks if short summary wasn't present
         if not failures:
             block_matches = re.findall(
-                r"_{3,}\s+([^\s_]+)\s+_{3,}\n(.*?)(?=\n_{3,}|\n={3,}|\Z)",
+                r"_{3,}\s+(.*?)\s+_{3,}\n(.*?)(?=\n_{3,}|\n={3,}|\Z)",
                 combined,
                 re.DOTALL,
             )

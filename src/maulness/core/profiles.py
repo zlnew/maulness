@@ -59,6 +59,7 @@ class ParameterConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     workspace: Optional[str] = None
     yolo: bool = False
+    worktree: bool = False
     rate_limit_per_minute: int = 20
     system_prompt_mode: str = "prepend"
     default_policy: PolicyAction = PolicyAction.ASK

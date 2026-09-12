@@ -2,6 +2,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Optional
 import typer
@@ -602,7 +603,7 @@ def daemon_restart():
 
 @daemon_app.command("logs")
 def daemon_logs(
-    follow: bool = typer.Option(True, "-f", "--follow", help="Follow log output in real time"),
+    follow: bool = typer.Option(True, "--follow/--no-follow", "-f", help="Follow log output in real time"),
     lines: int = typer.Option(50, "-n", "--lines", help="Number of lines to show"),
 ):
     """View daemon logs via journalctl."""

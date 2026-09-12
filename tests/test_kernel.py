@@ -300,3 +300,299 @@ async def test_durable_agent_kernel_crash_resumption_mid_session(temp_storage: S
     assert "echo survived_crash" in final_result
     assert "Resumed after crash and finished." in final_result
 
+
+def test_parse_session_scope_variants():
+    from maulness.core.kernel.loop import parse_session_scope
+
+    assert parse_session_scope("single") == ("single", "default")
+    assert parse_session_scope("custom_session_id") == ("custom", "session_id")
+    assert parse_session_scope("task_123_planning") == ("task_123", "planning")
+
+
+def test_compact_in_flight_tool_messages_invalid_args():
+    from maulness.core.kernel.loop import compact_in_flight_tool_messages
+
+    msgs = [
+        {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "run_command", "arguments": "invalid json"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "x" * 250},
+        {"role": "tool", "tool_call_id": "c2", "content": "y" * 250},
+        {"role": "tool", "tool_call_id": "c3", "content": "z" * 250},
+        {"role": "tool", "tool_call_id": "c4", "content": "w" * 250},
+    ]
+
+    compact_in_flight_tool_messages(msgs, keep_recent=2)
+    # First 2 tool messages should be compacted
+    assert "[Tool result for " in msgs[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_kernel_callbacks_and_tool_events(temp_storage: StorageManager, tmp_path: Path):
+    from maulness.core.kernel.loop import DurableAgentKernel
+
+    profile = Profile(identity={"name": "test_agent"}, agent={"provider": "gemini"})
+    kernel = DurableAgentKernel(profile=profile, storage=temp_storage)
+
+    conv_id = "conv_test_callbacks"
+    # Pre-populate conversation history
+    await temp_storage.add_conversation_message(conv_id, "user", "Prior question")
+    await temp_storage.add_conversation_message(conv_id, "assistant", "Prior answer")
+
+    inits = []
+    tool_calls = []
+
+    async def on_init(cid):
+        inits.append(cid)
+
+    async def on_tool_call(ev):
+        tool_calls.append(ev)
+
+    async def turn_generator(messages, tools, session_id, **kwargs) -> ModelTurnOutput:
+        if len(tool_calls) == 0:
+            return ModelTurnOutput(
+                tool_calls=[{
+                    "id": "c1",
+                    "name": "run_command",
+                    "arguments": "bad json string",
+                }]
+            )
+        return ModelTurnOutput(content="")  # empty content to trigger fallback note
+
+    result = await kernel.run(
+        turn_generator_fn=turn_generator,
+        session_id="task_cb_test",
+        prompt="Test callbacks",
+        workspace_path=tmp_path,
+        conversation_id=conv_id,
+        on_init=on_init,
+        on_tool_call=on_tool_call,
+    )
+
+    assert len(inits) == 1
+    assert len(tool_calls) == 1
+    assert tool_calls[0].tool_name == "run_command"
+    assert tool_calls[0].args == {"raw": "bad json string"}
+    assert "Agent completed tool executions but did not produce a final textual summary" in result
+
+
+@pytest.mark.asyncio
+async def test_kernel_empty_response_raises(temp_storage: StorageManager, tmp_path: Path):
+    profile = Profile(identity={"name": "empty_agent"}, agent={"provider": "gemini"})
+    kernel = DurableAgentKernel(profile=profile, storage=temp_storage)
+
+    async def empty_generator(messages, tools, session_id, **kwargs) -> ModelTurnOutput:
+        return ModelTurnOutput(content="[STATUS: COMPLETE]")
+
+    with pytest.raises(RuntimeError, match="returned an empty response"):
+        await kernel.run(
+            turn_generator_fn=empty_generator,
+            session_id="task_empty_test",
+            prompt="Nothing",
+            workspace_path=tmp_path,
+        )
+
+
+
+def test_canonical_json_circular_fallback():
+    d = {}
+    d["self"] = d
+    res = canonical_json(d)
+    assert "self" in res
+
+
+@pytest.mark.asyncio
+async def test_step_runner_synchronous_returning_awaitable(temp_storage):
+    runner = DurableStepRunner(storage=temp_storage)
+
+    def sync_returning_coro():
+        async def _inner():
+            return "sync_coro_val"
+        return _inner()
+
+    res = await runner.execute_step(
+        task_id="t_sync",
+        stage="s",
+        step_index=1,
+        action_type=KernelEventType.MODEL_TURN,
+        action_fn=sync_returning_coro,
+    )
+    assert res.value == "sync_coro_val"
+
+
+@pytest.mark.asyncio
+async def test_kernel_replay_from_cache_callbacks(temp_storage, tmp_path):
+    profile = Profile(identity={"name": "builder"}, agent={"provider": "gemini"})
+    kernel = DurableAgentKernel(profile=profile, storage=temp_storage)
+
+    async def gen(messages, tools, session_id, **kwargs):
+        return ModelTurnOutput(content="Cached turn content", thought="Cached thought")
+
+    # 1. Run forward execution
+    await kernel.run(
+        turn_generator_fn=gen,
+        session_id="t_cache_cb",
+        prompt="hello",
+        workspace_path=tmp_path,
+    )
+
+    # 2. Run again with on_thought and on_message to exercise cache replay (lines 206, 208)
+    replayed_msgs = []
+    replayed_thoughts = []
+    async def on_msg(ev):
+        replayed_msgs.append(ev.delta)
+    async def on_th(ev):
+        replayed_thoughts.append(ev.delta)
+
+    await kernel.run(
+        turn_generator_fn=gen,
+        session_id="t_cache_cb",
+        prompt="hello",
+        workspace_path=tmp_path,
+        on_thought=on_th,
+        on_message=on_msg,
+    )
+    assert "Cached turn content" in replayed_msgs
+    assert "Cached thought" in replayed_thoughts
+
+
+@pytest.mark.asyncio
+async def test_kernel_loop_intervention_and_breadcrumb_cb(temp_storage, tmp_path):
+    profile = Profile(identity={"name": "builder"}, agent={"provider": "gemini"})
+    kernel = DurableAgentKernel(profile=profile, storage=temp_storage)
+
+    step = 0
+    async def loop_gen(messages, tools, session_id, **kwargs):
+        nonlocal step
+        step += 1
+        if step == 1:
+            return ModelTurnOutput(
+                content="Running command",
+                tool_calls=[{"id": "c1", "name": "run_command", "arguments": {"command": "pwd"}}],
+            )
+        return ModelTurnOutput(content="Loop finished summary")
+
+    msg_deltas = []
+    async def on_msg(ev):
+        msg_deltas.append(ev.delta)
+
+    # Mock tool execution to return a loop intervention string
+    from unittest.mock import patch
+    with patch("maulness.core.kernel.loop.execute_tool_call", return_value="[LOOP INTERVENTION: Repetitive tool call detected]"):
+        res = await kernel.run(
+            turn_generator_fn=loop_gen,
+            session_id="t_loop_int",
+            prompt="test loop",
+            workspace_path=tmp_path,
+            on_message=on_msg,
+        )
+        assert "Loop finished summary" in res
+        assert any("LOOP INTERVENTION" in m for m in msg_deltas)
+
+
+@pytest.mark.asyncio
+async def test_kernel_relay_checkpoint_callbacks_and_pause(temp_storage, tmp_path):
+    profile = Profile(
+        identity={"name": "builder"},
+        agent={"provider": "gemini"},
+        execution={"max_relays": 2, "max_tool_turns": 1},
+    )
+    kernel = DurableAgentKernel(profile=profile, storage=temp_storage)
+
+    turn = 0
+    async def relay_gen(messages, tools, session_id, **kwargs):
+        nonlocal turn
+        turn += 1
+        if turn in (1, 3):
+            return ModelTurnOutput(
+                content="Executing tool",
+                tool_calls=[{"id": f"c{turn}", "name": "run_command", "arguments": {"command": "pwd"}}],
+            )
+        return ModelTurnOutput(content="[STATUS: IN_PROGRESS]\nNext: finalize")
+
+    th_deltas = []
+    msg_deltas = []
+    async def on_th(ev):
+        th_deltas.append(ev.delta)
+    async def on_msg(ev):
+        msg_deltas.append(ev.delta)
+
+    res = await kernel.run(
+        turn_generator_fn=relay_gen,
+        session_id="t_relay_cb",
+        prompt="test relay",
+        workspace_path=tmp_path,
+        on_thought=on_th,
+        on_message=on_msg,
+    )
+    assert any("Relay Checkpoint" in m for m in msg_deltas)
+    assert any("Maximum relay budget" in m for m in msg_deltas)
+
+
+@pytest.mark.asyncio
+async def test_kernel_persist_conversation_failure_handled(temp_storage, tmp_path):
+    profile = Profile(identity={"name": "builder"}, agent={"provider": "gemini"})
+    kernel = DurableAgentKernel(profile=profile, storage=temp_storage)
+
+    async def gen(messages, tools, session_id, **kwargs):
+        return ModelTurnOutput(content="Persist test summary")
+
+    from unittest.mock import patch
+    with patch.object(temp_storage, "add_conversation_message", side_effect=RuntimeError("disk full")):
+        res = await kernel.run(
+            turn_generator_fn=gen,
+            session_id="t_persist_fail",
+            prompt="persist",
+            workspace_path=tmp_path,
+        )
+        assert res == "Persist test summary"
+
+@pytest.mark.asyncio
+async def test_kernel_simulated_tool_call(temp_storage, tmp_path):
+    profile = Profile(identity={"name": "builder"}, agent={"provider": "gemini"})
+    kernel = DurableAgentKernel(profile=profile, storage=temp_storage)
+
+    turn = 0
+    async def sim_gen(messages, tools, session_id, **kwargs):
+        nonlocal turn
+        turn += 1
+        if turn == 1:
+            return ModelTurnOutput(content="> **run_command: pwd**")
+        return ModelTurnOutput(content="Finished!")
+
+    res = await kernel.run(
+        turn_generator_fn=sim_gen,
+        session_id="t_sim_tool",
+        prompt="test sim",
+        workspace_path=tmp_path,
+    )
+    assert "Finished!" in res
+
+
+@pytest.mark.asyncio
+async def test_kernel_fallback_note_on_message(temp_storage, tmp_path):
+    profile = Profile(identity={"name": "builder"}, agent={"provider": "gemini"})
+    kernel = DurableAgentKernel(profile=profile, storage=temp_storage)
+
+    turn = 0
+    async def no_text_gen(messages, tools, session_id, **kwargs):
+        nonlocal turn
+        turn += 1
+        if turn == 1:
+            return ModelTurnOutput(
+                content="",
+                tool_calls=[{"id": "c1", "name": "run_command", "arguments": {"command": "pwd"}}],
+            )
+        return ModelTurnOutput(content="")
+
+    msg_deltas = []
+    async def on_msg(ev):
+        msg_deltas.append(ev.delta)
+
+    res = await kernel.run(
+        turn_generator_fn=no_text_gen,
+        session_id="t_no_text",
+        prompt="test no text",
+        workspace_path=tmp_path,
+        on_message=on_msg,
+    )
+    assert "Agent completed tool executions but did not produce a final textual summary" in res
+    assert any("Agent completed tool executions" in m for m in msg_deltas)

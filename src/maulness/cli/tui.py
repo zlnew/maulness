@@ -271,6 +271,12 @@ class DiffModal(ModalScreen[None]):
             with Horizontal(classes="modal-buttons"):
                 yield Button("Close (q / Esc)", variant="default", id="btn-close")
 
+    def on_key(self, event: events.Key) -> None:
+        if event.key in ("q", "escape"):
+            event.stop()
+            event.prevent_default()
+            self.dismiss(None)
+
     def action_close(self) -> None:
         self.dismiss(None)
 
@@ -329,6 +335,8 @@ class ProfileModal(ModalScreen[Optional[str]]):
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "escape":
+            event.stop()
+            event.prevent_default()
             self.dismiss(None)
 
     def action_cancel(self) -> None:
@@ -389,6 +397,12 @@ class HelpModal(ModalScreen[None]):
                 yield Static(RichMarkdown(help_markdown))
             with Horizontal(classes="modal-buttons"):
                 yield Button("Close (q / Esc)", variant="default", id="btn-close")
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in ("q", "escape"):
+            event.stop()
+            event.prevent_default()
+            self.dismiss(None)
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -764,6 +778,8 @@ class MaulnessTUIApp(App):
     }
     """
 
+    ENABLE_COMMAND_PALETTE = False
+
     BINDINGS = [
         Binding("ctrl+p", "select_profile", "Profile"),
         Binding("ctrl+d", "view_diff", "Diff"),
@@ -875,20 +891,26 @@ class MaulnessTUIApp(App):
 
     def set_mode(self, new_mode: str) -> None:
         self.mode = new_mode
-        chat_input = self.query_one("#chat-input", Input)
-        input_row = self.query_one("#input-row", Horizontal)
+        try:
+            chat_input = self.query_one("#chat-input", Input)
+            input_row = self.query_one("#input-row", Horizontal)
 
-        if self.mode == "insert":
-            input_row.add_class("focused-insert")
-            chat_input.focus()
-        else:
-            input_row.remove_class("focused-insert")
-            self.set_focus(None)
+            if self.mode == "insert":
+                input_row.add_class("focused-insert")
+                chat_input.focus()
+            else:
+                input_row.remove_class("focused-insert")
+                self.set_focus(None)
+        except Exception:
+            pass
 
         self._update_statusline()
 
     def _update_statusline(self) -> None:
-        statusline = self.query_one("#vim-statusline", Static)
+        try:
+            statusline = self.query_one("#vim-statusline", Static)
+        except Exception:
+            return
         badges = []
         if self.yolo_mode:
             badges.append("[bold red]YOLO[/bold red]")
@@ -909,12 +931,15 @@ class MaulnessTUIApp(App):
         statusline.update(f"{mode_badge}  {hints}{badge_str}")
 
     def _update_top_bar(self) -> None:
+        try:
+            top_bar = self.query_one("#top-bar", Static)
+        except Exception:
+            return
         branch = get_git_branch(self.workspace_path)
         daemon_str = get_daemon_status()
         status_text = "[yellow]busy[/yellow]" if self.is_busy else "[green]idle[/green]"
         yolo_badge = " │ [bold red]YOLO[/bold red]" if self.yolo_mode else ""
         wt_badge = " │ [bold cyan]WT[/bold cyan]" if self.use_worktree else ""
-        top_bar = self.query_one("#top-bar", Static)
         top_bar.update(
             f"[bold red]MAULNESS[/bold red] │ [bold green]repo:[/bold green] {self.repo_name} │ "
             f"[bold cyan]branch:[/bold cyan] {branch} │ [bold magenta]profile:[/bold magenta] {self.current_profile}{yolo_badge}{wt_badge} │ "
@@ -1050,7 +1075,15 @@ class MaulnessTUIApp(App):
             self._apply_autocomplete(execute_zero_arg=False)
 
     def on_key(self, event: events.Key) -> None:
-        popup = self.query_one("#autocomplete-popup", OptionList)
+        try:
+            if isinstance(self.screen, ModalScreen):
+                return
+        except Exception:
+            return
+        try:
+            popup = self.query_one("#autocomplete-popup", OptionList)
+        except Exception:
+            return
 
         # 1. Autocomplete Popup Navigation (LSP floating style)
         if popup.has_class("visible"):
@@ -1138,10 +1171,7 @@ class MaulnessTUIApp(App):
         # 4. INSERT MODE KEY HANDLING
         if self.mode == "insert":
             if event.key == "escape":
-                if popup.has_class("visible"):
-                    self._hide_autocomplete()
-                else:
-                    self.set_mode("normal")
+                self.set_mode("normal")
             elif event.key in ("tab", "ctrl+k"):
                 chat_input = self.query_one("#chat-input", Input)
                 val = chat_input.value
@@ -1171,8 +1201,11 @@ class MaulnessTUIApp(App):
                 self.current_profile = selected
                 self.active_acp_session_id = None
                 self._update_top_bar()
-                chat_input = self.query_one("#chat-input", Input)
-                chat_input.placeholder = f"Ask {self.current_profile} or type / for commands, !<cmd>..."
+                try:
+                    chat_input = self.query_one("#chat-input", Input)
+                    chat_input.placeholder = f"Ask {self.current_profile} or type / for commands, !<cmd>..."
+                except Exception:
+                    pass
             self.set_mode("normal")
 
         self.push_screen(ProfileModal(profiles, self.current_profile), callback=_on_profile_selected)

@@ -303,3 +303,177 @@ async def test_compacted_memory_storage(tmp_path: Path):
     assert "User prefers pnpm" in summary
 
 
+def test_model_discord_properties():
+    from maulness.core.models import TaskRecord, ApprovalRecord, TaskMode, TaskStatus
+
+    # TaskRecord with discord origin
+    t1 = TaskRecord(
+        id="t1",
+        title="T",
+        repo_name="R",
+        workspace_path="/",
+        mode=TaskMode.DIRECT,
+        status=TaskStatus.DONE,
+        origin_platform="discord",
+        origin_thread_id="12345678",
+    )
+    assert t1.discord_thread_id == 12345678
+
+    # TaskRecord with non-numeric thread id
+    t2 = TaskRecord(
+        id="t2",
+        title="T",
+        repo_name="R",
+        workspace_path="/",
+        mode=TaskMode.DIRECT,
+        status=TaskStatus.DONE,
+        origin_platform="discord",
+        origin_thread_id="not_an_int",
+    )
+    assert t2.discord_thread_id is None
+
+    # TaskRecord with non-discord origin
+    t3 = TaskRecord(
+        id="t3",
+        title="T",
+        repo_name="R",
+        workspace_path="/",
+        mode=TaskMode.DIRECT,
+        status=TaskStatus.DONE,
+        origin_platform="cli",
+        origin_thread_id="12345678",
+    )
+    assert t3.discord_thread_id is None
+
+    # ApprovalRecord with discord platform
+    a1 = ApprovalRecord(
+        id="a1",
+        task_id="t1",
+        rpc_request_id=1,
+        tool_name="run_command",
+        tool_args="{}",
+        platform="discord",
+        platform_message_id="987654321",
+    )
+    assert a1.discord_message_id == 987654321
+
+    # ApprovalRecord with non-numeric id
+    a2 = ApprovalRecord(
+        id="a2",
+        task_id="t1",
+        rpc_request_id=1,
+        tool_name="run_command",
+        tool_args="{}",
+        platform="discord",
+        platform_message_id="invalid",
+    )
+    assert a2.discord_message_id is None
+
+    # ApprovalRecord with non-discord platform
+    a3 = ApprovalRecord(
+        id="a3",
+        task_id="t1",
+        rpc_request_id=1,
+        tool_name="run_command",
+        tool_args="{}",
+        platform="slack",
+        platform_message_id="987654321",
+    )
+    assert a3.discord_message_id is None
+
+
+@pytest.mark.asyncio
+async def test_list_channel_conversations(tmp_path: Path):
+    db_file = tmp_path / "test_channels.db"
+    storage = StorageManager(db_path=db_file)
+    await storage.initialize()
+
+    # Set channel conversations
+    await storage.set_channel_conversation(111, "conv-111", platform="discord")
+    await storage.set_channel_conversation("web_222", "conv-222", platform="web")
+
+    # List all
+    all_ch = await storage.list_channel_conversations()
+    assert all_ch[111] == "conv-111"
+    assert all_ch["web_222"] == "conv-222"
+
+    # Filter by platform
+    discord_ch = await storage.list_channel_conversations(platform="discord")
+    assert 111 in discord_ch
+    assert "web_222" not in discord_ch
+
+
+@pytest.mark.asyncio
+async def test_storage_legacy_migration_and_corrupt_payload(tmp_path: Path):
+    import aiosqlite
+    db_file = tmp_path / "legacy.db"
+
+    # 1. Create a legacy table schema without 'origin_platform'
+    async with aiosqlite.connect(str(db_file)) as db:
+        await db.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT);")
+        await db.commit()
+
+    storage = StorageManager(db_path=db_file)
+    # initialize() should detect missing origin_platform and recreate tables
+    await storage.initialize()
+
+    # Verify new schema is active
+    task = await storage.create_task(
+        task_id="migrated_task",
+        title="Migrated",
+        repo_name="test",
+        workspace_path="/tmp",
+        mode=TaskMode.DIRECT,
+    )
+    assert task.origin_platform == "cli"
+
+    # 2. Empty idempotency key lookup
+    assert await storage.get_agent_event_by_idempotency_key("") is None
+
+    # 3. Payload with non-json serializable type (set)
+    class NonSerializable:
+        def __str__(self):
+            return "unserializable_obj"
+
+    ev_id = await storage.record_agent_event(
+        task_id="migrated_task",
+        stage="test",
+        step_index=0,
+        event_type="custom",
+        payload={"obj": NonSerializable()},
+        idempotency_key="idem_custom_1",
+    )
+    assert ev_id is not None
+    ev = await storage.get_agent_event_by_idempotency_key("idem_custom_1")
+    assert "unserializable_obj" in str(ev["payload"])
+
+    # 4. Circular reference triggers fallback in record_agent_event
+    circular = []
+    circular.append(circular)
+    ev_circ = await storage.record_agent_event(
+        task_id="migrated_task",
+        stage="test",
+        step_index=1,
+        event_type="circular",
+        payload={"circ": circular},
+        idempotency_key="idem_circ_1",
+    )
+    assert ev_circ is not None
+
+    # 5. Insert raw non-JSON text into agent_events and fetch
+    async with aiosqlite.connect(str(db_file)) as db:
+        await db.execute(
+            "INSERT INTO agent_events (task_id, stage, step_index, event_type, event_payload, idempotency_key) VALUES (?, ?, ?, ?, ?, ?)",
+            ("migrated_task", "test", 1, "raw", "{invalid json content", "idem_raw_1"),
+        )
+        await db.commit()
+
+    ev_raw = await storage.get_agent_event_by_idempotency_key("idem_raw_1")
+    assert ev_raw["payload"] == "{invalid json content"
+
+    all_events = await storage.get_agent_events("migrated_task")
+    assert any(e["payload"] == "{invalid json content" for e in all_events)
+
+
+
+

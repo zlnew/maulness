@@ -1,3 +1,6 @@
+import asyncio
+import json
+from unittest.mock import MagicMock, patch
 import pytest
 from maulness.core.profiles import Profile
 from maulness.core.providers.acp_provider import AcpProvider
@@ -74,6 +77,49 @@ def test_provider_factory_fallback_chain():
     assert isinstance(provider.primary, GeminiProvider)
     assert isinstance(provider.fallbacks[0], UnifiedApiProvider)
     assert provider.fallbacks[0].base_url == "https://api.anthropic.com/v1"
+
+
+def test_provider_factory_unknown_provider_fallbacks():
+    # antigravity provider
+    from maulness.core.providers.sdk_provider import AntigravitySdkProvider
+    p_sdk = Profile(identity={"name": "sdk_prof"}, agent={"provider": "antigravity"})
+    assert isinstance(get_provider_for_profile(p_sdk), AntigravitySdkProvider)
+
+    # with command
+    p_cmd = Profile(identity={"name": "custom"}, agent={"provider": "custom_agent", "command": "my_agent"})
+    assert isinstance(get_provider_for_profile(p_cmd), AcpProvider)
+
+    # with base_url
+    p_url = Profile(identity={"name": "custom"}, agent={"provider": "custom_model", "base_url": "http://localhost:8000/v1"})
+    assert isinstance(get_provider_for_profile(p_url), UnifiedApiProvider)
+
+    # neither
+    p_gem = Profile(identity={"name": "custom"}, agent={"provider": "custom_default"})
+    assert isinstance(get_provider_for_profile(p_gem), GeminiProvider)
+
+
+def test_provider_factory_fallback_chain_command_and_env():
+    profile = Profile(
+        identity={"name": "resilient"},
+        agent={"provider": "gemini"},
+        resilience={
+            "fallbacks": [
+                {
+                    "provider": "acp",
+                    "command": "custom_subagent",
+                },
+                {
+                    "provider": "openai",
+                    "api_key_env": "CUSTOM_KEY",
+                    "reasoning_effort": "high",
+                },
+            ]
+        },
+    )
+    provider = get_provider_for_profile(profile)
+    assert len(provider.fallbacks) == 2
+    assert isinstance(provider.fallbacks[0], AcpProvider)
+    assert isinstance(provider.fallbacks[1], UnifiedApiProvider)
 
 
 @pytest.mark.asyncio
@@ -1045,7 +1091,695 @@ def test_compact_in_flight_tool_messages():
     assert "Recent output" in messages[9]["content"]
 
 
+@pytest.mark.asyncio
+async def test_anthropic_turn_streaming(monkeypatch):
+    import json
+    from unittest.mock import AsyncMock, MagicMock
+    import httpx
+    from maulness.core.profiles import Profile
+    from maulness.core.providers.api_provider import UnifiedApiProvider
+
+    profile = Profile(
+        identity={"name": "claude_coder"},
+        agent={"provider": "anthropic", "model": "claude-3-7-sonnet-20250219"},
+        env_vars={"ANTHROPIC_API_KEY": "test_anthropic_key"},
+        reasoning={"effort": "high"},
+    )
+    provider = UnifiedApiProvider(profile)
+
+    lines = [
+        'event: content_block_delta\n',
+        'data: {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "Let me think about it"}}\n',
+        '\n',
+        'event: content_block_delta\n',
+        'data: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Here is the response"}}\n',
+        '\n',
+    ]
+
+    class MockStreamResponse:
+        def __init__(self):
+            self.status_code = 200
+            self.is_error = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def aiter_lines(self):
+            for l in lines:
+                yield l
+
+    class MockClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def stream(self, method, url, **kwargs):
+            return MockStreamResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", MockClient)
+
+    thoughts = []
+    messages = []
+
+    async def on_thought(ev):
+        thoughts.append(ev.delta)
+
+    async def on_msg(ev):
+        messages.append(ev.delta)
+
+    res = await provider._generate_anthropic_turn(
+        messages=[{"role": "user", "content": "Help me"}],
+        tools=None,
+        session_id="test_sess",
+        on_thought=on_thought,
+        on_message=on_msg,
+    )
+
+    assert res.content == "Here is the response"
+    assert res.thought == "Let me think about it"
+    assert thoughts == ["Let me think about it"]
+    assert messages == ["Here is the response"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_turn_http_error(monkeypatch):
+    import httpx
+    from maulness.core.profiles import Profile
+    from maulness.core.providers.api_provider import UnifiedApiProvider
+
+    profile = Profile(
+        identity={"name": "claude_coder"},
+        agent={"provider": "anthropic", "model": "claude-3-7-sonnet-20250219"},
+        env_vars={"ANTHROPIC_API_KEY": "test_anthropic_key"},
+    )
+    provider = UnifiedApiProvider(profile)
+
+    class MockErrorResponse:
+        def __init__(self):
+            self.status_code = 400
+            self.is_error = True
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def aread(self):
+            return b'{"error": "invalid_request_error", "message": "max_tokens too high"}'
+
+    class MockErrorClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def stream(self, method, url, **kwargs):
+            return MockErrorResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", MockErrorClient)
+
+    with pytest.raises(RuntimeError, match="Anthropic.*returned HTTP 400"):
+        await provider._generate_anthropic_turn(
+            messages=[{"role": "user", "content": "Help"}],
+            tools=None,
+            session_id="test_err_sess",
+        )
+
+
+def test_gemini_helpers_and_compact():
+    from maulness.core.providers.gemini_provider import (
+        compact_gemini_in_flight_contents,
+        _find_tool_name,
+    )
+    from unittest.mock import MagicMock
+
+    # 1. _find_tool_name
+    messages = [
+        {"role": "assistant", "tool_calls": [{"id": "call_123", "function": {"name": "special_tool"}}]}
+    ]
+    assert _find_tool_name(messages, 1, "call_123") == "special_tool"
+    assert _find_tool_name([], 0, "call_fallback_tool") == "tool"
+
+    # 2. compact_gemini_in_flight_contents
+    class MockPart:
+        def __init__(self, result_text):
+            resp = MagicMock()
+            resp.name = "run_command"
+            resp.response = {"result": result_text}
+            self.function_response = resp
+
+    class MockContent:
+        def __init__(self, part):
+            self.parts = [part]
+
+    contents = [
+        MockContent(MockPart("short")),
+        MockContent(MockPart("large content " * 30)),
+        MockContent(MockPart("another large " * 30)),
+        MockContent(MockPart("recent 1")),
+        MockContent(MockPart("recent 2")),
+        MockContent(MockPart("recent 3")),
+    ]
+
+    compact_gemini_in_flight_contents(contents, keep_recent=3)
+    # Older large parts should be replaced by tombstones
+    first_resp = contents[1].parts[0].function_response.response["result"]
+    assert "[Tool result for 'run_command'" in first_resp
+
+
+def test_gemini_client_resolution(monkeypatch):
+    from maulness.config import config
+    from maulness.core.profiles import Profile
+    from maulness.core.providers.gemini_provider import GeminiProvider
+
+    monkeypatch.setattr(config, "gemini_api_key", None)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    # 1. Missing API key with no command raises ValueError
+    p_no_key = Profile(identity={"name": "no_key"}, agent={"provider": "gemini"})
+    prov_no_key = GeminiProvider(p_no_key)
+    with pytest.raises(ValueError, match="Missing API key"):
+        prov_no_key._get_client()
+
+    # 2. Missing API key with available command returns None (triggers ACP fallback)
+    monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/agy")
+    p_cmd_fallback = Profile(identity={"name": "with_cmd"}, agent={"provider": "gemini", "command": "agy"})
+    prov_cmd_fallback = GeminiProvider(p_cmd_fallback)
+    assert prov_cmd_fallback._get_client() is None
 
 
 
+
+
+
+
+
+
+@pytest.mark.asyncio
+async def test_base_provider_abstract_run():
+    from maulness.core.providers.base import BaseProvider
+    class ConcreteProvider(BaseProvider):
+        async def run(self, *args, **kwargs):
+            return await super().run(*args, **kwargs)
+
+    prof = Profile(identity={"name": "test"}, agent={"provider": "gemini", "model": "gemini-2.5-flash"})
+    prov = ConcreteProvider(prof)
+    res = await prov.run("sess", "prompt")
+    assert res is None
+
+
+@pytest.mark.asyncio
+async def test_unified_api_provider_properties_and_missing_key():
+    from maulness.core.profiles import Profile
+    from maulness.core.providers.api_provider import UnifiedApiProvider
+
+    # 1. Properties: unknown provider
+    p_unk = Profile(
+        identity={"name": "unk_prov"},
+        agent={"provider": "unknown_provider", "model": "test-model"},
+    )
+    prov_unk = UnifiedApiProvider(p_unk)
+    assert prov_unk.last_conversation_id is None
+    assert prov_unk.base_url is None
+    assert prov_unk.api_key is None
+
+    # 2. Missing key for non-ollama raises ValueError (lines 84-85)
+    with pytest.raises(ValueError, match="Missing API key"):
+        await prov_unk.run(session_id="s1", prompt="hello")
+
+    # 3. on_init callback (line 93)
+    p_ollama = Profile(
+        identity={"name": "ollama_agent"},
+        agent={"provider": "ollama", "model": "llama3"},
+    )
+    prov_ollama = UnifiedApiProvider(p_ollama)
+
+    init_calls = []
+    async def fake_on_init(conv_id: str):
+        init_calls.append(conv_id)
+
+    async def fake_turn_generator(*args, **kwargs):
+        from maulness.core.kernel import ModelTurnOutput
+        return ModelTurnOutput(content="Done", tool_calls=[])
+
+    with patch.object(prov_ollama, "_generate_openai_turn", side_effect=fake_turn_generator):
+        res = await prov_ollama.run(session_id="s2", prompt="hi", on_init=fake_on_init)
+        assert res == "Done"
+        assert len(init_calls) == 1
+        assert prov_ollama.last_conversation_id == init_calls[0]
+
+
+@pytest.mark.asyncio
+async def test_unified_api_provider_openai_turn_edge_cases(monkeypatch):
+    import httpx
+    from maulness.core.models import AgentThoughtEvent, AgentMessageEvent
+    from maulness.core.profiles import Profile
+    from maulness.core.providers.api_provider import UnifiedApiProvider
+
+    # Profile with reasoning_effort and opencode provider
+    profile = Profile(
+        identity={"name": "opencode_agent"},
+        agent={
+            "provider": "opencode",
+            "base_url": "https://api.opencode.ai/v1/chat/completions",
+            "reasoning_effort": "high",
+        },
+        env_vars={"OPENCODE_API_KEY": "test_key"},
+    )
+    provider = UnifiedApiProvider(profile)
+
+    # 1. client.stream raises Exception (lines 167-168)
+    class StreamCrashClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def stream(self, *args, **kwargs):
+            raise ConnectionError("DNS failure")
+
+    monkeypatch.setattr(httpx, "AsyncClient", StreamCrashClient)
+    with pytest.raises(RuntimeError, match="Failed to initiate stream"):
+        await provider._generate_openai_turn([], None, session_id="s")
+
+    # 2. response.is_error (lines 172-174)
+    class MockErrorResponse:
+        def __init__(self):
+            self.status_code = 502
+            self.is_error = True
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def aread(self): return b"Bad Gateway error"
+
+    class StreamErrorClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def stream(self, *args, **kwargs): return MockErrorResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", StreamErrorClient)
+    with pytest.raises(RuntimeError, match="returned HTTP 502: Bad Gateway"):
+        await provider._generate_openai_turn([], None, session_id="s")
+
+    # 3. Timeout on first chunk vs subsequent chunk (lines 186-193)
+    class MockFirstTimeoutLines:
+        def __aiter__(self): return self
+        async def __anext__(self):
+            raise asyncio.TimeoutError()
+
+    class MockFirstTimeoutResponse:
+        is_error = False
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def aiter_lines(self): return MockFirstTimeoutLines()
+
+    class FirstTimeoutClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def stream(self, *args, **kwargs): return MockFirstTimeoutResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FirstTimeoutClient)
+    with pytest.raises(TimeoutError, match="timed out waiting for first token"):
+        await provider._generate_openai_turn([], None, session_id="s")
+
+    # Subsequent chunk timeout
+    class MockLaterTimeoutLines:
+        def __init__(self):
+            self.count = 0
+        def __aiter__(self): return self
+        async def __anext__(self):
+            self.count += 1
+            if self.count == 1:
+                return "data: {\"choices\": [{\"delta\": {\"content\": \"hello\"}}]}"
+            raise asyncio.TimeoutError()
+
+    class MockLaterTimeoutResponse:
+        is_error = False
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def aiter_lines(self): return MockLaterTimeoutLines()
+
+    class LaterTimeoutClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def stream(self, *args, **kwargs): return MockLaterTimeoutResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", LaterTimeoutClient)
+    with pytest.raises(TimeoutError, match="Stream idle watchdog triggered"):
+        await provider._generate_openai_turn([], None, session_id="s")
+
+    # 4. Successful turn with:
+    # - invalid json line ignored (lines 199-200)
+    # - reasoning delta & on_thought (lines 209-211)
+    # - tool call with id concat, tool call without name skipped, tool call with bad json args (lines 223, 244, 248-249)
+    # - content delta & on_message (lines 234-237)
+    class MockSuccessLines:
+        def __init__(self):
+            self.lines = [
+                "data: {invalid json not parseable}",
+                "data: " + json.dumps({"choices": [{"delta": {"reasoning": "pondering deep questions..."}}]}),
+                "data: " + json.dumps({"choices": [{"delta": {"content": "Result: ", "tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "run_cmd", "arguments": '{"cmd": '}}]}}]}),
+                "data: " + json.dumps({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "23", "function": {"arguments": '"ls"}'}}, {"index": 1, "function": {"name": ""}}, {"index": 2, "id": "call_bad", "function": {"name": "bad_tool", "arguments": "not valid json"}}]}}]}),
+                "data: [DONE]",
+            ]
+            self.idx = 0
+        def __aiter__(self): return self
+        async def __anext__(self):
+            if self.idx >= len(self.lines):
+                raise StopAsyncIteration
+            val = self.lines[self.idx]
+            self.idx += 1
+            return val
+
+    class MockSuccessResponse:
+        is_error = False
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def aiter_lines(self): return MockSuccessLines()
+
+    class SuccessClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def stream(self, *args, **kwargs): return MockSuccessResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", SuccessClient)
+    thoughts = []
+    messages = []
+    async def record_thought(ev: AgentThoughtEvent): thoughts.append(ev.delta)
+    async def record_msg(ev: AgentMessageEvent): messages.append(ev.delta)
+
+    out = await provider._generate_openai_turn(
+        messages=[{"role": "user", "content": "Hi"}],
+        tools=[{"function": {"name": "run_cmd"}}],
+        session_id="s",
+        on_thought=record_thought,
+        on_message=record_msg,
+    )
+    assert out.content == "Result: "
+    assert out.thought == "pondering deep questions..."
+    assert len(out.tool_calls) == 2
+    assert out.tool_calls[0]["id"] == "call_123"
+    assert out.tool_calls[0]["name"] == "run_cmd"
+    assert out.tool_calls[0]["arguments"] == {"cmd": "ls"}
+    assert out.tool_calls[1]["name"] == "bad_tool"
+    assert out.tool_calls[1]["arguments"] == {"raw": "not valid json"}
+    assert thoughts == ["pondering deep questions..."]
+    assert messages == ["Result: "]
+
+
+@pytest.mark.asyncio
+async def test_unified_api_provider_anthropic_turn_edge_cases(monkeypatch):
+    import httpx
+    from maulness.core.models import AgentThoughtEvent, AgentMessageEvent
+    from maulness.core.profiles import Profile
+    from maulness.core.providers.api_provider import UnifiedApiProvider
+
+    # Anthropic profile with url not ending in /messages, reasoning_effort
+    profile = Profile(
+        identity={"name": "claude_agent"},
+        agent={
+            "provider": "anthropic",
+            "base_url": "https://api.anthropic.com/v1",
+            "reasoning_effort": "medium",
+        },
+        env_vars={"ANTHROPIC_API_KEY": "test_claude_key"},
+    )
+    provider = UnifiedApiProvider(profile)
+
+    # 1. client.stream raises Exception (lines 315-316)
+    class StreamCrashClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def stream(self, *args, **kwargs):
+            raise ConnectionResetError("Reset")
+
+    monkeypatch.setattr(httpx, "AsyncClient", StreamCrashClient)
+    with pytest.raises(RuntimeError, match="Failed to initiate stream with Anthropic"):
+        await provider._generate_anthropic_turn([], None, session_id="s")
+
+    # 2. Timeout on first chunk vs subsequent chunk (lines 334-341)
+    class MockFirstTimeoutLines:
+        def __aiter__(self): return self
+        async def __anext__(self): raise asyncio.TimeoutError()
+
+    class MockFirstResponse:
+        is_error = False
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def aiter_lines(self): return MockFirstTimeoutLines()
+
+    class FirstTimeoutClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def stream(self, *args, **kwargs): return MockFirstResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FirstTimeoutClient)
+    with pytest.raises(TimeoutError, match="timed out waiting for first token"):
+        await provider._generate_anthropic_turn([], None, session_id="s")
+
+    class MockLaterTimeoutLines:
+        def __init__(self): self.count = 0
+        def __aiter__(self): return self
+        async def __anext__(self):
+            self.count += 1
+            if self.count == 1:
+                return "data: {\"type\": \"content_block_delta\", \"delta\": {\"type\": \"text_delta\", \"text\": \"hi\"}}"
+            raise asyncio.TimeoutError()
+
+    class MockLaterResponse:
+        is_error = False
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def aiter_lines(self): return MockLaterTimeoutLines()
+
+    class LaterTimeoutClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def stream(self, *args, **kwargs): return MockLaterResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", LaterTimeoutClient)
+    with pytest.raises(TimeoutError, match="Stream idle watchdog triggered"):
+        await provider._generate_anthropic_turn([], None, session_id="s")
+
+    # 3. Successful stream with thinking_delta, invalid json line (lines 347-348, 357-360)
+    class MockAnthropicSuccessLines:
+        def __init__(self):
+            self.lines = [
+                "data: {bad json invalid}",
+                "data: {\"type\": \"content_block_delta\", \"delta\": {\"type\": \"thinking_delta\", \"thinking\": \"deep anthropic thought\"}}",
+                "data: {\"type\": \"content_block_delta\", \"delta\": {\"type\": \"text_delta\", \"text\": \"Claude reply\"}}",
+            ]
+            self.idx = 0
+        def __aiter__(self): return self
+        async def __anext__(self):
+            if self.idx >= len(self.lines): raise StopAsyncIteration
+            val = self.lines[self.idx]
+            self.idx += 1
+            return val
+
+    class MockAnthropicSuccessResponse:
+        is_error = False
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def aiter_lines(self): return MockAnthropicSuccessLines()
+
+    class AnthropicSuccessClient:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def stream(self, *args, **kwargs): return MockAnthropicSuccessResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", AnthropicSuccessClient)
+    thoughts = []
+    messages = []
+    async def record_thought(ev: AgentThoughtEvent): thoughts.append(ev.delta)
+    async def record_msg(ev: AgentMessageEvent): messages.append(ev.delta)
+
+    out = await provider._generate_anthropic_turn(
+        messages=[{"role": "system", "content": "Sys prompt"}, {"role": "user", "content": "Hi"}],
+        tools=None,
+        session_id="s",
+        on_thought=record_thought,
+        on_message=record_msg,
+    )
+    assert out.content == "Claude reply"
+    assert out.thought == "deep anthropic thought"
+    assert thoughts == ["deep anthropic thought"]
+    assert messages == ["Claude reply"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_provider_full_coverage(monkeypatch):
+    from maulness.core.models import AgentThoughtEvent, AgentMessageEvent
+    from maulness.core.profiles import Profile
+    from maulness.core.providers.gemini_provider import (
+        GeminiProvider,
+        compact_gemini_in_flight_contents,
+        _find_tool_name,
+    )
+
+    # 1. compact_gemini_in_flight_contents early return (line 39)
+    assert compact_gemini_in_flight_contents([], keep_recent=5) is None
+
+    # 2. _find_tool_name call_id prefix format (line 63) and fallback (line 64)
+    assert _find_tool_name([], 0, "call_123_custom") == "custom"
+    assert _find_tool_name([], 0, "nonprefixed") == "tool"
+
+    # Lines 96-97: messages_to_gemini_contents with invalid json arguments
+    from maulness.core.providers.gemini_provider import messages_to_gemini_contents
+    msg = {"role": "assistant", "tool_calls": [{"name": "cmd", "arguments": "invalid json not dict"}]}
+    contents = messages_to_gemini_contents([msg])
+    assert contents[0].parts[0].function_call.args == {}
+
+    # 3. Vertex client instantiation (lines 134-137)
+    p_vert = Profile(
+        identity={"name": "vert_agent"},
+        agent={"provider": "gemini", "vertex": {"enabled": True, "project": "proj-1", "location": "us-central1"}},
+    )
+    prov_vert = GeminiProvider(p_vert)
+    with patch("google.genai.Client") as mock_genai_client:
+        cl = prov_vert._get_client()
+        mock_genai_client.assert_called_with(vertexai=True, project="proj-1", location="us-central1")
+        assert cl == mock_genai_client()
+
+    # 4. run with on_init callback and fallback to AcpProvider when client is None (lines 167, 171-184)
+    p_fallback = Profile(identity={"name": "fb"}, agent={"provider": "gemini", "command": "agy"})
+    prov_fallback = GeminiProvider(p_fallback)
+    prov_fallback._client = None
+    with patch.object(prov_fallback, "_get_client", return_value=None):
+        init_calls = []
+        async def fake_on_init(conv_id): init_calls.append(conv_id)
+        with patch("maulness.core.providers.acp_provider.AcpProvider.run", return_value="Fallback ACP output"):
+            res = await prov_fallback.run("s", "prompt", on_init=fake_on_init)
+            assert res == "Fallback ACP output"
+            assert len(init_calls) == 1
+
+    # 5. generate_turn client is None raises RuntimeError (line 212)
+    prov_no_client = GeminiProvider(p_fallback)
+    with patch.object(prov_no_client, "_get_client", return_value=None):
+        with pytest.raises(RuntimeError, match="Gemini client not initialized"):
+            await prov_no_client.generate_turn([], None, session_id="s")
+
+    # 6. generate_turn with reasoning_effort (lines 224-226) and timeouts (lines 260-261, 280-286)
+    p_gem_effort = Profile(
+        identity={"name": "effort_agent"},
+        agent={"provider": "gemini", "model": "gemini-2.5-flash", "reasoning_effort": "high"},
+        env_vars={"GEMINI_API_KEY": "fake_key"},
+    )
+    prov_effort = GeminiProvider(p_gem_effort)
+
+    # Handshake timeout
+    mock_client = MagicMock()
+    prov_effort._client = mock_client
+
+    async def fake_handshake_timeout(*args, **kwargs):
+        raise asyncio.TimeoutError()
+
+    mock_client.aio.models.generate_content_stream = fake_handshake_timeout
+    with pytest.raises(TimeoutError, match="Gemini API connection handshake timed out"):
+        await prov_effort.generate_turn([], None, session_id="s")
+
+    # First token timeout
+    class MockStreamFirstTimeout:
+        def __aiter__(self): return self
+        async def __anext__(self): raise asyncio.TimeoutError()
+
+    async def fake_first_token_stream(*args, **kwargs):
+        return MockStreamFirstTimeout()
+
+    mock_client.aio.models.generate_content_stream = fake_first_token_stream
+    with pytest.raises(TimeoutError, match="timed out waiting for first token response"):
+        await prov_effort.generate_turn([], None, session_id="s")
+
+    # Subsequent token timeout
+    class MockStreamLaterTimeout:
+        def __init__(self): self.count = 0
+        def __aiter__(self): return self
+        async def __anext__(self):
+            self.count += 1
+            if self.count == 1:
+                chunk = MagicMock()
+                part = MagicMock(text="Hello", thought=False, function_call=None)
+                cand = MagicMock()
+                cand.content.parts = [part]
+                chunk.candidates = [cand]
+                chunk.text = None
+                return chunk
+            raise asyncio.TimeoutError()
+
+    async def fake_later_token_stream(*args, **kwargs):
+        return MockStreamLaterTimeout()
+
+    mock_client.aio.models.generate_content_stream = fake_later_token_stream
+    with pytest.raises(TimeoutError, match="Gemini stream idle watchdog triggered"):
+        await prov_effort.generate_turn([], None, session_id="s")
+
+    # Successful turn testing:
+    # - part.thought with on_thought (lines 313-316)
+    # - part.text with on_message (line 321)
+    # - chunk.text fallback with on_message (lines 324-327)
+    class MockSuccessStream:
+        def __init__(self):
+            # Chunk 1: thought part and text part
+            c1 = MagicMock()
+            p_th = MagicMock(text="Gemini thinking...", thought=True, function_call=None)
+            p_txt = MagicMock(text="Main answer", thought=False, function_call=None)
+            cand1 = MagicMock()
+            cand1.content.parts = [p_th, p_txt]
+            c1.candidates = [cand1]
+            c1.text = None
+
+            # Chunk 2: chunk.text fallback (no candidates)
+            c2 = MagicMock()
+            c2.candidates = []
+            c2.text = " Extra fallback text"
+
+            self.chunks = [c1, c2]
+            self.idx = 0
+
+        def __aiter__(self): return self
+        async def __anext__(self):
+            if self.idx >= len(self.chunks): raise StopAsyncIteration
+            chunk = self.chunks[self.idx]
+            self.idx += 1
+            return chunk
+
+    async def fake_success_stream(*args, **kwargs):
+        return MockSuccessStream()
+
+    mock_client.aio.models.generate_content_stream = fake_success_stream
+    thoughts = []
+    messages = []
+    async def record_thought(ev: AgentThoughtEvent): thoughts.append(ev.delta)
+    async def record_msg(ev: AgentMessageEvent): messages.append(ev.delta)
+
+    out = await prov_effort.generate_turn(
+        messages=[{"role": "user", "content": "Question"}],
+        tools=None,
+        session_id="s",
+        on_thought=record_thought,
+        on_message=record_msg,
+    )
+    assert out.content == "Main answer Extra fallback text"
+    assert out.thought == "Gemini thinking..."
+    assert thoughts == ["Gemini thinking..."]
+    assert messages == ["Main answer", " Extra fallback text"]
 

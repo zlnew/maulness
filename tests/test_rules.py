@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 from maulness.core.rules import (
     CommandRulesConfig,
@@ -177,3 +177,92 @@ def test_worktree_paths_auto_approved():
     assert policy == PolicyAction.ALLOW
     assert "auto-approved" in reason
 
+
+def test_rules_merge_none():
+    cfg = ExecutionRulesConfig()
+    assert cfg.merge(None) is cfg
+
+
+def test_matches_command_and_path_edge_cases():
+    from maulness.core.rules import _matches_command, _matches_path
+    assert not _matches_command("", "ls")
+    assert not _matches_command("ls", "")
+    assert not _matches_path("", Path("test.txt"))
+
+    # Malformed glob pattern in match() (lines 169-170)
+    assert not _matches_path("[*[", Path("test.txt"))
+
+    # Filename match (line 173)
+    assert _matches_path("test.txt", Path("/some/dir/test.txt"))
+
+    # Parent directory match in parts (line 180)
+    assert _matches_path(".ssh", Path("/home/user/.ssh/id_rsa"))
+
+
+def test_rules_engine_ask_and_deny_branches():
+    # 1. Ask commands with and without yolo (lines 260-266)
+    cfg = ExecutionRulesConfig(
+        commands=CommandRulesConfig(ask=["npm install*"]),
+        paths=PathRulesConfig(ask=["*.secret"]),
+        tools={"write_file": PolicyAction.DENY},
+        default_policy=PolicyAction.DENY,
+    )
+    engine = RuleEngine(cfg)
+
+    policy, reason = engine.evaluate("run_command", {"command": "npm install lodash"}, yolo=False)
+    assert policy == PolicyAction.ASK
+    assert "requires approval" in reason
+
+    policy, reason = engine.evaluate("run_command", {"command": "npm install lodash"}, yolo=True)
+    assert policy == PolicyAction.ALLOW
+    assert "YOLO mode" in reason
+
+    # 2. Ask paths with and without yolo (lines 277-283)
+    policy, reason = engine.evaluate("read_file", {"path": "creds.secret"}, yolo=False)
+    assert policy == PolicyAction.ASK
+    assert "requires approval" in reason
+
+    policy, reason = engine.evaluate("read_file", {"path": "creds.secret"}, yolo=True)
+    assert policy == PolicyAction.ALLOW
+    assert "YOLO mode" in reason
+
+    # 3. Tool policy DENY (line 288)
+    policy, reason = engine.evaluate("write_file", {"path": "any.txt"})
+    assert policy == PolicyAction.DENY
+    assert "disabled by policy" in reason
+
+    # 4. Default policy DENY (line 301)
+    policy, reason = engine.evaluate("unknown_custom_tool", {})
+    assert policy == PolicyAction.DENY
+    assert "blocked by default policy" in reason
+
+def test_rules_match_path_case_insensitivity_and_exception():
+    from maulness.core.rules import _matches_path
+    # Case insensitivity (line 173)
+    assert _matches_path("*.txt", Path("MyFile.TXT"))
+
+    # Exception in target.match (lines 169-170)
+    mock_path = MagicMock(spec=Path)
+    mock_path.match.side_effect = ValueError("bad glob")
+    mock_path.name = "file.txt"
+    mock_path.parts = ("file.txt",)
+    assert _matches_path("*.txt", mock_path)
+
+
+def test_rules_empty_command_and_default_policies():
+    engine_ask = RuleEngine(ExecutionRulesConfig(default_policy=PolicyAction.ASK))
+
+    # Empty command (line 240)
+    pol, reason = engine_ask.evaluate("run_command", {"command": ""})
+    assert pol == PolicyAction.DENY
+    assert "Empty shell command" in reason
+
+    # Default policy with YOLO (line 302-303)
+    pol, reason = engine_ask.evaluate("custom_action", {}, yolo=True)
+    assert pol == PolicyAction.ALLOW
+    assert "YOLO" in reason
+
+    # Default policy ASK without YOLO (line 305)
+    pol, reason = engine_ask.evaluate("custom_action", {}, yolo=False)
+    assert pol == PolicyAction.ASK
+    assert "requires approval by default policy" in reason

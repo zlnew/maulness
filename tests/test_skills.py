@@ -51,3 +51,37 @@ def test_skills_summary_formatting():
     assert "## Available Skills" in summary
     assert "- **alpha**: Alpha skill" in summary
     assert "- **beta**: Beta skill" in summary
+
+def test_discover_skills_nonexistent_dir(tmp_path):
+    manager = SkillManager(root_skills_dir=tmp_path / "nonexistent")
+    assert manager.discover_skills_in_dir(tmp_path / "nonexistent") == {}
+
+
+def test_get_skills_paths_with_profile(tmp_path):
+    prof_skills = tmp_path / "prof_skills"
+    prof_skills.mkdir()
+    manager = SkillManager(root_skills_dir=tmp_path)
+    paths = manager.get_skills_paths(profile_skills_dir=prof_skills)
+    assert str(prof_skills) in paths
+
+
+def test_format_skills_summary_empty():
+    manager = SkillManager()
+    assert manager.format_skills_summary({}) == ""
+
+
+def test_parse_skill_file_error(tmp_path):
+    manager = SkillManager()
+    broken_file = tmp_path / "broken.txt"
+    # When file does not exist, read_text fails
+    assert manager._parse_skill_file(broken_file, tmp_path) is None
+
+def test_list_skills_with_template_dir(tmp_path):
+    tpl_dir = tmp_path / "templates"
+    tpl_dir.mkdir()
+    sk = tpl_dir / "sk1"
+    sk.mkdir()
+    (sk / "SKILL.md").write_text("Instruction")
+    manager = SkillManager(root_skills_dir=tmp_path / "root", template_skills_dir=tpl_dir)
+    res = manager.list_skills()
+    assert "sk1" in res

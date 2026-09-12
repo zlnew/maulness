@@ -74,6 +74,10 @@ def test_checkpoint_and_rollback(tmp_path: Path):
     assert readme.read_text() == "# Test Repo Modified\n"
     assert new_file.exists()
 
+    # Checkpoint on dirty tree
+    cp_dirty = wm.create_checkpoint(repo_path, "dirty_checkpoint")
+    assert cp_dirty is not None
+
     # Rollback to checkpoint 1
     rolled_back = wm.rollback_to_checkpoint(repo_path, cp1)
     assert rolled_back is True
@@ -110,3 +114,105 @@ def test_isolated_worktree_auto_commits_and_preserves_branch(tmp_path: Path):
     assert (repo_path / "docs" / "research.md").exists()
     assert (repo_path / "docs" / "research.md").read_text() == "# Preserved Research Notes\n"
 
+
+def test_isolated_worktree_non_git_repo(tmp_path: Path):
+    non_git = tmp_path / "plain_dir"
+    non_git.mkdir()
+    wm = WorktreeManager()
+
+    with wm.isolated_worktree(non_git) as yielded_path:
+        assert yielded_path == non_git
+
+    assert wm.create_checkpoint(non_git, "label") is None
+    assert wm.rollback_to_checkpoint(non_git, "dummy_hash") is False
+
+
+def test_create_worktree_existing_branch(tmp_path: Path):
+    repo_path = setup_git_repo(tmp_path / "existing_branch_repo")
+    wm = WorktreeManager()
+
+    # Create branch first
+    subprocess.run(["git", "branch", "feature-x"], cwd=str(repo_path), check=True)
+
+    wt = wm.create_worktree(repo_path, branch_name="feature-x")
+    assert wt.exists()
+    assert (wt / "README.md").exists()
+    wm.remove_worktree(repo_path, wt, force=True, delete_branch=True)
+
+
+def test_create_worktree_failure_raises(tmp_path: Path):
+    repo_path = setup_git_repo(tmp_path / "fail_repo")
+    wm = WorktreeManager()
+
+    # Pass nonexistent commit
+    with pytest.raises(RuntimeError, match="Failed to create worktree"):
+        wm.create_worktree(repo_path, branch_name="bad_branch", base_commit="nonexistent_ref_12345")
+
+
+def test_checkpoint_and_rollback_exceptions(tmp_path: Path):
+    repo_path = setup_git_repo(tmp_path / "err_repo")
+    wm = WorktreeManager()
+
+    orig_run = subprocess.run
+    def fail_inside_run(cmd, *args, **kwargs):
+        if "--is-inside-work-tree" in cmd:
+            return orig_run(cmd, *args, **kwargs)
+        raise RuntimeError("Git operation crashed")
+
+    from unittest.mock import patch
+    with patch("subprocess.run", side_effect=fail_inside_run):
+        assert wm.create_checkpoint(repo_path, "fail") is None
+        assert wm.rollback_to_checkpoint(repo_path, "some_hash") is False
+
+
+
+def test_worktree_remove_branch_show_current_exception(tmp_path: Path):
+    repo_path = setup_git_repo(tmp_path / "exc_repo")
+    wm = WorktreeManager()
+    wt = wm.create_worktree(repo_path, branch_name="feat-exc")
+
+    orig_run = subprocess.run
+    def custom_run(cmd, *args, **kwargs):
+        if "--show-current" in cmd:
+            raise RuntimeError("show current error")
+        return orig_run(cmd, *args, **kwargs)
+
+    from unittest.mock import patch
+    with patch("subprocess.run", side_effect=custom_run):
+        # Should catch exception cleanly on line 83-84
+        wm.remove_worktree(repo_path, wt, force=True, delete_branch=True)
+
+
+def test_worktree_fallback_shutil_rmtree(tmp_path: Path):
+    repo_path = setup_git_repo(tmp_path / "shutil_repo")
+    wm = WorktreeManager()
+    wt = wm.create_worktree(repo_path, branch_name="feat-shutil")
+
+    orig_run = subprocess.run
+    def mock_remove_keeps_dir(cmd, *args, **kwargs):
+        if "remove" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return orig_run(cmd, *args, **kwargs)
+
+    from unittest.mock import patch
+    with patch("subprocess.run", side_effect=mock_remove_keeps_dir):
+        # Directory still exists, triggers line 98
+        wm.remove_worktree(repo_path, wt, force=True)
+        assert not wt.exists()
+
+
+def test_worktree_auto_commit_on_exit_exception(tmp_path: Path):
+    repo_path = setup_git_repo(tmp_path / "autocommit_repo")
+    wm = WorktreeManager()
+
+    orig_run = subprocess.run
+    def fail_commit_run(cmd, *args, **kwargs):
+        if "commit" in cmd:
+            raise RuntimeError("Commit failed")
+        return orig_run(cmd, *args, **kwargs)
+
+    from unittest.mock import patch
+    with patch("subprocess.run", side_effect=fail_commit_run):
+        # Auto-commit fails and is caught on lines 153-154
+        with wm.isolated_worktree(repo_path, auto_commit=True) as wt:
+            (wt / "change.txt").write_text("content")

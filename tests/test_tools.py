@@ -466,4 +466,616 @@ def test_action_loop_detector():
     assert not loop
 
 
+def test_truncate_observation_chars_and_empty():
+    from maulness.core.tools import truncate_observation
+
+    assert truncate_observation("") == ""
+
+    # Character truncation
+    huge_str = "x" * 20000
+    res = truncate_observation(huge_str, max_chars=1000)
+    assert "characters omitted for brevity" in res
+    assert len(res) < 2000
+
+
+def test_tombstone_tool_output_all_tools():
+    from maulness.core.tools import tombstone_tool_output
+
+    bulk = "line\n" * 10
+    assert "read_file" in tombstone_tool_output("read_file", {"path": "test.py"}, bulk)
+    assert "write_file" in tombstone_tool_output("write_file", {"path": "test.py"}, bulk)
+    assert "replace_file_content" in tombstone_tool_output("replace_file_content", {"path": "test.py"}, bulk)
+    assert "search_files" in tombstone_tool_output("search_files", {"pattern": "needle"}, bulk)
+    assert "list_dir" in tombstone_tool_output("list_dir", {"path": "."}, bulk)
+    assert "git_status" in tombstone_tool_output("git_status", {"repo_path": "repo"}, bulk)
+
+
+def test_action_loop_detector_edge_cases():
+    from maulness.core.tools import ActionLoopDetector, get_loop_detector
+
+    detector = ActionLoopDetector(window_size=4, repetition_threshold=2)
+    # Empty session
+    loop, msg = detector.record_and_check("", "run_command", {"command": "ls"})
+    assert not loop
+    assert msg == ""
+
+    # Modifying action repeated
+    detector.record_and_check("s1", "write_file", {"path": "a.txt", "content": "1"})
+    loop, msg = detector.record_and_check("s1", "write_file", {"path": "a.txt", "content": "1"})
+    assert loop
+    assert "[LOOP INTERVENTION]" in msg
+
+    # Clear specific session
+    detector.clear("s1")
+    assert "s1" not in detector._history
+
+    # Clear all
+    detector.record_and_check("s2", "list_dir", {})
+    detector.clear()
+    assert len(detector._history) == 0
+
+    assert get_loop_detector() is not None
+
+
+def test_active_turn_cache_and_history():
+    from maulness.core.tools import (
+        _ACTIVE_TURN_HISTORY,
+        _ACTIVE_TURN_CACHE,
+        get_turn_executed_tools,
+        clear_turn_tools,
+    )
+
+    session_id = "session_cache_test"
+    _ACTIVE_TURN_HISTORY[session_id] = [{"tool": "read_file"}]
+    _ACTIVE_TURN_CACHE[session_id] = {"k": "v"}
+
+    tools = get_turn_executed_tools(session_id)
+    assert len(tools) == 1
+    assert tools[0]["tool"] == "read_file"
+
+    clear_turn_tools(session_id)
+    assert len(get_turn_executed_tools(session_id)) == 0
+
+
+def test_build_sandboxed_command_options(tmp_path: Path, monkeypatch):
+    from maulness.core.tools import build_sandboxed_command
+
+    # Disabled mode
+    cmd, is_shell = build_sandboxed_command("echo 1", tmp_path, sandbox_mode="disabled")
+    assert cmd == "echo 1"
+    assert is_shell is True
+
+    # None mode
+    cmd, is_shell = build_sandboxed_command("echo 2", tmp_path, sandbox_mode="none")
+    assert cmd == "echo 2"
+    assert is_shell is True
+
+    # Missing bwrap
+    monkeypatch.setattr("shutil.which", lambda prog: None)
+    cmd, is_shell = build_sandboxed_command("echo 3", tmp_path, sandbox_mode="bwrap")
+    assert cmd == "echo 3"
+    assert is_shell is True
+
+
+@pytest.mark.asyncio
+async def test_read_file_edge_cases(tmp_path: Path):
+    f = tmp_path / "sample.txt"
+    f.write_text("L1\nL2\nL3\nL4\nL5")
+
+    # start_line > total_lines
+    res = await execute_tool_call(
+        name="read_file",
+        args={"path": str(f), "start_line": 10},
+        workspace_path=tmp_path,
+    )
+    assert "exceeds total lines" in res
+
+    # start_line > end_line
+    res = await execute_tool_call(
+        name="read_file",
+        args={"path": str(f), "start_line": 4, "end_line": 2},
+        workspace_path=tmp_path,
+    )
+    assert "is greater than end_line" in res
+
+    # target is a directory
+    sub = tmp_path / "dir"
+    sub.mkdir()
+    res = await execute_tool_call(
+        name="read_file",
+        args={"path": str(sub)},
+        workspace_path=tmp_path,
+    )
+    assert "is a directory" in res
+
+    # File > 50,000 characters
+    big_file = tmp_path / "big.txt"
+    big_file.write_text("A" * 60000)
+    res = await execute_tool_call(
+        name="read_file",
+        args={"path": str(big_file)},
+        workspace_path=tmp_path,
+    )
+    assert "truncated 50,000 chars" in res
+
+
+@pytest.mark.asyncio
+async def test_write_file_rejection_and_error(tmp_path: Path, monkeypatch):
+    async def reject(req):
+        return False
+
+    res = await execute_tool_call(
+        name="write_file",
+        args={"path": "rejected.txt", "content": "data"},
+        workspace_path=tmp_path,
+        on_approval=reject,
+        yolo=False,
+    )
+    assert "Write cancelled: User rejected" in res
+
+    # Write error
+    monkeypatch.setattr(Path, "write_text", lambda self, *args, **kwargs: (_ for _ in ()).throw(OSError("Disk full")))
+    res = await execute_tool_call(
+        name="write_file",
+        args={"path": "err.txt", "content": "data"},
+        workspace_path=tmp_path,
+        yolo=True,
+    )
+    assert "Error writing file" in res
+
+
+@pytest.mark.asyncio
+async def test_replace_file_content_rejection(tmp_path: Path):
+    f = tmp_path / "target.txt"
+    f.write_text("orig")
+
+    async def reject(req):
+        return False
+
+    res = await execute_tool_call(
+        name="replace_file_content",
+        args={"path": str(f), "target_content": "orig", "replacement_content": "new"},
+        workspace_path=tmp_path,
+        on_approval=reject,
+        yolo=False,
+    )
+    assert "Execution cancelled: User rejected" in res
+
+
+@pytest.mark.asyncio
+async def test_search_files_edge_cases(tmp_path: Path, monkeypatch):
+    # Empty pattern
+    res = await execute_tool_call(
+        name="search_files",
+        args={"pattern": ""},
+        workspace_path=tmp_path,
+    )
+    assert "No pattern provided" in res
+
+    # Invalid regex pattern (fallback path)
+    from maulness.core.tools import _execute_search_files
+    monkeypatch.setattr("shutil.which", lambda x: None)  # force python fallback
+    res = await _execute_search_files(pattern="[unclosed", target_dir=tmp_path)
+    assert "Invalid regex pattern" in res
+
+    # Fallback search with match
+    (tmp_path / "file1.py").write_text("def hello_world(): pass")
+    (tmp_path / "file2.txt").write_text("other stuff")
+    res = await _execute_search_files(pattern="hello_world", target_dir=tmp_path, glob_pattern="*.py")
+    assert "hello_world" in res
+    assert "file1.py" in res
+
+    # Fallback search no match
+    res = await _execute_search_files(pattern="nonexistent_needle", target_dir=tmp_path)
+    assert "No matches found" in res
+
+
+@pytest.mark.asyncio
+async def test_list_dir_edge_cases(tmp_path: Path):
+    # Nonexistent dir
+    res = await execute_tool_call(
+        name="list_dir",
+        args={"path": str(tmp_path / "missing_dir")},
+        workspace_path=tmp_path,
+    )
+    assert "Directory" in res and "not found" in res
+
+    # Empty dir
+    empty = tmp_path / "empty_dir"
+    empty.mkdir()
+    res = await execute_tool_call(
+        name="list_dir",
+        args={"path": str(empty)},
+        workspace_path=tmp_path,
+    )
+    assert "(Directory is empty)" in res
+
+
+@pytest.mark.asyncio
+async def test_git_status_edge_cases(tmp_path: Path):
+    import subprocess
+    # Run git status in empty non-git dir
+    res = await execute_tool_call(
+        name="git_status",
+        args={"repo_path": str(tmp_path)},
+        workspace_path=tmp_path,
+    )
+    assert "Error running git status" in res or "fatal" in res or "Working tree clean" in res
+
+    # Init git repo
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path)
+    res = await execute_tool_call(
+        name="git_status",
+        args={"repo_path": str(tmp_path)},
+        workspace_path=tmp_path,
+    )
+    assert "Working tree clean" in res
+
+
+def test_detect_simulated_tool_call_all_variants():
+    from maulness.core.tools import detect_simulated_tool_call
+
+    assert detect_simulated_tool_call("") is None
+    assert detect_simulated_tool_call("Just talking here") is None
+    assert detect_simulated_tool_call("> **fake_tool: test**") is None
+
+    t, a = detect_simulated_tool_call("> **run_command: pytest -v**")
+    assert t == "run_command"
+    assert a["command"] == "pytest -v"
+
+    t, a = detect_simulated_tool_call("> **read_file: src/main.py**")
+    assert t == "read_file"
+    assert a["path"] == "src/main.py"
+
+    t, a = detect_simulated_tool_call("> **write_file: src/out.txt**")
+    assert t == "write_file"
+    assert a["path"] == "src/out.txt"
+
+    t, a = detect_simulated_tool_call("> **replace_file_content: src/main.py**")
+    assert t == "replace_file_content"
+
+    t, a = detect_simulated_tool_call("> **search_files: def run**")
+    assert t == "search_files"
+
+    t, a = detect_simulated_tool_call("> **git_status**")
+    assert t == "git_status"
+
+
+def test_clean_history_message_all_variants():
+    from maulness.core.tools import clean_history_message
+
+    assert clean_history_message("") == ""
+
+    # Multiline
+    multiline = "> **run_command: ls**:\n```\nfile1.txt\nfile2.txt\n```\nNow I will proceed."
+    assert clean_history_message(multiline) == "Now I will proceed."
+
+    # Single line
+    single = "> **`read_file: a.txt`** -> `content`\n\nI have read the file."
+    assert clean_history_message(single) == "I have read the file."
+
+    # All breadcrumbs stripped leading to fallback
+    only_crumb = "> **run_command: ls** -> `ok`"
+    cleaned = clean_history_message(only_crumb)
+    assert "[" in cleaned and "]" in cleaned
+
+
+def test_extract_checkpoint_info_all_variants():
+    from maulness.core.tools import extract_checkpoint_info
+
+    assert extract_checkpoint_info("") == (False, "", "")
+
+    # Finished
+    is_in, _, _ = extract_checkpoint_info("[STATUS: COMPLETE] All done.")
+    assert not is_in
+
+    # In progress with next step
+    text = "[STATUS: IN_PROGRESS]\n- [ ] Task item\nNext step: Run the tests"
+    is_in, body, next_step = extract_checkpoint_info(text)
+    assert is_in
+    assert next_step == "Run the tests"
+
+    # In progress with Next:
+    text2 = "Moving forward.\nNext: Deploy container"
+    is_in, _, next_step = extract_checkpoint_info(text2)
+    assert is_in
+    assert next_step == "Deploy container"
+
+    # Pending item marked -> next
+    text3 = "Here is the checklist:\n1. Update db -> next\n2. Run migration"
+    is_in, _, next_step = extract_checkpoint_info(text3)
+    assert is_in
+    assert "Update db -> next" in next_step
+
+
+def test_clean_relay_completion_tags():
+    from maulness.core.tools import clean_relay_completion_tags
+
+    assert clean_relay_completion_tags("") == ""
+    assert clean_relay_completion_tags("Hello world [STATUS: COMPLETE]") == "Hello world"
+    assert clean_relay_completion_tags("Task done [STATUS: FINISHED]") == "Task done"
+
+
+def test_tools_resolve_path_parent_and_home(tmp_path: Path):
+    from unittest.mock import patch
+
+    # 1. Base parent candidate exists (line 196)
+    sub = tmp_path / "child"
+    sub.mkdir()
+    sibling = tmp_path / "sibling.txt"
+    sibling.write_text("parent data")
+    resolved_parent = resolve_path(Path("sibling.txt"), workspace_path=sub)
+    assert resolved_parent == sibling.resolve()
+
+    # 2. Home candidate exists (line 201)
+    home_dir = tmp_path / "fake_home"
+    home_dir.mkdir()
+    home_file = home_dir / "user_home.txt"
+    home_file.write_text("home data")
+    with patch("pathlib.Path.home", return_value=home_dir):
+        resolved_home = resolve_path(Path("user_home.txt"), workspace_path=sub)
+        assert resolved_home == home_file.resolve()
+
+
+def test_loop_detector_unserializable_args():
+    from maulness.core.tools import ActionLoopDetector
+
+    ld = ActionLoopDetector()
+    # Dict with mixed unorderable keys will cause sort_keys=True in json.dumps to fail
+    bad_args = {1: "a", "b": "c"}
+    h = ld._hash_args(bad_args)
+    assert isinstance(h, str) and len(h) == 16
+
+
+@pytest.mark.asyncio
+async def test_tools_loop_intervention_and_generic_hitl_ask(tmp_path: Path):
+    from unittest.mock import MagicMock
+    from maulness.core.rules import PolicyAction
+    from maulness.core.tools import _LOOP_DETECTOR, execute_tool_call
+
+    session_id = "test_loop_sess"
+    _LOOP_DETECTOR._history.clear()
+
+    # 1. Loop detection intervention (line 435)
+    for _ in range(_LOOP_DETECTOR.repetition_threshold):
+        _LOOP_DETECTOR.record_and_check(session_id, "write_file", {"path": "loop.txt", "content": "same"})
+
+    res_loop = await execute_tool_call(
+        name="write_file",
+        args={"path": "loop.txt", "content": "same"},
+        workspace_path=tmp_path,
+        session_id=session_id,
+        yolo=True,
+    )
+    assert "[LOOP INTERVENTION]" in res_loop
+
+    # 2. Policy DENY gate (lines 428-430)
+    mock_engine_deny = MagicMock()
+    mock_engine_deny.evaluate.return_value = (PolicyAction.DENY, "blocked by test policy")
+    res_deny = await execute_tool_call(
+        name="custom_tool",
+        args={"foo": "bar"},
+        workspace_path=tmp_path,
+        rule_engine=mock_engine_deny,
+    )
+    assert "Execution blocked by security policy: blocked by test policy" in res_deny
+
+    # 3. Generic HITL Gate for custom tool with ASK (lines 440-449)
+    mock_engine_ask = MagicMock()
+    mock_engine_ask.evaluate.return_value = (PolicyAction.ASK, "requires review")
+
+    async def reject_cb(req: ApprovalRequestEvent) -> bool:
+        assert req.tool_name == "custom_tool"
+        return False
+
+    async def approve_cb(req: ApprovalRequestEvent) -> bool:
+        return True
+
+    res_rejected = await execute_tool_call(
+        name="custom_tool",
+        args={"foo": "bar"},
+        workspace_path=tmp_path,
+        rule_engine=mock_engine_ask,
+        on_approval=reject_cb,
+        yolo=False,
+    )
+    assert "Execution cancelled: User rejected tool 'custom_tool'" in res_rejected
+
+    res_approved = await execute_tool_call(
+        name="custom_tool",
+        args={"foo": "bar"},
+        workspace_path=tmp_path,
+        rule_engine=mock_engine_ask,
+        on_approval=approve_cb,
+        yolo=False,
+    )
+    assert "Error: Unknown tool 'custom_tool'" in res_approved
+
+
+def test_execute_replace_file_content_edge_cases(tmp_path: Path):
+    from unittest.mock import patch
+    from maulness.core.tools import _execute_replace_file_content
+
+    # Line 484: not exists
+    res_not_exists = _execute_replace_file_content(tmp_path / "ghost.txt", "a", "b")
+    assert "does not exist" in res_not_exists
+
+    # Line 486: is_dir
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    res_dir = _execute_replace_file_content(sub, "a", "b")
+    assert "is a directory" in res_dir
+
+    # Line 488: empty target_content
+    f = tmp_path / "file.txt"
+    f.write_text("data")
+    res_empty = _execute_replace_file_content(f, "", "b")
+    assert "must not be empty" in res_empty
+
+    # Line 492-493: read error
+    with patch.object(Path, "read_text", side_effect=PermissionError("Permission denied")):
+        res_read_err = _execute_replace_file_content(f, "data", "new")
+        assert "Error reading file" in res_read_err
+
+    # Line 519-520: write error
+    with patch.object(Path, "write_text", side_effect=OSError("Disk full")):
+        res_write_err = _execute_replace_file_content(f, "data", "new")
+        assert "Error writing file" in res_write_err
+
+
+@pytest.mark.asyncio
+async def test_execute_search_files_edge_cases(tmp_path: Path):
+    from unittest.mock import patch
+    import subprocess
+    from maulness.core.tools import _execute_search_files
+
+    # Line 532: directory does not exist
+    res_no_dir = await _execute_search_files("foo", tmp_path / "missing_dir")
+    assert "does not exist" in res_no_dir
+
+    # Line 559: ripgrep >= max_results capped
+    mock_rg_out = "\n".join([f"file.py:{i}: match {i}" for i in range(1, 60)])
+    mock_completed = subprocess.CompletedProcess(args=["rg"], returncode=0, stdout=mock_rg_out, stderr="")
+    with patch("shutil.which", return_value="/usr/bin/rg"):
+        with patch("subprocess.run", return_value=mock_completed):
+            res_rg_capped = await _execute_search_files("match", tmp_path, max_results=50)
+            assert "Results capped at 50 matches" in res_rg_capped
+
+    # Line 561-562: ripgrep exception falls back to python search
+    # And python search skips unreadable files (lines 584-586, 588, 590, 596)
+    search_dir = tmp_path / "search_test"
+    search_dir.mkdir()
+    unreadable = search_dir / "00_unreadable.txt"
+    unreadable.write_text("special_token")
+    for i in range(1, 55):
+        (search_dir / f"f_{i}.txt").write_text(f"special_token in line {i}\n")
+
+    orig_read_text = Path.read_text
+    def fake_read_text(self, *args, **kwargs):
+        if self.name == "00_unreadable.txt":
+            raise PermissionError("Access denied")
+        return orig_read_text(self, *args, **kwargs)
+
+    with patch("shutil.which", return_value="/usr/bin/rg"):
+        with patch("subprocess.run", side_effect=RuntimeError("Ripgrep crash")):
+            with patch.object(Path, "read_text", fake_read_text):
+                res_py_fallback = await _execute_search_files("special_token", search_dir, max_results=50)
+                assert "Results capped at 50 matches" in res_py_fallback
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_action_all_exceptions_and_empty_cmd(tmp_path: Path):
+    from unittest.mock import patch
+    import subprocess
+    from maulness.core.rules import PolicyAction
+    from maulness.core.tools import _execute_tool_action
+
+    # Line 616: run_command empty command
+    res_empty_cmd = await _execute_tool_action(
+        name="run_command",
+        args={"command": "   "},
+        cwd=tmp_path,
+        session_id="sess",
+        policy=PolicyAction.ALLOW,
+        on_approval=None,
+        yolo=True,
+    )
+    assert res_empty_cmd == "Error: No command provided."
+
+    # Lines 650-651: run_command timeout
+    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="sleep 100", timeout=60)):
+        res_timeout = await _execute_tool_action(
+            name="run_command",
+            args={"command": "sleep 100"},
+            cwd=tmp_path,
+            session_id="sess",
+            policy=PolicyAction.ALLOW,
+            on_approval=None,
+            yolo=True,
+        )
+        assert "timed out after 60s" in res_timeout
+
+    # Lines 652-653: run_command general exception
+    with patch("subprocess.run", side_effect=RuntimeError("Subprocess failed")):
+        res_cmd_err = await _execute_tool_action(
+            name="run_command",
+            args={"command": "echo test"},
+            cwd=tmp_path,
+            session_id="sess",
+            policy=PolicyAction.ALLOW,
+            on_approval=None,
+            yolo=True,
+        )
+        assert "Error executing command: Subprocess failed" in res_cmd_err
+
+    # Lines 684-685: read_file general exception
+    f = tmp_path / "read_err.txt"
+    f.write_text("data")
+    with patch.object(Path, "read_text", side_effect=PermissionError("Locked")):
+        res_read_err = await _execute_tool_action(
+            name="read_file",
+            args={"path": str(f)},
+            cwd=tmp_path,
+            session_id="sess",
+            policy=PolicyAction.ALLOW,
+            on_approval=None,
+            yolo=True,
+        )
+        assert "Error reading file" in res_read_err
+
+    # Lines 760-761: list_dir general exception
+    with patch.object(Path, "iterdir", side_effect=PermissionError("Cannot list")):
+        res_list_err = await _execute_tool_action(
+            name="list_dir",
+            args={"path": str(tmp_path)},
+            cwd=tmp_path,
+            session_id="sess",
+            policy=PolicyAction.ALLOW,
+            on_approval=None,
+            yolo=True,
+        )
+        assert "Error listing directory" in res_list_err
+
+    # Lines 776-777: git_status general exception
+    with patch("subprocess.run", side_effect=RuntimeError("Git failed")):
+        res_git_err = await _execute_tool_action(
+            name="git_status",
+            args={"repo_path": str(tmp_path)},
+            cwd=tmp_path,
+            session_id="sess",
+            policy=PolicyAction.ALLOW,
+            on_approval=None,
+            yolo=True,
+        )
+        assert "Error running git status" in res_git_err
+
+
+def test_format_lean_tool_breadcrumb_all_branches():
+    from maulness.core.tools import format_lean_tool_breadcrumb
+
+    # Lines 789, 791-792, 794: branches
+    b1 = format_lean_tool_breadcrumb("write_file", {"path": "test.txt"}, "done")
+    assert "write_file: test.txt" in b1
+
+    b2 = format_lean_tool_breadcrumb("replace_file_content", {"path": "test.py"}, "replaced")
+    assert "replace_file_content: test.py" in b2
+
+    long_pat = "a" * 50
+    b3 = format_lean_tool_breadcrumb("search_files", {"pattern": long_pat}, "matches")
+    assert "search_files: '" in b3
+
+    b4 = format_lean_tool_breadcrumb("list_dir", {}, "files")
+    assert "list_dir: ." in b4
+
+    # Line 807: Multiline output with > 8 lines
+    many_lines = "\n".join([f"Line {i}" for i in range(1, 15)])
+    b5 = format_lean_tool_breadcrumb("run_command", {"command": "cat long.txt"}, many_lines)
+    assert "+8 more lines" in b5
+
+
+
+
+
 

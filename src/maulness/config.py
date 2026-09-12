@@ -3,18 +3,23 @@ from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 
+from maulness.core.rules import ExecutionRulesConfig
+
 CONFIG_DIR = Path.home() / ".config" / "maulness"
 ENV_FILE = CONFIG_DIR / "env"
 DOTENV_FILE = CONFIG_DIR / ".env"
 LOCAL_ENV_FILE = Path.cwd() / ".env"
 
-# Load ~/.config/maulness/.env or ~/.config/maulness/env, then local .env
-if DOTENV_FILE.exists():
-    load_dotenv(DOTENV_FILE)
-elif ENV_FILE.exists():
-    load_dotenv(ENV_FILE)
-elif LOCAL_ENV_FILE.exists():
-    load_dotenv(LOCAL_ENV_FILE)
+def load_env_files() -> None:
+    # Load ~/.config/maulness/.env or ~/.config/maulness/env, then local .env
+    if DOTENV_FILE.exists():
+        load_dotenv(DOTENV_FILE)
+    elif ENV_FILE.exists():
+        load_dotenv(ENV_FILE)
+    elif LOCAL_ENV_FILE.exists():
+        load_dotenv(LOCAL_ENV_FILE)
+
+load_env_files()
 
 
 class Config:
@@ -55,7 +60,6 @@ class Config:
         self.sandbox_mode: str = os.getenv("SANDBOX_MODE", "auto").lower()
 
         # Execution Rules (allow, deny, ask)
-        from maulness.core.rules import ExecutionRulesConfig
         self.global_rules: ExecutionRulesConfig = ExecutionRulesConfig()
 
         # Gateway Multiplexing (Hermes-style)

@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from maulness.core.kernel.gates import (
     DeterministicGateRunner,
@@ -313,3 +313,201 @@ async def test_orchestrator_deterministic_gate_auto_rework(tmp_path: Path, monke
     # Builder should have run twice (cycle 1 failed gate -> rework -> cycle 2 passed gate)
     # Then reviewer ran once = 3 total runs
     assert run_count == 3
+
+
+def test_gate_result_feedback_prompt_formatting():
+    # 1. Passed gate
+    passed_result = GateResult(passed=True, command="pytest", exit_code=0, summary="All 5 passed")
+    prompt = passed_result.to_feedback_prompt()
+    assert "passed for `pytest`: All 5 passed" in prompt
+
+    # 2. Failed gate with details
+    failed_with_details = GateResult(
+        passed=False,
+        command="pytest",
+        exit_code=1,
+        summary="1 failed",
+        failures=[
+            GateFailureItem(
+                identifier="test_auth",
+                message="AuthError",
+                details="Traceback:\n  line 42 in test\n    assert False",
+            )
+        ],
+    )
+    prompt2 = failed_with_details.to_feedback_prompt()
+    assert "test_auth" in prompt2
+    assert "Details:" in prompt2
+    assert "line 42 in test" in prompt2
+
+    # 3. Failed gate without structured failures (raw output tail)
+    failed_raw = GateResult(
+        passed=False,
+        command="make",
+        exit_code=2,
+        summary="Compilation error",
+        failures=[],
+        stdout="",
+        stderr="Error line 1\nError line 2\nfatal: compilation terminated.",
+    )
+    prompt3 = failed_raw.to_feedback_prompt()
+    assert "### Error Output:" in prompt3
+    assert "compilation terminated" in prompt3
+
+
+def test_normalize_pytest_block_traceback():
+    import textwrap
+
+    pytest_block_output = textwrap.dedent("""
+=================================== FAILURES ===================================
+_______________________________ test_database __________________________________
+    def test_database():
+>       raise KeyError("missing_col")
+E       KeyError: 'missing_col'
+
+tests/test_db.py:20: KeyError
+""")
+    result = SemanticErrorNormalizer.normalize(
+        command="pytest tests/test_db.py",
+        exit_code=1,
+        stdout=pytest_block_output,
+        stderr="",
+    )
+    assert result.passed is False
+    assert len(result.failures) == 1
+    assert result.failures[0].identifier == "test_database"
+    assert "KeyError: 'missing_col'" in result.failures[0].message
+
+
+def test_normalize_unittest():
+    unittest_output = """
+FAIL: test_addition (tests.test_math.MathTestCase)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "test_math.py", line 12, in test_addition
+    self.assertEqual(1 + 1, 3)
+AssertionError: 2 != 3
+
+----------------------------------------------------------------------
+FAILED (failures=1)
+"""
+    result = SemanticErrorNormalizer.normalize(
+        command="python -m unittest",
+        exit_code=1,
+        stdout=unittest_output,
+        stderr="",
+    )
+    assert result.passed is False
+    assert len(result.failures) == 1
+    assert "MathTestCase.test_addition" in result.failures[0].identifier
+    assert "AssertionError: 2 != 3" in result.failures[0].message
+    assert "failures=1" in result.summary
+
+
+def test_normalize_javascript_tests():
+    jest_output = """
+FAIL src/auth.test.ts
+  ● Auth > should login
+    expect(received).toBe(expected)
+
+FAIL src/user.test.ts
+  ● User > should fetch profile
+
+Tests:       2 failed, 10 passed, 12 total
+"""
+    result = SemanticErrorNormalizer.normalize(
+        command="npm test",
+        exit_code=1,
+        stdout=jest_output,
+        stderr="",
+    )
+    assert result.passed is False
+    assert len(result.failures) == 2
+    assert "src/auth.test.ts" in result.failures[0].identifier
+    assert "src/user.test.ts" in result.failures[1].identifier
+    assert "2 failed, 10 passed" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_deterministic_gate_runner_timeout_and_error(tmp_path: Path):
+    storage = StorageManager(db_path=tmp_path / "gate_test.db")
+    await storage.initialize()
+
+    runner = DeterministicGateRunner(storage=storage)
+
+    # 1. Subprocess raises exception
+    with patch("asyncio.create_subprocess_exec", side_effect=PermissionError("Cannot execute")):
+        res = await runner.run_gate(
+            command="./forbidden.sh",
+            workspace_path=tmp_path,
+            task_id="t1",
+            stage="building",
+            step_index=1,
+        )
+        assert res.passed is False
+        assert res.exit_code == -1
+        assert "Cannot execute" in res.summary
+
+    # 2. Subprocess times out
+    mock_proc = MagicMock()
+    mock_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
+    mock_proc.kill = MagicMock()
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+        res2 = await runner.run_gate(
+            command="sleep 100",
+            workspace_path=tmp_path,
+            timeout_seconds=0.1,
+            task_id="t1",
+            stage="building",
+            step_index=2,
+        )
+        assert res2.passed is False
+        assert res2.exit_code == -1
+        assert "timed out" in res2.summary.lower()
+
+
+def test_extract_success_summary_cargo_and_go():
+    cargo_summary = SemanticErrorNormalizer._extract_success_summary("test result: ok. 12 passed; 0 failed;", "")
+    assert cargo_summary == "12 passed"
+
+    go_summary = SemanticErrorNormalizer._extract_success_summary("ok  github.com/org/repo  0.123s", "")
+    assert go_summary == "ok github.com/org/repo in 0.123s"
+
+
+def test_normalize_pytest_no_failures_fallback_summary():
+    res = SemanticErrorNormalizer.normalize("pytest", exit_code=2, stdout="INTERNAL ERROR", stderr="")
+    assert res.passed is False
+    assert res.summary == "Pytest failed with exit code 2"
+
+
+def test_normalize_cargo_without_panic_line():
+    cargo_out = """
+---- tests::test_no_panic stdout ----
+failures:
+tests::test_no_panic
+Custom error description line
+test result: FAILED. 1 failed; 0 passed;
+"""
+    res = SemanticErrorNormalizer.normalize("cargo test", exit_code=101, stdout=cargo_out, stderr="")
+    assert res.passed is False
+    assert len(res.failures) == 1
+    assert res.failures[0].identifier == "tests::test_no_panic"
+    assert res.failures[0].message == "Custom error description line"
+
+
+@pytest.mark.asyncio
+async def test_deterministic_gate_runner_storage_event_error(tmp_path: Path):
+    storage = StorageManager(db_path=tmp_path / "gate_test.db")
+    await storage.initialize()
+    runner = DeterministicGateRunner(storage=storage)
+
+    with patch.object(storage, "record_agent_event", side_effect=RuntimeError("event record failed")):
+        res = await runner.run_gate(
+            command="echo success",
+            workspace_path=tmp_path,
+            task_id="t_storage_err",
+            stage="test",
+            step_index=1,
+        )
+        assert res.passed is True

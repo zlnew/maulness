@@ -132,3 +132,80 @@ async def test_fallback_chain_fast_bypass():
     # Circuit MUST now be reset to CLOSED
     assert health_primary.state == CircuitState.CLOSED
     assert health_primary.consecutive_failures == 0
+
+
+def test_classify_additional_errors():
+    c_500, msg_500 = classify_provider_error(Exception("500 INTERNAL_SERVER_ERROR"))
+    assert c_500 == ErrorClassification.SERVER_ERROR
+
+    c_502, msg_502 = classify_provider_error(Exception("502 Bad Gateway"))
+    assert c_502 == ErrorClassification.SERVER_ERROR
+
+    c_api, msg_api = classify_provider_error(Exception("API_KEY_INVALID"))
+    assert c_api == ErrorClassification.AUTH_ERROR
+
+    c_403, msg_403 = classify_provider_error(Exception("403 Forbidden: PERMISSION_DENIED"))
+    assert c_403 == ErrorClassification.AUTH_ERROR
+
+    c_unk, msg_unk = classify_provider_error(Exception("Some weird unknown failure"))
+    assert c_unk == ErrorClassification.UNKNOWN
+
+
+def test_circuit_cooldown_types():
+    health_to = ProviderHealth(provider_key="timeout_prov")
+    tripped, _, cd = health_to.record_failure(TimeoutError("Read timed out"), now=100.0)
+    assert tripped is True
+    assert cd == 45
+
+    health_srv = ProviderHealth(provider_key="srv_prov")
+    tripped, _, cd = health_srv.record_failure(Exception("503 Unavailable"), now=100.0)
+    assert tripped is True
+    assert cd == 30
+
+    health_auth = ProviderHealth(provider_key="auth_prov")
+    tripped, _, cd = health_auth.record_failure(Exception("401 Unauthorized"), now=100.0)
+    assert tripped is True
+    assert cd == 3600
+
+    health_unk = ProviderHealth(provider_key="unk_prov")
+    tripped, _, cd = health_unk.record_failure(Exception("Something weird"), now=100.0)
+    assert tripped is True
+    assert cd == 30
+
+
+
+def test_registry_format_and_reset():
+    reg = ProviderHealthRegistry()
+    reg.reset_instance()
+    reg = ProviderHealthRegistry.get_instance()
+
+    # Empty
+    assert "No provider health data" in reg.format_status_text()
+
+    # Add closed provider
+    reg.record_success("p1")
+    assert reg.is_available("p1") is True
+
+    # Add open provider
+    reg.record_failure("p2", Exception("429 Quota"))
+
+    # Add half-open provider
+    h3 = reg.get_or_create("p3")
+    h3.state = CircuitState.HALF_OPEN
+    assert h3.is_available() is True
+    h3.state = "unknown"
+    assert h3.is_available() is False
+    h3.state = CircuitState.HALF_OPEN
+
+    status_text = reg.format_status_text()
+    assert "**HEALTHY** (CLOSED)" in status_text
+    assert "**COOLDOWN** (OPEN" in status_text
+    assert "**PROBATION** (HALF_OPEN" in status_text
+
+    # Reset all
+    reg.reset_all()
+    status_text2 = reg.format_status_text()
+    assert "**COOLDOWN**" not in status_text2
+    assert reg.get_or_create("p2").state == CircuitState.CLOSED
+
+
