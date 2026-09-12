@@ -596,3 +596,52 @@ async def test_kernel_fallback_note_on_message(temp_storage, tmp_path):
     )
     assert "Agent completed tool executions but did not produce a final textual summary" in res
     assert any("Agent completed tool executions" in m for m in msg_deltas)
+
+
+@pytest.mark.asyncio
+async def test_kernel_empty_content_with_thought_retries_and_succeeds(temp_storage, tmp_path):
+    """Test that if a reasoning model emits empty visible content after tools, the kernel retries and extracts the final text."""
+    profile = Profile(identity={"name": "life"}, agent={"provider": "ollama", "model": "gpt-oss:120b-cloud"})
+    kernel = DurableAgentKernel(profile=profile, storage=temp_storage)
+
+    turn = 0
+    tools_passed = []
+
+    async def thought_only_gen(messages, tools, session_id, **kwargs):
+        nonlocal turn
+        turn += 1
+        tools_passed.append(tools)
+        if turn == 1:
+            return ModelTurnOutput(
+                content="",
+                tool_calls=[{"id": "c1", "name": "run_command", "arguments": {"command": "echo data"}}],
+            )
+        elif turn == 2:
+            # Model thinks it is done, outputs thought but empty visible text and no tool calls
+            return ModelTurnOutput(
+                content="",
+                thought="We analyzed 100 items. Need to count frequencies. Probably easier to run a script.",
+                tool_calls=[],
+            )
+        elif turn == 3:
+            # Retry turn: receives system prompt asking for final answer, tools stripped
+            return ModelTurnOutput(
+                content="Here is the final summary: Parkir and Bensin are the most frequent expenses.",
+                tool_calls=[],
+            )
+        return ModelTurnOutput(content="extra")
+
+    res = await kernel.run(
+        turn_generator_fn=thought_only_gen,
+        session_id="t_thought_retry",
+        prompt="Get my most frequent expenses",
+        workspace_path=tmp_path,
+    )
+
+    # Must have called generator 3 times (tool, thought-only, retry)
+    assert turn == 3
+    # Turn 3 must have had tools=None (forced synthesis mode)
+    assert tools_passed[2] is None
+    # Result must contain the final synthesized answer and no fallback warning
+    assert "Here is the final summary: Parkir and Bensin are the most frequent expenses." in res
+    assert "*(Summary derived from agent analysis:)*" not in res

@@ -268,19 +268,19 @@ class DurableAgentKernel:
                 # If no tool calls produced, turn cycle completed
                 if not tool_calls or forcing_synthesis:
                     if (
-                        forcing_synthesis
-                        and not (turn_output.content and turn_output.content.strip())
+                        not (turn_output.content and turn_output.content.strip())
                         and not synthesis_retried
                     ):
                         synthesis_retried = True
+                        forcing_synthesis = True  # strip tools so model must synthesize final text
                         logger.info(
-                            "[kernel] Model produced reasoning but empty visible content during forced synthesis; retrying for explicit user text"
+                            "[kernel] Model completed tool execution but emitted empty visible content; retrying for final textual answer"
                         )
                         current_messages.append(
                             {
                                 "role": "user",
                                 "content": (
-                                    "[SYSTEM NOTE: You generated reasoning but did not output a visible answer to the user. "
+                                    "[SYSTEM NOTE: You analyzed the data in internal reasoning, but did not generate a final textual response to the user. "
                                     "Formulate and output your final textual answer to the user now based on your reasoning and the tool results above. "
                                     "Do not call any tools or output only internal thought.]"
                                 ),
