@@ -107,9 +107,13 @@ async def test_orchestrator_execution(tmp_path: Path, monkeypatch):
 
     from maulness.core import pipeline as pipeline_module
 
-    monkeypatch.setattr(pipeline_module, "get_provider_for_profile", lambda p: MockProvider())
+    monkeypatch.setattr(
+        pipeline_module, "get_provider_for_profile", lambda p: MockProvider()
+    )
 
-    orchestrator = PipelineOrchestrator(storage=storage, pipeline_manager=pipeline_manager)
+    orchestrator = PipelineOrchestrator(
+        storage=storage, pipeline_manager=pipeline_manager
+    )
     task = await orchestrator.run_pipeline(
         repo_name="maulness",
         title="Test Pipeline Task",
@@ -134,7 +138,9 @@ def test_verdict_helpers():
     assert check_is_rework_verdict("Scorecard: rework")
     assert not check_is_rework_verdict("[DECISION: PASS]")
     assert not check_is_rework_verdict("Decision: PASS")
-    assert not check_is_rework_verdict("Provide an audit scorecard: PASS or REWORK with reasons.")
+    assert not check_is_rework_verdict(
+        "Provide an audit scorecard: PASS or REWORK with reasons."
+    )
     assert not check_is_rework_verdict("")
 
     # Pass verdicts
@@ -219,9 +225,13 @@ async def test_orchestrator_cyclic_rework_loop(tmp_path: Path, monkeypatch):
 
     from maulness.core import pipeline as pipeline_module
 
-    monkeypatch.setattr(pipeline_module, "get_provider_for_profile", lambda p: CyclicMockProvider())
+    monkeypatch.setattr(
+        pipeline_module, "get_provider_for_profile", lambda p: CyclicMockProvider()
+    )
 
-    orchestrator = PipelineOrchestrator(storage=storage, pipeline_manager=pipeline_manager)
+    orchestrator = PipelineOrchestrator(
+        storage=storage, pipeline_manager=pipeline_manager
+    )
     task = await orchestrator.run_pipeline(
         repo_name="cyclic_repo",
         title="Cyclic Feature Task",
@@ -299,9 +309,13 @@ async def test_orchestrator_cyclic_max_reworks_cap(tmp_path: Path, monkeypatch):
 
     from maulness.core import pipeline as pipeline_module
 
-    monkeypatch.setattr(pipeline_module, "get_provider_for_profile", lambda p: StubbornRejectProvider())
+    monkeypatch.setattr(
+        pipeline_module, "get_provider_for_profile", lambda p: StubbornRejectProvider()
+    )
 
-    orchestrator = PipelineOrchestrator(storage=storage, pipeline_manager=pipeline_manager)
+    orchestrator = PipelineOrchestrator(
+        storage=storage, pipeline_manager=pipeline_manager
+    )
     task = await orchestrator.run_pipeline(
         repo_name="stubborn_repo",
         title="Stubborn Task",
@@ -329,9 +343,23 @@ async def test_pipeline_rework_with_rollback(tmp_path: Path, monkeypatch):
     # Setup git repo
     repo_path.mkdir(parents=True, exist_ok=True)
     import subprocess
-    subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_path), check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@maulness.local"], cwd=str(repo_path), check=True)
-    subprocess.run(["git", "config", "user.name", "Maulness Tester"], cwd=str(repo_path), check=True)
+
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=str(repo_path),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@maulness.local"],
+        cwd=str(repo_path),
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Maulness Tester"],
+        cwd=str(repo_path),
+        check=True,
+    )
     (repo_path / "README.md").write_text("# Initial\n")
     subprocess.run(["git", "add", "README.md"], cwd=str(repo_path), check=True)
     subprocess.run(["git", "commit", "-m", "Initial"], cwd=str(repo_path), check=True)
@@ -379,9 +407,14 @@ async def test_pipeline_rework_with_rollback(tmp_path: Path, monkeypatch):
                 return f"Built attempt {call_count}"
 
     from maulness.core import pipeline as pipeline_module
-    monkeypatch.setattr(pipeline_module, "get_provider_for_profile", lambda p: RollbackMockProvider())
 
-    orchestrator = PipelineOrchestrator(storage=storage, pipeline_manager=pipeline_manager, worktree_manager=wm)
+    monkeypatch.setattr(
+        pipeline_module, "get_provider_for_profile", lambda p: RollbackMockProvider()
+    )
+
+    orchestrator = PipelineOrchestrator(
+        storage=storage, pipeline_manager=pipeline_manager, worktree_manager=wm
+    )
     task = await orchestrator.run_pipeline(
         repo_name="rollback_repo",
         title="Rollback Test",
@@ -394,7 +427,9 @@ async def test_pipeline_rework_with_rollback(tmp_path: Path, monkeypatch):
     # Building was called twice: attempt 1 and attempt 2 (after rework)
     # Because rollback_on_rework was True, attempt_1.txt must have been rolled back when rework occurred!
     assert not (repo_path / "attempt_1.txt").exists()
-    assert (repo_path / "attempt_3.txt").exists()  # attempt 3 is call_count 3 (building rework)
+    assert (
+        repo_path / "attempt_3.txt"
+    ).exists()  # attempt 3 is call_count 3 (building rework)
 
 
 def test_sync_task_ledger(tmp_path: Path):
@@ -467,13 +502,16 @@ async def test_pipeline_user_pauses_at_gate(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_pipeline_with_git_diff_and_gate_only(tmp_path: Path):
     import subprocess
+
     storage = StorageManager(db_path=tmp_path / "pipe_test.db")
     await storage.initialize()
 
     # Init git repo
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True
+    )
     (tmp_path / "file.txt").write_text("initial")
     subprocess.run(["git", "add", "file.txt"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True)
@@ -501,7 +539,9 @@ async def test_pipeline_with_git_diff_and_gate_only(tmp_path: Path):
     mock_provider = MagicMock()
     mock_provider.run = AsyncMock(return_value="Stage passed")
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider
+    ):
         orchestrator = PipelineOrchestrator(storage=storage)
         task = await orchestrator.run_pipeline(
             repo_name="diff_repo",
@@ -520,13 +560,16 @@ async def test_pipeline_with_git_diff_and_gate_only(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_pipeline_worktree_isolation(tmp_path: Path):
     import subprocess
+
     storage = StorageManager(db_path=tmp_path / "pipe_test.db")
     await storage.initialize()
 
     # Init git repo
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True
+    )
     (tmp_path / "main.txt").write_text("master branch")
     subprocess.run(["git", "add", "main.txt"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "initial commit"], cwd=tmp_path, check=True)
@@ -541,7 +584,9 @@ async def test_pipeline_worktree_isolation(tmp_path: Path):
     mock_provider = MagicMock()
     mock_provider.run = AsyncMock(return_value="Done in worktree")
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider
+    ):
         orchestrator = PipelineOrchestrator(storage=storage)
         task = await orchestrator.run_pipeline(
             repo_name="wt_repo",
@@ -583,10 +628,14 @@ async def test_pipeline_verification_gate_success(tmp_path: Path):
 
     orchestrator = PipelineOrchestrator(storage=storage)
     orchestrator.gate_runner.run_gate = AsyncMock(
-        return_value=GateResult(passed=True, command="echo 'ok'", exit_code=0, summary="ok")
+        return_value=GateResult(
+            passed=True, command="echo 'ok'", exit_code=0, summary="ok"
+        )
     )
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider
+    ):
         task = await orchestrator.run_pipeline(
             repo_name="test_repo",
             title="Gate Success Test",
@@ -612,7 +661,9 @@ async def test_pipeline_verification_gate_rework_and_recovery(tmp_path: Path):
                 name="build",
                 profile="builder",
                 prompt="Build",
-                verification_gate=VerificationGate(command="pytest", auto_rework_on_fail=True),
+                verification_gate=VerificationGate(
+                    command="pytest", auto_rework_on_fail=True
+                ),
                 transitions=StageTransitions(max_reworks=2, rework_target="build"),
             ),
         ],
@@ -629,7 +680,9 @@ async def test_pipeline_verification_gate_rework_and_recovery(tmp_path: Path):
         ]
     )
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider
+    ):
         task = await orchestrator.run_pipeline(
             repo_name="test_repo",
             title="Gate Rework Test",
@@ -656,7 +709,9 @@ async def test_pipeline_verification_gate_max_reworks_exceeded(tmp_path: Path):
                 name="build",
                 profile="builder",
                 prompt="Build",
-                verification_gate=VerificationGate(command="pytest", auto_rework_on_fail=True),
+                verification_gate=VerificationGate(
+                    command="pytest", auto_rework_on_fail=True
+                ),
                 transitions=StageTransitions(max_reworks=1, rework_target="build"),
             ),
         ],
@@ -667,10 +722,14 @@ async def test_pipeline_verification_gate_max_reworks_exceeded(tmp_path: Path):
 
     orchestrator = PipelineOrchestrator(storage=storage)
     orchestrator.gate_runner.run_gate = AsyncMock(
-        return_value=GateResult(passed=False, command="pytest", exit_code=1, summary="1 failed")
+        return_value=GateResult(
+            passed=False, command="pytest", exit_code=1, summary="1 failed"
+        )
     )
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider
+    ):
         task = await orchestrator.run_pipeline(
             repo_name="test_repo",
             title="Gate Max Fail Test",
@@ -696,8 +755,12 @@ async def test_pipeline_verification_gate_invalid_rework_target(tmp_path: Path):
                 name="build",
                 profile="builder",
                 prompt="Build",
-                verification_gate=VerificationGate(command="pytest", auto_rework_on_fail=True),
-                transitions=StageTransitions(max_reworks=2, rework_target="nonexistent"),
+                verification_gate=VerificationGate(
+                    command="pytest", auto_rework_on_fail=True
+                ),
+                transitions=StageTransitions(
+                    max_reworks=2, rework_target="nonexistent"
+                ),
             ),
         ],
     )
@@ -707,10 +770,14 @@ async def test_pipeline_verification_gate_invalid_rework_target(tmp_path: Path):
 
     orchestrator = PipelineOrchestrator(storage=storage)
     orchestrator.gate_runner.run_gate = AsyncMock(
-        return_value=GateResult(passed=False, command="pytest", exit_code=1, summary="1 failed")
+        return_value=GateResult(
+            passed=False, command="pytest", exit_code=1, summary="1 failed"
+        )
     )
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider
+    ):
         task = await orchestrator.run_pipeline(
             repo_name="test_repo",
             title="Invalid Target Test",
@@ -762,7 +829,9 @@ async def test_pipeline_transitions_fail_target(tmp_path: Path):
             executed_stages.append("other")
             return "ok"
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=MockProvider()):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=MockProvider()
+    ):
         orchestrator = PipelineOrchestrator(storage=storage)
         task = await orchestrator.run_pipeline(
             repo_name="test_repo",
@@ -796,7 +865,9 @@ async def test_pipeline_transitions_invalid_fail_target(tmp_path: Path):
     mock_provider = MagicMock()
     mock_provider.run = AsyncMock(return_value="[VERDICT: FAIL] Critical issues")
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider
+    ):
         orchestrator = PipelineOrchestrator(storage=storage)
         task = await orchestrator.run_pipeline(
             repo_name="test_repo",
@@ -849,7 +920,9 @@ async def test_pipeline_transitions_pass_target(tmp_path: Path):
             executed_stages.append("step2")
             return "step2"
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=MockProvider()):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=MockProvider()
+    ):
         orchestrator = PipelineOrchestrator(storage=storage)
         task = await orchestrator.run_pipeline(
             repo_name="test_repo",
@@ -878,7 +951,9 @@ async def test_pipeline_stage_exception(tmp_path: Path):
     mock_provider = MagicMock()
     mock_provider.run = AsyncMock(side_effect=RuntimeError("Provider exploded"))
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider
+    ):
         orchestrator = PipelineOrchestrator(storage=storage)
         with pytest.raises(RuntimeError, match="Provider exploded"):
             await orchestrator.run_pipeline(
@@ -923,7 +998,9 @@ async def test_pipeline_callbacks_and_stdin_gate(tmp_path: Path, monkeypatch):
     mock_provider = MagicMock()
     mock_provider.run = AsyncMock(return_value="Stage done")
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider
+    ):
         orchestrator = PipelineOrchestrator(storage=storage)
         task = await orchestrator.run_pipeline(
             repo_name="test_repo",
@@ -983,7 +1060,9 @@ async def test_pipeline_transitions_invalid_rework_target(tmp_path: Path):
     mock_provider = MagicMock()
     mock_provider.run = AsyncMock(return_value="[VERDICT: REWORK] Needs fix")
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider
+    ):
         orchestrator = PipelineOrchestrator(storage=storage)
         task = await orchestrator.run_pipeline(
             repo_name="test_repo",
@@ -1014,7 +1093,9 @@ async def test_pipeline_on_stage_finish_callback(tmp_path: Path):
     mock_provider = MagicMock()
     mock_provider.run = AsyncMock(return_value="Output result")
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider
+    ):
         orchestrator = PipelineOrchestrator(storage=storage)
         task = await orchestrator.run_pipeline(
             repo_name="test_repo",
@@ -1040,7 +1121,9 @@ async def test_pipeline_verification_gate_with_rollback(tmp_path: Path):
     # Init git repo
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True
+    )
     (tmp_path / "base.txt").write_text("base")
     subprocess.run(["git", "add", "base.txt"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True)
@@ -1053,8 +1136,12 @@ async def test_pipeline_verification_gate_with_rollback(tmp_path: Path):
                 profile="builder",
                 prompt="Build code",
                 checkpoint_before_stage=True,
-                verification_gate=VerificationGate(command="pytest", auto_rework_on_fail=True),
-                transitions=StageTransitions(max_reworks=2, rework_target="build", rollback_on_rework=True),
+                verification_gate=VerificationGate(
+                    command="pytest", auto_rework_on_fail=True
+                ),
+                transitions=StageTransitions(
+                    max_reworks=2, rework_target="build", rollback_on_rework=True
+                ),
             ),
         ],
     )
@@ -1070,7 +1157,9 @@ async def test_pipeline_verification_gate_with_rollback(tmp_path: Path):
         ]
     )
 
-    with patch("maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider):
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile", return_value=mock_provider
+    ):
         task = await orchestrator.run_pipeline(
             repo_name="test_repo",
             title="Rollback Test",
@@ -1080,8 +1169,6 @@ async def test_pipeline_verification_gate_with_rollback(tmp_path: Path):
             auto_proceed=True,
         )
         assert task.status == TaskStatus.DONE
-
-
 
 
 @pytest.mark.asyncio
@@ -1095,7 +1182,9 @@ async def test_pipeline_coverage_branches(tmp_path: Path):
     # Init git repo
     subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True
+    )
     (tmp_path / "base.txt").write_text("base")
     subprocess.run(["git", "add", "base.txt"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True)
@@ -1118,11 +1207,14 @@ async def test_pipeline_coverage_branches(tmp_path: Path):
 
     orchestrator = PipelineOrchestrator(storage=storage)
     orchestrator.gate_runner.run_gate = AsyncMock(
-        return_value=GateResult(passed=True, command="echo pass", exit_code=0, summary="All pass"),
+        return_value=GateResult(
+            passed=True, command="echo pass", exit_code=0, summary="All pass"
+        ),
     )
 
     # 1. Exercise subprocess.run exception on branch query (lines 511-512)
     orig_run = subprocess.run
+
     def custom_run_fail_branch(cmd, *args, **kwargs):
         if "--show-current" in cmd:
             raise RuntimeError("git branch query failed")
@@ -1140,7 +1232,9 @@ async def test_pipeline_coverage_branches(tmp_path: Path):
         )
 
     # 2. Exercise storage record_agent_event error when branch exists (lines 525-526)
-    with patch.object(storage, "record_agent_event", side_effect=RuntimeError("event error")):
+    with patch.object(
+        storage, "record_agent_event", side_effect=RuntimeError("event error")
+    ):
         task = await orchestrator.run_pipeline(
             repo_name="test_repo",
             title="Cov Test",
@@ -1209,14 +1303,16 @@ async def test_stage_include_repo_map(tmp_path: Path):
 
     orchestrator = PipelineOrchestrator(storage=storage)
 
-    with patch(
-        "maulness.core.pipeline.get_provider_for_profile",
-        return_value=mock_provider,
-    ), patch(
-        "maulness.core.pipeline.get_repo_map",
-        return_value="repo/structure/mock.py",
+    with (
+        patch(
+            "maulness.core.pipeline.get_provider_for_profile",
+            return_value=mock_provider,
+        ),
+        patch(
+            "maulness.core.pipeline.get_repo_map",
+            return_value="repo/structure/mock.py",
+        ),
     ):
-
         task = await orchestrator.run_pipeline(
             title="Design System",
             prompt="Build a clean API",
@@ -1230,3 +1326,121 @@ async def test_stage_include_repo_map(tmp_path: Path):
         assert "## Repository Structural Map" in captured_prompts[0]
         assert "repo/structure/mock.py" in captured_prompts[0]
 
+
+@pytest.mark.asyncio
+async def test_pipeline_budget_exceeded_suspends_afk(tmp_path: Path):
+    from maulness.core.kernel.budgets import BudgetExceededError
+
+    storage = StorageManager(db_path=tmp_path / "test_budget_afk.db")
+    await storage.initialize()
+
+    pipe_def = PipelineDefinition(
+        name="budget_test_pipe",
+        stages=[
+            PipelineStage(
+                name="expensive_stage",
+                profile="builder",
+                prompt="Do lots of work",
+            ),
+        ],
+    )
+
+    mock_provider = MagicMock()
+
+    async def mock_run(*args, **kwargs):
+        raise BudgetExceededError(
+            reason="Turn limit reached (30/30)",
+            metric="turns",
+            current=30.0,
+            limit=30.0,
+        )
+
+    mock_provider.run = mock_run
+
+    orchestrator = PipelineOrchestrator(storage=storage)
+
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile",
+        return_value=mock_provider,
+    ):
+        task = await orchestrator.run_pipeline(
+            title="Exceed Budget",
+            prompt="Run indefinitely",
+            workspace_path=tmp_path,
+            pipeline_def=pipe_def,
+            auto_proceed=True,
+        )
+
+        assert task.status == TaskStatus.SUSPENDED_AFK
+
+        # Verify retrospective record reflects suspension
+        retros = await storage.get_task_retrospectives(str(tmp_path))
+        assert len(retros) == 1
+        assert retros[0].passed is False
+        assert "suspended" in retros[0].summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_stage_context_injection_and_retrospective(tmp_path: Path):
+    storage = StorageManager(db_path=tmp_path / "test_stage_ctx.db")
+    await storage.initialize()
+
+    pipe_def = PipelineDefinition(
+        name="context_test_pipe",
+        stages=[
+            PipelineStage(
+                name="plan_phase",
+                profile="planner",
+                prompt="Plan feature",
+                output_key="plan",
+            ),
+            PipelineStage(
+                name="build_phase",
+                profile="builder",
+                prompt="Build feature",
+                output_key="build",
+            ),
+        ],
+    )
+
+    captured_prompts = []
+    mock_provider = MagicMock()
+
+    async def mock_run(prompt, **kwargs):
+        captured_prompts.append(prompt)
+        return "Phase complete"
+
+    mock_provider.run = mock_run
+
+    orchestrator = PipelineOrchestrator(storage=storage)
+
+    with patch(
+        "maulness.core.pipeline.get_provider_for_profile",
+        return_value=mock_provider,
+    ):
+        task = await orchestrator.run_pipeline(
+            title="Multi-stage Task",
+            prompt="Build and verify",
+            workspace_path=tmp_path,
+            pipeline_def=pipe_def,
+            auto_proceed=True,
+        )
+
+        assert task.status == TaskStatus.DONE
+        assert len(captured_prompts) == 2
+
+        # Verify stage context header was prepended
+        assert (
+            "[Pipeline: context_test_pipe | Stage 1/2: plan_phase]"
+            in captured_prompts[0]
+        )
+        assert (
+            "[Pipeline: context_test_pipe | Stage 2/2: build_phase]"
+            in captured_prompts[1]
+        )
+
+        # Verify successful retrospective was recorded
+        retros = await storage.get_task_retrospectives(str(tmp_path))
+        assert len(retros) == 1
+        assert retros[0].passed is True
+        assert "Status: DONE" in retros[0].summary

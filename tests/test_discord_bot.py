@@ -17,17 +17,42 @@ async def test_bot_slash_commands_registered(tmp_path: Path):
 
     registered_cmds = {cmd.name for cmd in bot.tree.get_commands()}
     expected_cmds = {
-        "new", "stop", "interrupt", "queue", "context", "compact",
-        "pipeline", "profile", "yolo", "worktree", "usage", "help", "thread", "providers"
+        "new",
+        "stop",
+        "interrupt",
+        "queue",
+        "context",
+        "compact",
+        "pipeline",
+        "profile",
+        "yolo",
+        "worktree",
+        "usage",
+        "help",
+        "thread",
+        "providers",
     }
-    assert registered_cmds == expected_cmds, f"Slash command mismatch: {registered_cmds ^ expected_cmds}"
+    assert registered_cmds == expected_cmds, (
+        f"Slash command mismatch: {registered_cmds ^ expected_cmds}"
+    )
 
     removed_cmds = {
-        "status", "profiles", "ask", "run", "task", "abort",
-        "reset", "clear", "model", "reasoning", "memory"
+        "status",
+        "profiles",
+        "ask",
+        "run",
+        "task",
+        "abort",
+        "reset",
+        "clear",
+        "model",
+        "reasoning",
+        "memory",
     }
     for cmd in removed_cmds:
-        assert cmd not in registered_cmds, f"Removed command /{cmd} should not be registered"
+        assert cmd not in registered_cmds, (
+            f"Removed command /{cmd} should not be registered"
+        )
 
 
 @pytest.mark.asyncio
@@ -219,7 +244,9 @@ async def test_bot_yolo_worktree_usage_compact_commands(tmp_path: Path):
     bot.channel_conversations[100] = "uuid-to-compact"
     await compact_cmd.callback(mock_int)
     assert 100 not in bot.channel_conversations
-    latest_mem = await storage.get_latest_session_memory(f"discord_100_{int(bot.session_start_time)}")
+    latest_mem = await storage.get_latest_session_memory(
+        f"discord_100_{int(bot.session_start_time)}"
+    )
     # Memory persisted
 
 
@@ -251,7 +278,10 @@ def test_format_discord_markdown():
     from maulness.discord.bot import format_discord_markdown
 
     sample = "Discord $\\rightarrow$ maulness $\\rightarrow$ Antigravity $\\rightarrow$ Filesystem"
-    assert format_discord_markdown(sample) == "Discord -> maulness -> Antigravity -> Filesystem"
+    assert (
+        format_discord_markdown(sample)
+        == "Discord -> maulness -> Antigravity -> Filesystem"
+    )
 
     backticked = "`pipeline: git $\\rightarrow$ build`"
     assert format_discord_markdown(backticked) == "`pipeline: git -> build`"
@@ -320,7 +350,10 @@ async def test_bot_queue_command(tmp_path: Path):
 
     with patch.object(bot, "_execute_chat_prompt", new_callable=AsyncMock) as mock_exec:
         await queue_cmd.callback(mock_int_idle, prompt="Immediate work")
-        assert "Dispatching prompt directly" in mock_int_idle.response.send_message.call_args[0][0]
+        assert (
+            "Dispatching prompt directly"
+            in mock_int_idle.response.send_message.call_args[0][0]
+        )
 
 
 @pytest.mark.asyncio
@@ -353,6 +386,7 @@ async def test_bot_help_and_providers_commands(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_bot_thread_command(tmp_path: Path):
     import discord
+
     storage = StorageManager(db_path=tmp_path / "bot_test.db")
     bot = MaulnessBot(storage=storage, profile_name="default")
     await bot._register_slash_commands()
@@ -371,7 +405,9 @@ async def test_bot_thread_command(tmp_path: Path):
     mock_int.channel = mock_text_channel
 
     with patch.object(bot, "_execute_chat_prompt", new_callable=AsyncMock) as mock_exec:
-        await thread_cmd.callback(mock_int, name="Feature Thread", message="Initial spec")
+        await thread_cmd.callback(
+            mock_int, name="Feature Thread", message="Initial spec"
+        )
         mock_text_channel.create_thread.assert_awaited_once()
         mock_created_thread.send.assert_awaited_once()
         mock_int.followup.send.assert_awaited_once()
@@ -380,6 +416,7 @@ async def test_bot_thread_command(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_bot_pipeline_command_in_thread(tmp_path: Path):
     import discord
+
     storage = StorageManager(db_path=tmp_path / "bot_test.db")
     bot = MaulnessBot(storage=storage, profile_name="default")
     await bot._register_slash_commands()
@@ -537,8 +574,11 @@ async def test_bot_interrupt_and_profile_commands(tmp_path: Path):
 
     # 4. Autocomplete
     import discord
+
     mock_int.response.is_done = lambda: False
-    ns = discord.app_commands.Namespace(mock_int, {}, [{"name": "name", "value": "build", "type": 3}])
+    ns = discord.app_commands.Namespace(
+        mock_int, {}, [{"name": "name", "value": "build", "type": 3}]
+    )
     await profile_cmd._invoke_autocomplete(mock_int, "name", ns)
     mock_int.response.autocomplete.assert_awaited_once()
     choices = mock_int.response.autocomplete.call_args[0][0]
@@ -557,7 +597,11 @@ def _make_mock_channel(cid: int = 1010):
 
 @pytest.mark.asyncio
 async def test_bot_execute_chat_prompt_lifecycle(tmp_path: Path):
-    from maulness.core.models import AgentThoughtEvent, AgentMessageEvent, AgentToolCallEvent
+    from maulness.core.models import (
+        AgentThoughtEvent,
+        AgentMessageEvent,
+        AgentToolCallEvent,
+    )
 
     storage = StorageManager(db_path=tmp_path / "bot_test.db")
     await storage.initialize()
@@ -574,7 +618,9 @@ async def test_bot_execute_chat_prompt_lifecycle(tmp_path: Path):
             self.last_conversation_id = "conv-xyz-789"
             self.primary = "primary_engine"
             self.last_used_provider = MagicMock()
-            self.last_used_provider.profile = MagicMock(provider="ollama", model="qwen2.5-coder:7b", command=None)
+            self.last_used_provider.profile = MagicMock(
+                provider="ollama", model="qwen2.5-coder:7b", command=None
+            )
 
         async def run(self, **kwargs):
             # 1. Trigger on_init
@@ -583,27 +629,50 @@ async def test_bot_execute_chat_prompt_lifecycle(tmp_path: Path):
 
             # 2. Trigger on_thought with fallback alert
             if kwargs.get("on_thought"):
-                await kwargs["on_thought"](AgentThoughtEvent(delta="Switching to fallback provider ollama", session_id="test"))
+                await kwargs["on_thought"](
+                    AgentThoughtEvent(
+                        delta="Switching to fallback provider ollama", session_id="test"
+                    )
+                )
 
             # 3. Trigger on_tool_call
             if kwargs.get("on_tool_call"):
                 await kwargs["on_tool_call"](
-                    AgentToolCallEvent(call_id="c1", tool_name="run_command", args={"command": "git status"}, session_id="test")
+                    AgentToolCallEvent(
+                        call_id="c1",
+                        tool_name="run_command",
+                        args={"command": "git status"},
+                        session_id="test",
+                    )
                 )
                 await kwargs["on_tool_call"](
-                    AgentToolCallEvent(call_id="c2", tool_name="write_file", args={"path": "main.py"}, session_id="test")
+                    AgentToolCallEvent(
+                        call_id="c2",
+                        tool_name="write_file",
+                        args={"path": "main.py"},
+                        session_id="test",
+                    )
                 )
                 await kwargs["on_tool_call"](
-                    AgentToolCallEvent(call_id="c3", tool_name="custom_tool", args={"foo": "bar"}, session_id="test")
+                    AgentToolCallEvent(
+                        call_id="c3",
+                        tool_name="custom_tool",
+                        args={"foo": "bar"},
+                        session_id="test",
+                    )
                 )
 
             # 4. Trigger on_message chunk
             if kwargs.get("on_message"):
-                await kwargs["on_message"](AgentMessageEvent(delta="Hello from agent", session_id="test"))
+                await kwargs["on_message"](
+                    AgentMessageEvent(delta="Hello from agent", session_id="test")
+                )
 
             return "Hello from agent"
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=DummyProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile", return_value=DummyProvider()
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel,
             prompt="Initial test prompt",
@@ -637,11 +706,19 @@ async def test_bot_execute_chat_prompt_approvals(tmp_path: Path):
         async def run(self, **kwargs):
             nonlocal approval_result_yolo
             on_app = kwargs.get("on_approval")
-            ev = ApprovalRequestEvent(request_id=1, call_id="c1", tool_name="run_command", args={"command": "rm -rf"}, session_id="s1")
+            ev = ApprovalRequestEvent(
+                request_id=1,
+                call_id="c1",
+                tool_name="run_command",
+                args={"command": "rm -rf"},
+                session_id="s1",
+            )
             approval_result_yolo = await on_app(ev)
             return "Done"
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=YoloProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile", return_value=YoloProvider()
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel,
             prompt="Run command",
@@ -658,11 +735,20 @@ async def test_bot_execute_chat_prompt_approvals(tmp_path: Path):
         async def run(self, **kwargs):
             nonlocal approval_result_interactive
             on_app = kwargs.get("on_approval")
-            ev = ApprovalRequestEvent(request_id=2, call_id="c2", tool_name="run_command", args={"command": "pytest", "cwd": "/tmp"}, session_id="s2")
+            ev = ApprovalRequestEvent(
+                request_id=2,
+                call_id="c2",
+                tool_name="run_command",
+                args={"command": "pytest", "cwd": "/tmp"},
+                session_id="s2",
+            )
             approval_result_interactive = await on_app(ev)
             return "Done"
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=InteractiveProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile",
+        return_value=InteractiveProvider(),
+    ):
         with patch("asyncio.wait_for", AsyncMock(return_value=True)):
             await bot._execute_chat_prompt(
                 channel=mock_channel,
@@ -676,17 +762,33 @@ async def test_bot_execute_chat_prompt_approvals(tmp_path: Path):
     class DeniedProvider:
         async def run(self, **kwargs):
             on_app = kwargs.get("on_approval")
-            ev_write = ApprovalRequestEvent(request_id=3, call_id="c3", tool_name="write_file", args={"path": "foo.txt", "bytes": 10}, session_id="s3")
+            ev_write = ApprovalRequestEvent(
+                request_id=3,
+                call_id="c3",
+                tool_name="write_file",
+                args={"path": "foo.txt", "bytes": 10},
+                session_id="s3",
+            )
             res_denied = await on_app(ev_write)
             assert res_denied is False
 
-            ev_custom = ApprovalRequestEvent(request_id=4, call_id="c4", tool_name="custom", args={"arg": 1}, session_id="s4")
+            ev_custom = ApprovalRequestEvent(
+                request_id=4,
+                call_id="c4",
+                tool_name="custom",
+                args={"arg": 1},
+                session_id="s4",
+            )
             res_custom = await on_app(ev_custom)
             assert res_custom is False
             return "Denied"
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=DeniedProvider()):
-        with patch("asyncio.wait_for", AsyncMock(side_effect=[False, asyncio.TimeoutError()])):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile", return_value=DeniedProvider()
+    ):
+        with patch(
+            "asyncio.wait_for", AsyncMock(side_effect=[False, asyncio.TimeoutError()])
+        ):
             await bot._execute_chat_prompt(
                 channel=mock_channel,
                 prompt="Run command",
@@ -721,7 +823,10 @@ async def test_bot_execute_chat_prompt_compacted_memory_and_errors(tmp_path: Pat
             received_prompt = kwargs.get("prompt", "")
             return "Acknowledge"
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=CheckPromptProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile",
+        return_value=CheckPromptProvider(),
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel,
             prompt="Hello world",
@@ -741,7 +846,9 @@ async def test_bot_execute_chat_prompt_compacted_memory_and_errors(tmp_path: Pat
     mock_msg_err = AsyncMock()
     mock_channel_err.send.return_value = mock_msg_err
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=ErrorProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile", return_value=ErrorProvider()
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel_err,
             prompt="Failing turn",
@@ -915,7 +1022,9 @@ async def test_bot_pipeline_full_lifecycle(tmp_path: Path):
         if kwargs.get("on_stage_finish"):
             await kwargs["on_stage_finish"](stage, "Stage output markdown " * 50)
         if kwargs.get("on_approval"):
-            app_res = await kwargs["on_approval"](MagicMock(tool_name="git_commit", args={"msg": "feat"}))
+            app_res = await kwargs["on_approval"](
+                MagicMock(tool_name="git_commit", args={"msg": "feat"})
+            )
             assert app_res is True
         return task_rec
 
@@ -938,6 +1047,7 @@ async def test_bot_pipeline_full_lifecycle(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_bot_update_forum_tags(tmp_path: Path):
     import discord
+
     storage = StorageManager(db_path=tmp_path / "bot_test.db")
     bot = MaulnessBot(storage=storage, profile_name="default")
 
@@ -1001,6 +1111,7 @@ async def test_get_git_branch_exceptions_and_empty(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_bot_init_variants_and_resolve_channel_ids(tmp_path: Path):
     from maulness.config import config
+
     storage = StorageManager(db_path=tmp_path / "bot_test.db")
     await storage.initialize()
 
@@ -1047,7 +1158,9 @@ async def test_bot_setup_hook_and_lifecycle(tmp_path: Path):
     bot = MaulnessBot(storage=storage, profile_name="default")
 
     # 1. setup_hook when storage.list_channel_conversations raises
-    bot.storage.list_channel_conversations = AsyncMock(side_effect=RuntimeError("Storage offline"))
+    bot.storage.list_channel_conversations = AsyncMock(
+        side_effect=RuntimeError("Storage offline")
+    )
     bot.tree.sync = AsyncMock()
     bot.tree.copy_global_to = MagicMock()
     bot.guild_id = None
@@ -1094,6 +1207,7 @@ async def test_bot_setup_hook_and_lifecycle(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_bot_resolve_profile_advanced(tmp_path: Path):
     from maulness.config import config
+
     storage = StorageManager(db_path=tmp_path / "bot_test.db")
     bot = MaulnessBot(storage=storage, profile_name="default")
 
@@ -1178,7 +1292,9 @@ async def test_slash_commands_unauthorized(tmp_path: Path):
         interaction.user.id = 99999  # unauthorized!
         interaction.channel_id = 1010
         await cmd.callback(interaction, **kwargs)
-        interaction.response.send_message.assert_awaited_with("Unauthorized", ephemeral=True)
+        interaction.response.send_message.assert_awaited_with(
+            "Unauthorized", ephemeral=True
+        )
 
 
 @pytest.mark.asyncio
@@ -1203,17 +1319,30 @@ async def test_bot_execute_chat_prompt_advanced_branches(tmp_path: Path):
         async def run(self, **kwargs):
             # Fallback thought
             on_th = kwargs.get("on_thought")
-            await on_th(AgentThoughtEvent(delta="Switching to fallback provider gemini", session_id="s"))
+            await on_th(
+                AgentThoughtEvent(
+                    delta="Switching to fallback provider gemini", session_id="s"
+                )
+            )
             # Tool call
             on_tc = kwargs.get("on_tool_call")
-            await on_tc(AgentToolCallEvent(call_id="c1", tool_name="run_command", args={"command": "echo 1"}, session_id="s"))
+            await on_tc(
+                AgentToolCallEvent(
+                    call_id="c1",
+                    tool_name="run_command",
+                    args={"command": "echo 1"},
+                    session_id="s",
+                )
+            )
             # Large message chunk (> 2500 chars)
             on_msg = kwargs.get("on_message")
             await on_msg(AgentMessageEvent(delta="Z" * 3000, session_id="s"))
             return "Done"
 
     mock_msg.edit.side_effect = [RuntimeError("Edit failed"), None, None]
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=OverflowProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile", return_value=OverflowProvider()
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel,
             prompt="Test overflow",
@@ -1226,7 +1355,10 @@ async def test_bot_execute_chat_prompt_advanced_branches(tmp_path: Path):
         async def run(self, **kwargs):
             raise asyncio.CancelledError()
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=CancelledProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile",
+        return_value=CancelledProvider(),
+    ):
         with pytest.raises(asyncio.CancelledError):
             await bot._execute_chat_prompt(
                 channel=mock_channel,
@@ -1240,7 +1372,9 @@ async def test_bot_execute_chat_prompt_advanced_branches(tmp_path: Path):
         async def run(self, **kwargs):
             return ""
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=EmptyProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile", return_value=EmptyProvider()
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel,
             prompt="Empty test",
@@ -1255,10 +1389,17 @@ async def test_bot_execute_chat_prompt_advanced_branches(tmp_path: Path):
             await on_init("conv-err-uuid")
             return "Done"
 
-    bot.storage.set_channel_conversation = AsyncMock(side_effect=RuntimeError("Storage disk error"))
-    bot.storage.get_latest_compacted_memory = AsyncMock(side_effect=RuntimeError("Storage read error"))
+    bot.storage.set_channel_conversation = AsyncMock(
+        side_effect=RuntimeError("Storage disk error")
+    )
+    bot.storage.get_latest_compacted_memory = AsyncMock(
+        side_effect=RuntimeError("Storage read error")
+    )
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=StorageErrorProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile",
+        return_value=StorageErrorProvider(),
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel,
             prompt="Storage error test",
@@ -1268,8 +1409,12 @@ async def test_bot_execute_chat_prompt_advanced_branches(tmp_path: Path):
 
     # 5. Queued prompts execution loop
     bot.channel_queues[8080] = ["Next queued prompt"]
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=EmptyProvider()):
-        with patch.object(bot, "_execute_chat_prompt", new_callable=AsyncMock) as mock_exec:
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile", return_value=EmptyProvider()
+    ):
+        with patch.object(
+            bot, "_execute_chat_prompt", new_callable=AsyncMock
+        ) as mock_exec:
             # Run a prompt that will trigger the queued prompt
             await bot._execute_chat_prompt(
                 channel=mock_channel,
@@ -1355,7 +1500,9 @@ async def test_bot_thread_command_variants(tmp_path: Path):
     mock_int_forum.channel = mock_forum
 
     with patch.object(bot, "_execute_chat_prompt", new_callable=AsyncMock) as mock_exec:
-        await thread_cmd.callback(mock_int_forum, name="Forum Topic", message="First query")
+        await thread_cmd.callback(
+            mock_int_forum, name="Forum Topic", message="First query"
+        )
         mock_forum.create_thread.assert_awaited_once()
         mock_exec.assert_awaited_once()
 
@@ -1419,7 +1566,12 @@ async def test_bot_pipeline_command_advanced_branches(tmp_path: Path):
 
     async def mock_run_pipe(*args, **kwargs):
         gate = VerificationGate(command="pytest")
-        stage = PipelineStage(name="review", profile="reviewer", prompt="Audit code", verification_gate=gate)
+        stage = PipelineStage(
+            name="review",
+            profile="reviewer",
+            prompt="Audit code",
+            verification_gate=gate,
+        )
         # on_stage_start with verification gate
         await kwargs["on_stage_start"](stage, 1, 1)
         # on_stage_finish with short snippet (< 900 chars)
@@ -1453,6 +1605,7 @@ async def test_bot_pipeline_command_advanced_branches(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_bot_update_forum_tags_exception(tmp_path: Path):
     import discord
+
     storage = StorageManager(db_path=tmp_path / "bot_test.db")
     bot = MaulnessBot(storage=storage, profile_name="default")
 
@@ -1513,7 +1666,10 @@ async def test_bot_flush_chunk_edge_cases(tmp_path: Path):
     mock_msg.edit.side_effect = RuntimeError("Edit failed")
     mock_channel.send.side_effect = [mock_msg, RuntimeError("Send failed")]
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=EditAndSendFailProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile",
+        return_value=EditAndSendFailProvider(),
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel,
             prompt="Prompt",
@@ -1537,7 +1693,10 @@ async def test_bot_flush_chunk_edge_cases(tmp_path: Path):
             await on_msg(AgentMessageEvent(delta="Y" * 4000, session_id="s"))
             return "Done"
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=LongChunkProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile",
+        return_value=LongChunkProvider(),
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel_long,
             prompt="Prompt long",
@@ -1552,7 +1711,10 @@ async def test_bot_flush_chunk_edge_cases(tmp_path: Path):
         mock_msg_fail,
         RuntimeError("Send first part also fail"),
     ]
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=LongChunkProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile",
+        return_value=LongChunkProvider(),
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel_fail_both,
             prompt="Prompt fail both",
@@ -1573,7 +1735,10 @@ async def test_bot_flush_chunk_edge_cases(tmp_path: Path):
             await asyncio.sleep(0.01)
             return "Final bit"
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=MidOverflowProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile",
+        return_value=MidOverflowProvider(),
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel_overflow,
             prompt="Mid overflow",
@@ -1584,7 +1749,11 @@ async def test_bot_flush_chunk_edge_cases(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_bot_on_approval_cleanup_and_errors(tmp_path: Path):
-    from maulness.core.models import AgentToolCallEvent, ApprovalRequestEvent, AgentMessageEvent
+    from maulness.core.models import (
+        AgentToolCallEvent,
+        ApprovalRequestEvent,
+        AgentMessageEvent,
+    )
     from maulness.core.debouncer import MessageStreamDebouncer
 
     storage = StorageManager(db_path=tmp_path / "bot_test.db")
@@ -1601,10 +1770,20 @@ async def test_bot_on_approval_cleanup_and_errors(tmp_path: Path):
     class ToolEditFailProvider:
         async def run(self, **kwargs):
             on_tc = kwargs.get("on_tool_call")
-            await on_tc(AgentToolCallEvent(call_id="c1", tool_name="run_command", args={"command": "ls"}, session_id="s"))
+            await on_tc(
+                AgentToolCallEvent(
+                    call_id="c1",
+                    tool_name="run_command",
+                    args={"command": "ls"},
+                    session_id="s",
+                )
+            )
             return "Done"
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=ToolEditFailProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile",
+        return_value=ToolEditFailProvider(),
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel_tool,
             prompt="Tool prompt",
@@ -1627,12 +1806,27 @@ async def test_bot_on_approval_cleanup_and_errors(tmp_path: Path):
             await on_msg(AgentMessageEvent(delta="Prior output text", session_id="s"))
 
             on_app = kwargs.get("on_approval")
-            with patch.object(MessageStreamDebouncer, "close", AsyncMock(side_effect=RuntimeError("Close fail"))):
+            with patch.object(
+                MessageStreamDebouncer,
+                "close",
+                AsyncMock(side_effect=RuntimeError("Close fail")),
+            ):
                 with patch("asyncio.wait_for", AsyncMock(return_value=True)):
-                    await on_app(ApprovalRequestEvent(request_id=1, call_id="c1", tool_name="run_command", args={}, session_id="s"))
+                    await on_app(
+                        ApprovalRequestEvent(
+                            request_id=1,
+                            call_id="c1",
+                            tool_name="run_command",
+                            args={},
+                            session_id="s",
+                        )
+                    )
             return "Done"
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=ApprovalWithTextProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile",
+        return_value=ApprovalWithTextProvider(),
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel,
             prompt="Approval prompt",
@@ -1644,16 +1838,31 @@ async def test_bot_on_approval_cleanup_and_errors(tmp_path: Path):
     mock_channel_empty = _make_mock_channel(7374)
     mock_msg_empty = AsyncMock()
     mock_msg_empty.delete.side_effect = RuntimeError("Delete fail")
-    mock_channel_empty.send.side_effect = [mock_msg_empty, mock_msg_empty, mock_msg_empty]
+    mock_channel_empty.send.side_effect = [
+        mock_msg_empty,
+        mock_msg_empty,
+        mock_msg_empty,
+    ]
 
     class ApprovalEmptyProvider:
         async def run(self, **kwargs):
             on_app = kwargs.get("on_approval")
             with patch("asyncio.wait_for", AsyncMock(return_value=False)):
-                await on_app(ApprovalRequestEvent(request_id=2, call_id="c2", tool_name="run_command", args={}, session_id="s"))
+                await on_app(
+                    ApprovalRequestEvent(
+                        request_id=2,
+                        call_id="c2",
+                        tool_name="run_command",
+                        args={},
+                        session_id="s",
+                    )
+                )
             return "Done"
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=ApprovalEmptyProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile",
+        return_value=ApprovalEmptyProvider(),
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel_empty,
             prompt="Empty debouncer tool",
@@ -1677,11 +1886,16 @@ async def test_bot_storage_save_errors_and_cancellation(tmp_path: Path):
     class PostRunProvider:
         def __init__(self):
             self.last_conversation_id = "conv-persisted"
+
         async def run(self, **kwargs):
             return "All done"
 
-    bot.storage.set_channel_conversation = AsyncMock(side_effect=RuntimeError("Storage disk full"))
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=PostRunProvider()):
+    bot.storage.set_channel_conversation = AsyncMock(
+        side_effect=RuntimeError("Storage disk full")
+    )
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile", return_value=PostRunProvider()
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel,
             prompt="Persist prompt",
@@ -1695,8 +1909,14 @@ async def test_bot_storage_save_errors_and_cancellation(tmp_path: Path):
             raise asyncio.CancelledError()
 
     mock_channel_cancel = _make_mock_channel(7575)
-    mock_channel_cancel.send.side_effect = [mock_msg, RuntimeError("Cancel send failed")]
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=CancelFailProvider()):
+    mock_channel_cancel.send.side_effect = [
+        mock_msg,
+        RuntimeError("Cancel send failed"),
+    ]
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile",
+        return_value=CancelFailProvider(),
+    ):
         with pytest.raises(asyncio.CancelledError):
             await bot._execute_chat_prompt(
                 channel=mock_channel_cancel,
@@ -1713,9 +1933,15 @@ async def test_bot_storage_save_errors_and_cancellation(tmp_path: Path):
     mock_channel_err = _make_mock_channel(7676)
     mock_msg_err = AsyncMock()
     mock_msg_err.edit.side_effect = RuntimeError("Edit error msg failed")
-    mock_channel_err.send.side_effect = [mock_msg_err, RuntimeError("Send error msg failed")]
+    mock_channel_err.send.side_effect = [
+        mock_msg_err,
+        RuntimeError("Send error msg failed"),
+    ]
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=GenericErrProvider()):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile",
+        return_value=GenericErrProvider(),
+    ):
         await bot._execute_chat_prompt(
             channel=mock_channel_err,
             prompt="Generic err",
@@ -1751,8 +1977,13 @@ async def test_bot_autonomous_memory_extraction_and_queues(tmp_path: Path):
     # Queue next prompt so lines 580-581 run
     bot.channel_queues[7777] = ["Queued auto-prompt"]
 
-    with patch("maulness.discord.bot.get_provider_for_profile", return_value=DummyProvider()):
-        with patch("maulness.core.memory.AutonomousMemoryExtractor.extract_and_update", AsyncMock(side_effect=RuntimeError("Extractor test error"))):
+    with patch(
+        "maulness.discord.bot.get_provider_for_profile", return_value=DummyProvider()
+    ):
+        with patch(
+            "maulness.core.memory.AutonomousMemoryExtractor.extract_and_update",
+            AsyncMock(side_effect=RuntimeError("Extractor test error")),
+        ):
             await bot._execute_chat_prompt(
                 channel=mock_channel,
                 prompt="Prompt that triggers fact extraction",
@@ -1840,6 +2071,7 @@ async def test_bot_on_message_prefix_remaining(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_bot_update_forum_tags_preserves_non_status(tmp_path: Path):
     import discord
+
     storage = StorageManager(db_path=tmp_path / "bot_test.db")
     bot = MaulnessBot(storage=storage, profile_name="default")
 
@@ -1887,7 +2119,9 @@ async def test_bot_stop_handler_storage_update_error(tmp_path: Path):
     bot.active_tasks["pipeline_task_err"] = mock_task
     bot.channel_tasks[9191] = "pipeline_task_err"
 
-    bot.storage.update_task_status = AsyncMock(side_effect=RuntimeError("DB update failed"))
+    bot.storage.update_task_status = AsyncMock(
+        side_effect=RuntimeError("DB update failed")
+    )
     mock_int = AsyncMock()
     mock_int.user.id = 12345
     mock_int.channel_id = 9191
@@ -1962,7 +2196,9 @@ async def test_bot_pipeline_forum_target_parent_and_errors(tmp_path: Path):
     async def mock_run_pipe(*args, **kwargs):
         # Trigger on_approval timeout
         if kwargs.get("on_approval"):
-            with patch("asyncio.wait_for", AsyncMock(side_effect=asyncio.TimeoutError())):
+            with patch(
+                "asyncio.wait_for", AsyncMock(side_effect=asyncio.TimeoutError())
+            ):
                 res = await kwargs["on_approval"](MagicMock(tool_name="tool", args={}))
                 assert res is False
         return task_rec
@@ -1988,7 +2224,11 @@ async def test_bot_pipeline_forum_target_parent_and_errors(tmp_path: Path):
 
     # 2. Pipeline with storage.get_agent_events error (line 1530)
     bot.pipeline.run_pipeline = AsyncMock(return_value=task_rec)
-    with patch.object(bot.storage, "get_agent_events", AsyncMock(side_effect=RuntimeError("Events DB fail"))):
+    with patch.object(
+        bot.storage,
+        "get_agent_events",
+        AsyncMock(side_effect=RuntimeError("Events DB fail")),
+    ):
         await pipe_cmd.callback(
             mock_int,
             prompt="Events fail test",
@@ -2037,3 +2277,61 @@ async def test_bot_pipeline_forum_target_parent_and_errors(tmp_path: Path):
         prompt="Direct text channel pipeline test",
         repo="horizonx",
     )
+
+
+@pytest.mark.asyncio
+async def test_bot_handle_afk_suspension_actions(tmp_path: Path):
+    from maulness.core.models import TaskMode, TaskStatus
+
+    storage = StorageManager(db_path=tmp_path / "bot_afk.db")
+    await storage.initialize()
+
+    bot = MaulnessBot(storage=storage, profile_name="default")
+
+    task = await storage.create_task(
+        task_id="task_afk_1",
+        title="AFK Task",
+        repo_name="horizonx",
+        workspace_path=str(tmp_path),
+        mode=TaskMode.MULTI,
+    )
+    await storage.update_task_status(task.id, TaskStatus.SUSPENDED_AFK)
+
+    mock_channel = AsyncMock()
+    mock_resume = AsyncMock()
+
+    # 1. Action: resume
+    fut_resume = asyncio.Future()
+    fut_resume.set_result("resume")
+    await bot._handle_afk_suspension(
+        task_record=task,
+        future=fut_resume,
+        channel=mock_channel,
+        resume_coro_fn=mock_resume,
+    )
+    mock_channel.send.assert_awaited()
+    assert "Resuming" in mock_channel.send.call_args[0][0]
+
+    # 2. Action: merge
+    fut_merge = asyncio.Future()
+    fut_merge.set_result("merge")
+    await bot._handle_afk_suspension(
+        task_record=task,
+        future=fut_merge,
+        channel=mock_channel,
+    )
+    updated_task = await storage.get_task(task.id)
+    assert updated_task.status == TaskStatus.DONE
+    assert "signed off and marked DONE" in mock_channel.send.call_args[0][0]
+
+    # 3. Action: abort
+    fut_abort = asyncio.Future()
+    fut_abort.set_result("abort")
+    await bot._handle_afk_suspension(
+        task_record=task,
+        future=fut_abort,
+        channel=mock_channel,
+    )
+    aborted_task = await storage.get_task(task.id)
+    assert aborted_task.status == TaskStatus.FAILED
+    assert "aborted and marked FAILED" in mock_channel.send.call_args[0][0]

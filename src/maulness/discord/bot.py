@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import re
-from typing import Any, Optional
+from typing import Any, Callable, Coroutine, Optional
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -13,6 +13,7 @@ from maulness.core.models import (
     AgentThoughtEvent,
     AgentToolCallEvent,
     ApprovalRequestEvent,
+    TaskRecord,
     TaskStatus,
 )
 from maulness.core.pipeline import PipelineOrchestrator
@@ -1164,6 +1165,82 @@ class MaulnessBot(commands.Bot):
         except Exception as e:
             logger.debug("Could not update forum tags: %s", e)
 
+    async def _handle_afk_suspension(
+        self,
+        task_record: TaskRecord,
+        future: asyncio.Future,
+        channel: Any,
+        resume_coro_fn: Optional[Callable[[], Coroutine[Any, Any, None]]] = None,
+    ):
+        """Handle user action on SuspendedAfkView (resume, merge, abort)."""
+        try:
+            action = await asyncio.wait_for(future, timeout=3600.0)
+        except asyncio.TimeoutError:
+            logger.debug(
+                "Suspended AFK task %s timed out waiting for action", task_record.id
+            )
+            return
+        except Exception as e:
+            logger.debug(
+                "Suspended AFK task %s handler exception: %s", task_record.id, e
+            )
+            return
+
+        if action == "resume":
+            await channel.send(
+                f"🔄 **Resuming pipeline task `{task_record.id}` with refreshed budget...**"
+            )
+            if resume_coro_fn:
+                asyncio.create_task(resume_coro_fn())
+        elif action == "merge":
+            try:
+                events = await self.storage.get_agent_events(task_record.id, limit=50)
+                branch_event = next(
+                    (
+                        e
+                        for e in reversed(events)
+                        if e.get("event_type") == "worktree_branch"
+                    ),
+                    None,
+                )
+                branch_name = None
+                if branch_event:
+                    bp = branch_event.get("event_payload")
+                    branch_name = bp.get("branch") if isinstance(bp, dict) else str(bp)
+
+                await self.storage.update_task_status(task_record.id, TaskStatus.DONE)
+                if isinstance(channel, discord.Thread):
+                    await self._update_forum_tags(channel, "Done")
+
+                if branch_name:
+                    await channel.send(
+                        f"✅ **Task `{task_record.id}` signed off and marked DONE.** Branch: `{branch_name}`."
+                    )
+                else:
+                    await channel.send(
+                        f"✅ **Task `{task_record.id}` signed off and marked DONE.**"
+                    )
+            except Exception as err:
+                logger.exception(
+                    "Failed signing off AFK task %s: %s", task_record.id, err
+                )
+                await channel.send(
+                    f"⚠️ **Error signing off task `{task_record.id}`:** {err}"
+                )
+        elif action == "abort":
+            try:
+                await self.storage.update_task_status(task_record.id, TaskStatus.FAILED)
+                if isinstance(channel, discord.Thread):
+                    await self._update_forum_tags(channel, "Failed")
+                await channel.send(
+                    f"🛑 **Task `{task_record.id}` aborted and marked FAILED.**"
+                )
+            except Exception as err:
+                logger.exception("Failed aborting AFK task %s: %s", task_record.id, err)
+                await channel.send(
+                    f"⚠️ **Error aborting task `{task_record.id}`:** {err}"
+                )
+
     async def _register_slash_commands(self):
         async def on_app_command_error(
             interaction: discord.Interaction, error: app_commands.AppCommandError
@@ -1945,11 +2022,18 @@ class MaulnessBot(commands.Bot):
                             ev_err,
                         )
 
-                    view = (
-                        SuspendedAfkView(task_record.id)
-                        if task_record.status == TaskStatus.SUSPENDED_AFK
-                        else None
-                    )
+                    view = None
+                    if task_record.status == TaskStatus.SUSPENDED_AFK:
+                        afk_fut = asyncio.get_running_loop().create_future()
+                        view = SuspendedAfkView(task_record.id, future=afk_fut)
+                        asyncio.create_task(
+                            self._handle_afk_suspension(
+                                task_record=task_record,
+                                future=afk_fut,
+                                channel=exec_channel,
+                                resume_coro_fn=_run_pipeline_coro,
+                            )
+                        )
                     await exec_channel.send(embed=summary_embed, view=view)
                 except asyncio.CancelledError:
                     logger.info(

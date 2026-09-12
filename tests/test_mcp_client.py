@@ -133,3 +133,31 @@ async def test_mcp_client_manager_integration(tmp_path: Path):
     assert "mcp__calc__add" in eff_names
 
     await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_mcp_client_manager_workspace_switching(tmp_path: Path):
+    ws1 = tmp_path / "ws1"
+    ws2 = tmp_path / "ws2"
+    ws1.mkdir()
+    ws2.mkdir()
+
+    (ws1 / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"server1": {"command": "echo", "args": ["hi"]}}})
+    )
+    (ws2 / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"server2": {"command": "echo", "args": ["hi"]}}})
+    )
+
+    manager = MCPClientManager.get_instance()
+    await manager.shutdown()
+
+    cfg1 = manager.discover_config(workspace_path=ws1)
+    assert "server1" in cfg1
+    assert "server2" not in cfg1
+
+    cfg2 = manager.discover_config(workspace_path=ws2)
+    assert "server2" in cfg2
+    assert "server1" not in cfg2
+
+    await manager.shutdown()

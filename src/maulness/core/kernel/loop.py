@@ -15,7 +15,6 @@ from maulness.core.models import (
 )
 from maulness.core.profiles import Profile
 from maulness.core.tools import (
-    TOOL_DEFINITIONS,
     ActionLoopDetector,
     clean_history_message,
     clean_relay_completion_tags,
@@ -160,6 +159,13 @@ class DurableAgentKernel:
         loop_intervention_active: Optional[str] = None
         step_counter = 0
 
+        # Fetch effective tool definitions once: static tools + any active MCP tools
+        from maulness.core.tools import get_effective_tool_definitions
+
+        effective_tool_definitions = await get_effective_tool_definitions(
+            effective_workspace
+        )
+
         while relay_count < max_relays:
             relay_count += 1
             turn_count = 0
@@ -171,7 +177,7 @@ class DurableAgentKernel:
                 step_counter += 1
 
                 # If forced synthesis triggered, strip tools
-                active_tools = None if forcing_synthesis else TOOL_DEFINITIONS
+                active_tools = None if forcing_synthesis else effective_tool_definitions
 
                 # If loop intervention was tripped, append system instruction
                 if loop_intervention_active:

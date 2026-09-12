@@ -1,4 +1,7 @@
 import asyncio
+import json
+import logging
+import re
 import uuid
 from pathlib import Path
 from typing import Callable, Coroutine, Optional
@@ -12,6 +15,7 @@ from maulness.core.models import (
     AgentThoughtEvent,
     AgentToolCallEvent,
     ApprovalRequestEvent,
+    RepoGotcha,
     TaskMode,
     TaskRecord,
     TaskRetrospective,
@@ -26,6 +30,7 @@ from maulness.core.worktree import WorktreeManager
 from maulness.storage.db import StorageManager
 
 console = Console()
+logger = logging.getLogger("maulness.runner")
 
 
 class TaskRunner:
@@ -212,7 +217,10 @@ class TaskRunner:
         try:
             provider = get_provider_for_profile(profile)
 
+            last_result: str = ""
+
             async def _execute_on(ws: Path):
+                nonlocal last_result
                 # Ensure baseline tests are hashed on actual workspace/worktree
                 active_freeze = TestFreezeGate(ws)
 
@@ -222,7 +230,7 @@ class TaskRunner:
                     if on_tool_call:
                         await on_tool_call(event)
 
-                await provider.run(
+                last_result = await provider.run(
                     session_id=task_id,
                     prompt=effective_prompt,
                     workspace_path=ws,
@@ -248,6 +256,7 @@ class TaskRunner:
                 await _execute_on(target_workspace)
 
             # Invalidate gotchas if modified files touched components
+            current_head_hash = "unknown"
             if self.worktree_manager.is_git_repo(target_workspace):
                 import subprocess
 
@@ -266,11 +275,75 @@ class TaskRunner:
                         str(target_workspace), mod_files
                     )
 
-            # Record task retrospective
+                rev_res = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=str(target_workspace),
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if rev_res.returncode == 0 and rev_res.stdout.strip():
+                    current_head_hash = rev_res.stdout.strip()[:10]
+
+            # G1: Post-task LLM gotcha extraction turn
+            try:
+                extract_prompt = (
+                    "Extract 1-2 non-obvious environmental gotchas, repository quirks, or build/test fixes "
+                    f"discovered during this task execution:\n\nTask: {prompt}\n\n"
+                    f"Result: {last_result[:2000]}\n\n"
+                    'Format response strictly as JSON array: [{"component": "...", "symptom": "...", "resolution": "..."}] '
+                    "or reply with 'NONE' if no non-obvious environmental or tool quirks were discovered."
+                )
+                extract_session = f"extract_{task_id}_{uuid.uuid4().hex[:6]}"
+                gotcha_text = await provider.run(
+                    session_id=extract_session,
+                    prompt=extract_prompt,
+                    workspace_path=target_workspace,
+                    max_tool_turns=1,
+                )
+                if gotcha_text and "NONE" not in gotcha_text.upper():
+                    m = re.search(r"\[.*\]", gotcha_text, flags=re.DOTALL)
+                    if m:
+                        items = json.loads(m.group(0))
+                        if isinstance(items, list):
+                            for item in items[:2]:
+                                if (
+                                    isinstance(item, dict)
+                                    and item.get("component")
+                                    and item.get("symptom")
+                                    and item.get("resolution")
+                                ):
+                                    g_id = f"gotcha_{uuid.uuid4().hex[:8]}"
+                                    gotcha = RepoGotcha(
+                                        id=g_id,
+                                        repo_path=str(target_workspace),
+                                        component=str(item["component"])[:100],
+                                        symptom=str(item["symptom"])[:300],
+                                        resolution=str(item["resolution"])[:300],
+                                        commit_hash=current_head_hash,
+                                    )
+                                    await self.storage.save_repo_gotcha(gotcha)
+                                    logger.info(
+                                        "Saved extracted gotcha for %s: %s",
+                                        target_workspace,
+                                        gotcha.component,
+                                    )
+            except Exception as extract_err:
+                logger.debug(
+                    "Gotcha extraction turn skipped or failed: %s", extract_err
+                )
+
+            # G12: Record enriched task retrospective
+            clean_prompt = prompt.replace("\n", " ").strip()
+            retro_summary = (
+                f"Task: {clean_prompt[:60]}... | "
+                f"Turns: {budget_guard.total_turns} | "
+                f"Cost: ${budget_guard.accumulated_cost_usd:.4f} | Status: DONE"
+            )
             retro = TaskRetrospective(
                 task_id=task_id,
                 repo_path=str(target_workspace),
-                summary=prompt[:100],
+                summary=retro_summary,
                 passed=True,
                 total_steps=budget_guard.total_turns,
                 cost_usd=budget_guard.accumulated_cost_usd,

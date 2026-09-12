@@ -305,7 +305,9 @@ class MCPClientManager:
     async def initialize_servers(self, workspace_path: Optional[Path] = None) -> None:
         """Discover and connect to all declared MCP servers."""
         ws = Path(workspace_path or Path.cwd()).resolve()
-        if self.last_workspace == ws and self.servers:
+        # Only cache when an explicit workspace_path is provided; otherwise always
+        # re-discover to avoid cross-task server leakage in daemon mode.
+        if workspace_path is not None and self.last_workspace == ws and self.servers:
             return
 
         await self.shutdown()

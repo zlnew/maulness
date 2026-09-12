@@ -33,6 +33,7 @@ async def test_runner_gotcha_injection_and_retrospective(tmp_path: Path):
         patch("maulness.core.runner.TestFreezeGate") as mock_freeze,
     ):
         mock_provider = AsyncMock()
+        mock_provider.run.side_effect = ["Task done", "NONE"]
         mock_get_provider.return_value = mock_provider
         mock_freeze.return_value.verify_no_tampering = lambda: None
 
@@ -44,9 +45,9 @@ async def test_runner_gotcha_injection_and_retrospective(tmp_path: Path):
 
         assert task_record is not None
 
-        # Verify gotcha was injected into the prompt executed on provider
-        call_kwargs = mock_provider.run.call_args[1]
-        executed_prompt = call_kwargs["prompt"]
+        # Verify gotcha was injected into the task prompt executed on provider
+        first_call_kwargs = mock_provider.run.call_args_list[0].kwargs
+        executed_prompt = first_call_kwargs["prompt"]
         assert "[Known Workspace Gotchas]:" in executed_prompt
         assert "**cors**: OPTIONS 403 on preflight" in executed_prompt
         assert "Allow headers Authorization and Content-Type" in executed_prompt
@@ -56,3 +57,40 @@ async def test_runner_gotcha_injection_and_retrospective(tmp_path: Path):
         assert len(retros) == 1
         assert retros[0].passed is True
         assert "Build feature" in retros[0].summary
+
+
+@pytest.mark.asyncio
+async def test_runner_gotcha_extraction_saves_new_gotcha(tmp_path: Path):
+    db_path = tmp_path / "test_extract.db"
+    storage = StorageManager(db_path=db_path)
+    await storage.initialize()
+
+    runner = TaskRunner(storage=storage)
+
+    with (
+        patch("maulness.core.runner.get_provider_for_profile") as mock_get_provider,
+        patch("maulness.core.runner.TestFreezeGate") as mock_freeze,
+    ):
+        mock_provider = AsyncMock()
+        mock_provider.run.side_effect = [
+            "Fixed database locks by enabling WAL mode.",
+            '[{"component": "sqlite", "symptom": "database is locked under concurrency", "resolution": "PRAGMA journal_mode=WAL"}]',
+        ]
+        mock_get_provider.return_value = mock_provider
+        mock_freeze.return_value.verify_no_tampering = lambda: None
+
+        task_record = await runner.run_direct(
+            prompt="Fix sqlite lockups",
+            workspace_path=tmp_path,
+            verbose=False,
+        )
+
+        assert task_record is not None
+        assert mock_provider.run.call_count == 2
+
+        # Verify extracted gotcha was saved in the database
+        active_gotchas = await storage.get_active_gotchas(str(tmp_path))
+        assert len(active_gotchas) == 1
+        assert active_gotchas[0].component == "sqlite"
+        assert "database is locked" in active_gotchas[0].symptom
+        assert "PRAGMA journal_mode=WAL" in active_gotchas[0].resolution

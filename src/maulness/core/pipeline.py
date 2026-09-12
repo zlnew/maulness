@@ -17,6 +17,7 @@ from maulness.core.models import (
     MilestonePlan,
     TaskMode,
     TaskRecord,
+    TaskRetrospective,
     TaskStatus,
 )
 from maulness.core.pipelines import (
@@ -27,6 +28,7 @@ from maulness.core.pipelines import (
     check_is_rework_verdict,
 )
 from maulness.core.indexing.repo_map import get_repo_map
+from maulness.core.kernel.budgets import BudgetExceededError, BudgetGuard
 from maulness.core.kernel.gates import DeterministicGateRunner
 from maulness.core.profiles import ProfileManager
 from maulness.core.providers.factory import get_provider_for_profile
@@ -260,6 +262,7 @@ class PipelineOrchestrator:
             rework_counts: dict[str, int] = {}
             stage_executions: dict[str, int] = {}
             stage_checkpoints: dict[str, str] = {}
+            pipeline_budget = BudgetGuard()
 
             stage_index = 0
             while stage_index < total_stages:
@@ -346,6 +349,13 @@ class PipelineOrchestrator:
                     stage_prompt = self.pipeline_manager.render_stage_prompt(
                         stage, context
                     )
+
+                    # Prepend pipeline-stage context so agent knows its role
+                    stage_context_header = (
+                        f"[Pipeline: {definition.name} | "
+                        f"Stage {display_idx}/{total_stages}: {stage.name}]\n\n"
+                    )
+                    stage_prompt = stage_context_header + stage_prompt
 
                     # Pre-flight repo map injection if stage requests it or prompt has placeholder
                     if (
@@ -484,6 +494,7 @@ class PipelineOrchestrator:
                                 raise
 
                         stage_output = "\n\n".join(milestone_outputs)
+                        pipeline_budget.record_turn()  # Count each stage as a budget unit
                     else:
                         try:
                             stage_output = await provider.run(
@@ -495,7 +506,11 @@ class PipelineOrchestrator:
                                 on_approval=on_approval
                                 if stage.requires_approval
                                 else None,
+                                max_tool_turns=20,  # Per-stage cap; milestone sub-sessions use 10
                             )
+                            pipeline_budget.record_turn()  # Count each stage as a budget unit
+                        except BudgetExceededError:
+                            raise
                         except Exception as e:
                             if verbose:
                                 console.print(
@@ -716,6 +731,26 @@ class PipelineOrchestrator:
             # All stages finished successfully
             await self.storage.update_task_status(task_id, TaskStatus.DONE)
 
+            # Record pipeline retrospective
+            retro = TaskRetrospective(
+                task_id=task_id,
+                repo_path=str(effective_workspace),
+                summary=(
+                    f"Pipeline: {definition.name} | "
+                    f"Title: {title[:50]} | "
+                    f"Stages: {total_stages} | "
+                    f"Turns: {pipeline_budget.total_turns} | "
+                    f"Cost: ${pipeline_budget.accumulated_cost_usd:.4f} | Status: DONE"
+                ),
+                passed=True,
+                total_steps=pipeline_budget.total_turns,
+                cost_usd=pipeline_budget.accumulated_cost_usd,
+            )
+            try:
+                await self.storage.save_task_retrospective(retro)
+            except Exception as retro_err:
+                logger.debug("Failed saving pipeline retrospective: %s", retro_err)
+
             # Final sync for task ledger marking completion
             sync_task_ledger(
                 effective_workspace,
@@ -764,7 +799,32 @@ class PipelineOrchestrator:
                 except Exception:
                     pass
 
-                result = await _execute_stages(wt_path)
+                try:
+                    result = await _execute_stages(wt_path)
+                except BudgetExceededError as budget_err:
+                    logger.warning(
+                        "Pipeline '%s' budget exceeded: %s. Parking as SUSPENDED_AFK.",
+                        definition.name,
+                        budget_err,
+                    )
+                    await self.storage.update_task_status(
+                        task_id, TaskStatus.SUSPENDED_AFK
+                    )
+                    try:
+                        await self.storage.save_task_retrospective(
+                            TaskRetrospective(
+                                task_id=task_id,
+                                repo_path=str(target_workspace),
+                                summary=f"Pipeline '{definition.name}' suspended: {budget_err}",
+                                passed=False,
+                                total_steps=0,
+                                cost_usd=0.0,
+                            )
+                        )
+                    except Exception:
+                        pass
+                    fetched = await self.storage.get_task(task_id)
+                    return fetched or task
 
                 if wt_branch:
                     try:
@@ -782,4 +842,27 @@ class PipelineOrchestrator:
 
                 return result
         else:
-            return await _execute_stages(target_workspace)
+            try:
+                return await _execute_stages(target_workspace)
+            except BudgetExceededError as budget_err:
+                logger.warning(
+                    "Pipeline '%s' budget exceeded: %s. Parking as SUSPENDED_AFK.",
+                    definition.name,
+                    budget_err,
+                )
+                await self.storage.update_task_status(task_id, TaskStatus.SUSPENDED_AFK)
+                try:
+                    await self.storage.save_task_retrospective(
+                        TaskRetrospective(
+                            task_id=task_id,
+                            repo_path=str(target_workspace),
+                            summary=f"Pipeline '{definition.name}' suspended: {budget_err}",
+                            passed=False,
+                            total_steps=0,
+                            cost_usd=0.0,
+                        )
+                    )
+                except Exception:
+                    pass
+                fetched = await self.storage.get_task(task_id)
+                return fetched or task

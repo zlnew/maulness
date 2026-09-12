@@ -16,9 +16,12 @@ from maulness.core.models import (
 from maulness.core.profiles import Profile
 from maulness.core.providers.base import BaseProvider
 from maulness.core.kernel import DurableAgentKernel, ModelTurnOutput
+from maulness.core.kernel.loop import compact_in_flight_tool_messages
 from maulness.storage.db import StorageManager
 
 logger = logging.getLogger("maulness.providers.api")
+
+__all__ = ["UnifiedApiProvider", "compact_in_flight_tool_messages"]
 
 
 class UnifiedApiProvider(BaseProvider):

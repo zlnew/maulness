@@ -4,6 +4,7 @@ stages:
   - name: building
     profile: builder
     status: building
+    run_milestones: true
     output_key: build_summary
     prompt: |
       Goal: {title}

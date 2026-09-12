@@ -25,7 +25,9 @@ async def test_runner_direct_execution_success(tmp_path: Path):
     mock_provider.run = AsyncMock()
 
     with (
-        patch("maulness.core.runner.get_provider_for_profile", return_value=mock_provider),
+        patch(
+            "maulness.core.runner.get_provider_for_profile", return_value=mock_provider
+        ),
         patch("maulness.core.runner.config") as mock_cfg,
     ):
         mock_cfg.workspace_root = tmp_path
@@ -42,9 +44,13 @@ async def test_runner_direct_execution_success(tmp_path: Path):
             if "on_init" in kwargs and kwargs["on_init"]:
                 await kwargs["on_init"]("test_conv_123")
             if "on_thought" in kwargs and kwargs["on_thought"]:
-                await kwargs["on_thought"](AgentThoughtEvent(delta="Thinking...", session_id="s1"))
+                await kwargs["on_thought"](
+                    AgentThoughtEvent(delta="Thinking...", session_id="s1")
+                )
             if "on_message" in kwargs and kwargs["on_message"]:
-                await kwargs["on_message"](AgentMessageEvent(delta="Hello world", session_id="s1"))
+                await kwargs["on_message"](
+                    AgentMessageEvent(delta="Hello world", session_id="s1")
+                )
             if "on_approval" in kwargs and kwargs["on_approval"]:
                 # Test auto-approved action
                 ev1 = ApprovalRequestEvent(
@@ -82,10 +88,12 @@ async def test_runner_direct_with_worktree_and_yolo(tmp_path: Path):
     runner = TaskRunner(storage=storage, worktree_manager=mock_wt)
 
     mock_provider = MagicMock()
-    mock_provider.run = AsyncMock()
+    mock_provider.run = AsyncMock(return_value="Refactor done")
 
     with (
-        patch("maulness.core.runner.get_provider_for_profile", return_value=mock_provider),
+        patch(
+            "maulness.core.runner.get_provider_for_profile", return_value=mock_provider
+        ),
         patch("maulness.core.runner.config") as mock_cfg,
     ):
         mock_cfg.workspace_root = tmp_path
@@ -100,7 +108,10 @@ async def test_runner_direct_with_worktree_and_yolo(tmp_path: Path):
 
         assert task.status == TaskStatus.DONE
         mock_wt.isolated_worktree.assert_called_once()
-        mock_provider.run.assert_awaited_once()
+        # Awaited for main task prompt and gotcha extraction turn
+        assert mock_provider.run.await_count >= 1
+        first_call = mock_provider.run.call_args_list[0]
+        assert "Refactor engine" in first_call.kwargs["prompt"]
 
 
 @pytest.mark.asyncio
@@ -153,12 +164,16 @@ async def test_runner_terminal_approval_handlers(tmp_path: Path):
     mock_provider.run = AsyncMock(side_effect=fake_provider_run)
 
     with (
-        patch("maulness.core.runner.get_provider_for_profile", return_value=mock_provider),
+        patch(
+            "maulness.core.runner.get_provider_for_profile", return_value=mock_provider
+        ),
         patch("builtins.input", side_effect=["y", "n", "yes"]),
         patch("maulness.core.runner.config") as mock_cfg,
     ):
         mock_cfg.workspace_root = tmp_path
-        task = await runner.run_direct(prompt="Run hazardous commands", workspace_path=tmp_path)
+        task = await runner.run_direct(
+            prompt="Run hazardous commands", workspace_path=tmp_path
+        )
         assert task.status == TaskStatus.DONE
         assert captured_decisions == [True, False, True]
 
@@ -202,8 +217,12 @@ async def test_runner_custom_callbacks_and_existing_session(tmp_path: Path):
         return True
 
     async def fake_provider_run(**kwargs):
-        await kwargs["on_thought"](AgentThoughtEvent(delta="Thinking custom", session_id="s1"))
-        await kwargs["on_message"](AgentMessageEvent(delta="Message custom", session_id="s1"))
+        await kwargs["on_thought"](
+            AgentThoughtEvent(delta="Thinking custom", session_id="s1")
+        )
+        await kwargs["on_message"](
+            AgentMessageEvent(delta="Message custom", session_id="s1")
+        )
         ev = ApprovalRequestEvent(
             request_id=1,
             call_id="c1",
@@ -216,7 +235,9 @@ async def test_runner_custom_callbacks_and_existing_session(tmp_path: Path):
     mock_provider.run = AsyncMock(side_effect=fake_provider_run)
 
     with (
-        patch("maulness.core.runner.get_provider_for_profile", return_value=mock_provider),
+        patch(
+            "maulness.core.runner.get_provider_for_profile", return_value=mock_provider
+        ),
         patch("maulness.core.runner.config") as mock_cfg,
     ):
         mock_cfg.workspace_root = tmp_path
@@ -246,19 +267,27 @@ async def test_runner_error_handling(tmp_path: Path):
     # 1. FileNotFoundError
     mock_provider.run = AsyncMock(side_effect=FileNotFoundError("Target file missing"))
     with (
-        patch("maulness.core.runner.get_provider_for_profile", return_value=mock_provider),
+        patch(
+            "maulness.core.runner.get_provider_for_profile", return_value=mock_provider
+        ),
         patch("maulness.core.runner.config") as mock_cfg,
     ):
         mock_cfg.workspace_root = tmp_path
         with pytest.raises(FileNotFoundError):
-            await runner.run_direct(prompt="Fail with file not found", workspace_path=tmp_path)
+            await runner.run_direct(
+                prompt="Fail with file not found", workspace_path=tmp_path
+            )
 
     # 2. Generic Exception
     mock_provider.run = AsyncMock(side_effect=RuntimeError("Provider exploded"))
     with (
-        patch("maulness.core.runner.get_provider_for_profile", return_value=mock_provider),
+        patch(
+            "maulness.core.runner.get_provider_for_profile", return_value=mock_provider
+        ),
         patch("maulness.core.runner.config") as mock_cfg,
     ):
         mock_cfg.workspace_root = tmp_path
         with pytest.raises(RuntimeError):
-            await runner.run_direct(prompt="Fail with runtime error", workspace_path=tmp_path)
+            await runner.run_direct(
+                prompt="Fail with runtime error", workspace_path=tmp_path
+            )
