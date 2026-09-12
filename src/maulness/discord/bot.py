@@ -139,16 +139,44 @@ def _format_markdown_elements(text: str) -> str:
     return "".join(processed_parts)
 
 
+DISCORD_RESPONSE_DIRECTIVE = """## Discord Interface & Formatting Doctrine
+You are conversing directly with Maul inside a Discord chat thread (accessible via desktop and mobile).
+Deliver clean, readable, and safe Discord formatting:
+1. Directness & TL;DR: Lead with the bottom-line answer, verdict, or a 1-2 sentence TL;DR.
+2. Heading Hierarchy: Use '###' for section headings. NEVER use '#' or '##' (they render as gigantic, disruptive text on mobile).
+3. Brevity & Scanning: Use concise bullet points, bold key terms, and short paragraphs. Avoid long unbroken walls of text.
+4. Code & Commands: Enclose all code snippets, file paths, and terminal commands in fenced code blocks with language tags (e.g. ```python, ```bash).
+5. Clean Data: Do not output unformatted markdown tables or raw JSON dumps. Summarize comparisons in bullet points or format them cleanly.
+6. Communication: Do not leak internal system tags, scratchpads, or raw tool payloads into chat."""
+
+
 def format_discord_markdown(text: str) -> str:
-    """Format markdown for clean Discord rendering: LaTeX translation, header softening, and table formatting."""
+    """Format markdown for clean Discord rendering: mention safety, tag stripping, LaTeX translation, header softening, and table formatting."""
     if not text:
         return text
     result = text
+
+    # 1. Neutralize server-wide mentions (@everyone, @here) with zero-width space
+    result = result.replace("@everyone", "@\u200beveryone").replace(
+        "@here", "@\u200bhere"
+    )
+
+    # 2. Strip internal reasoning or system tags that might leak from models
+    result = re.sub(
+        r"<(?:scratchpad|antigravity_thought|system_context|internal_thought)>[\s\S]*?</(?:scratchpad|antigravity_thought|system_context|internal_thought)>",
+        "",
+        result,
+        flags=re.IGNORECASE,
+    )
+
+    # 3. Translate LaTeX math to ASCII
     for pattern, replacement in LATEX_REPLACEMENTS:
         result = pattern.sub(replacement, result)
     result = re.sub(
         r"\$\s*(->|<-|<->|=>|<=|<=>|~|!=|\*|\+/-|\.\.\.)\s*\$", r"\1", result
     )
+
+    # 4. Soften headings and wrap tables
     result = _format_markdown_elements(result)
     return result
 
@@ -165,8 +193,18 @@ class MaulnessBot(commands.Bot):
     ):
         intents = discord.Intents.default()
         intents.message_content = True
+        allowed_mentions = discord.AllowedMentions(
+            everyone=False,
+            roles=False,
+            users=True,
+            replied_user=True,
+        )
 
-        super().__init__(command_prefix="!mn ", intents=intents)
+        super().__init__(
+            command_prefix="!mn ",
+            intents=intents,
+            allowed_mentions=allowed_mentions,
+        )
         self.storage = storage
         self.profile_manager = ProfileManager()
 
@@ -649,6 +687,7 @@ class MaulnessBot(commands.Bot):
                     prompt=prompt,
                     workspace_path=workspace,
                     conversation_id=active_conv_id,
+                    extra_system_prompt=DISCORD_RESPONSE_DIRECTIVE,
                     on_init=on_init,
                     on_thought=on_thought,
                     on_message=on_message_chunk,

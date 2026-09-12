@@ -1,4 +1,5 @@
 import asyncio
+import base64
 from collections import deque
 import fnmatch
 import hashlib
@@ -9,6 +10,7 @@ import os
 import re
 import shutil
 import signal
+import ssl
 import subprocess
 import urllib.parse
 from pathlib import Path
@@ -1192,8 +1194,57 @@ async def get_effective_tool_definitions(
     return list(TOOL_DEFINITIONS) + mcp_defs
 
 
+_DOH_CACHE: dict[str, str] = {}
+
+
+async def _resolve_doh(hostname: str) -> str:
+    """Resolve hostname via DNS-over-HTTPS (Cloudflare / Google) to bypass local ISP DNS sinkholing."""
+    if hostname in _DOH_CACHE:
+        return _DOH_CACHE[hostname]
+
+    doh_endpoints = [
+        f"https://1.1.1.1/dns-query?name={hostname}&type=A",
+        f"https://8.8.8.8/resolve?name={hostname}&type=A",
+    ]
+    for endpoint in doh_endpoints:
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                res = await client.get(
+                    endpoint, headers={"accept": "application/dns-json"}
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    for ans in data.get("Answer", []):
+                        if ans.get("type") == 1:  # A record
+                            ip = ans.get("data")
+                            if ip and not ip.startswith("103."):  # Ignore sinkhole IPs
+                                _DOH_CACHE[hostname] = ip
+                                return ip
+        except Exception:
+            continue
+
+    # Known edge fallback IPs for html.duckduckgo.com (Azure edge)
+    if "duckduckgo.com" in hostname:
+        return "20.43.161.105"
+    return ""
+
+
+def _decode_bing_url(u: str) -> str:
+    """Extract destination URL from Bing redirect containing u=a1<base64>."""
+    u = html.unescape(u)
+    m = re.search(r"[?&]u=a1([a-zA-Z0-9_=-]+)", u)
+    if m:
+        b64 = m.group(1).rstrip("=")
+        b64 += "=" * ((4 - len(b64) % 4) % 4)
+        try:
+            return base64.urlsafe_b64decode(b64).decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+    return u
+
+
 async def _execute_web_search(query: str, max_results: int = 5) -> str:
-    """Execute web search across DuckDuckGo HTML, GitHub API, or search providers."""
+    """Execute web search across DuckDuckGo HTML (with DoH sinkhole bypass) and Bing search fallback."""
     tavily_key = os.getenv("TAVILY_API_KEY")
     if tavily_key:
         try:
@@ -1220,24 +1271,41 @@ async def _execute_web_search(query: str, max_results: int = 5) -> str:
             logger.debug("Tavily search failed: %s", e)
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
     }
+
+    # 1. DuckDuckGo HTML Search (with DoH resolution to bypass regional ISP sinkholes)
     try:
-        url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(query)}"
+        resolved_ip = await _resolve_doh("html.duckduckgo.com")
+        target_url = (
+            f"https://{resolved_ip}/html/?q={urllib.parse.quote_plus(query)}"
+            if resolved_ip
+            else f"https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(query)}"
+        )
+        req_headers = dict(headers)
+        if resolved_ip:
+            req_headers["Host"] = "html.duckduckgo.com"
+        extensions = {"sni_hostname": "html.duckduckgo.com"} if resolved_ip else {}
+
+        ctx = ssl.create_default_context()
         async with httpx.AsyncClient(
-            headers=headers, timeout=8.0, follow_redirects=True
+            headers=req_headers,
+            verify=ctx,
+            timeout=8.0,
+            follow_redirects=True,
         ) as client:
-            resp = await client.get(url)
+            resp = await client.get(target_url, extensions=extensions)
             if resp.status_code == 200:
                 raw_matches = re.findall(
-                    r'<a[^>]+class=[\'"]result__snippet[\'"][^>]*href=[\'"]([^\'"]+)[\'"][^>]*>(.*?)</a>',
+                    r"<a[^>]+class=[\x27\x22]result__snippet[\x27\x22][^>]*href=[\x27\x22]([^\x27\x22]+)[\x27\x22][^>]*>(.*?)</a>",
                     resp.text,
                     re.DOTALL,
                 )
                 if not raw_matches:
                     raw_matches = re.findall(
-                        r'<a[^>]+class=[\'"]result__url[\'"][^>]*href=[\'"]([^\'"]+)[\'"][^>]*>(.*?)</a>',
+                        r"<a[^>]+class=[\x27\x22]result__url[\x27\x22][^>]*href=[\x27\x22]([^\x27\x22]+)[\x27\x22][^>]*>(.*?)</a>",
                         resp.text,
                         re.DOTALL,
                     )
@@ -1258,24 +1326,47 @@ async def _execute_web_search(query: str, max_results: int = 5) -> str:
     except Exception as e:
         logger.debug("DuckDuckGo HTML search failed: %s", e)
 
+    # 2. Bing Search Fallback
     try:
-        gh_url = f"https://api.github.com/search/repositories?q={urllib.parse.quote_plus(query)}&per_page={max_results}"
+        bing_url = f"https://www.bing.com/search?q={urllib.parse.quote_plus(query)}"
         async with httpx.AsyncClient(
-            headers={"User-Agent": "maulness-agent"}, timeout=6.0
+            headers=headers, timeout=8.0, follow_redirects=True
         ) as client:
-            gh_resp = await client.get(gh_url)
-            if gh_resp.status_code == 200:
-                items = gh_resp.json().get("items", [])
-                if items:
-                    lines = [f'### Web / GitHub Documentation Results for "{query}":']
-                    for idx, item in enumerate(items[:max_results], 1):
-                        lines.append(
-                            f"{idx}. **{item.get('full_name')}** - {item.get('html_url')}\n"
-                            f"   {item.get('description') or 'No description'}"
+            resp = await client.get(bing_url)
+            if resp.status_code == 200:
+                parts = re.split(r"<li\s+class=[\x27\x22]b_algo[\x27\x22]", resp.text)[
+                    1:
+                ]
+                results = []
+                for part in parts:
+                    h2_m = re.search(
+                        r"<h2[^>]*><a\s+[^>]*href=[\x27\x22]([^\x27\x22]+)[\x27\x22][^>]*>(.*?)</a></h2>",
+                        part,
+                        re.DOTALL,
+                    )
+                    p_m = re.search(r"<p[^>]*>(.*?)</p>", part, re.DOTALL)
+                    if h2_m:
+                        raw_u = h2_m.group(1)
+                        real_u = _decode_bing_url(raw_u)
+                        title = html.unescape(
+                            re.sub(r"<[^>]+>", "", h2_m.group(2))
+                        ).strip()
+                        snip = (
+                            html.unescape(re.sub(r"<[^>]+>", "", p_m.group(1))).strip()
+                            if p_m
+                            else ""
                         )
+                        if real_u and title:
+                            results.append((title, real_u, snip))
+                    if len(results) >= max_results:
+                        break
+                if results:
+                    lines = [f'### Web Search Results for "{query}":']
+                    for idx, (title, u, snip) in enumerate(results, 1):
+                        lines.append(f"{idx}. **{title}** - {u}\n   {snip}")
                     return "\n\n".join(lines)
     except Exception as e:
-        logger.debug("GitHub search fallback failed: %s", e)
+        logger.debug("Bing search fallback failed: %s", e)
 
     return f'Web search results for "{query}": No results found or web search providers currently unreachable.'
 

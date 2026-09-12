@@ -65,6 +65,7 @@ class FallbackProviderChain(BaseProvider):
         on_approval: Optional[
             Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]
         ] = None,
+        **kwargs: Any,
     ) -> str:
         registry = self.registry
         full_chain = [self.primary] + self.fallbacks
@@ -158,6 +159,7 @@ class FallbackProviderChain(BaseProvider):
                         on_message=on_message,
                         on_tool_call=on_tool_call,
                         on_approval=on_approval,
+                        **kwargs,
                     )
                     if not res or not res.strip():
                         raise RuntimeError(

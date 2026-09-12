@@ -315,6 +315,26 @@ def test_format_discord_markdown():
     assert "Here is a table:" in formatted_table
     assert "Done." in formatted_table
 
+    # Mention neutralization
+    mention_sample = "Alert @everyone and check @here for updates"
+    formatted_mentions = format_discord_markdown(mention_sample)
+    assert "@everyone" not in formatted_mentions
+    assert "@\u200beveryone" in formatted_mentions
+    assert "@here" not in formatted_mentions
+    assert "@\u200bhere" in formatted_mentions
+
+    # System & scratchpad tag stripping
+    tag_sample = "Hello<scratchpad>secret thoughts</scratchpad> world<antigravity_thought>thinking</antigravity_thought>!"
+    assert format_discord_markdown(tag_sample) == "Hello world!"
+
+
+def test_discord_response_directive():
+    from maulness.discord.bot import DISCORD_RESPONSE_DIRECTIVE
+
+    assert "Discord Interface & Formatting Doctrine" in DISCORD_RESPONSE_DIRECTIVE
+    assert "TL;DR" in DISCORD_RESPONSE_DIRECTIVE
+    assert "###" in DISCORD_RESPONSE_DIRECTIVE
+
 
 @pytest.mark.asyncio
 async def test_bot_interrupt_command(tmp_path: Path):

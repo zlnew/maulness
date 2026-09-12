@@ -37,6 +37,7 @@ class BaseProvider(ABC):
         on_approval: Optional[
             Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]
         ] = None,
+        **kwargs: Any,
     ) -> str:
         """Execute a prompt and stream responses through registered callbacks."""
         pass

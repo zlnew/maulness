@@ -106,33 +106,34 @@ async def test_execute_web_search_duckduckgo_mock():
 
 
 @pytest.mark.asyncio
-async def test_execute_web_search_github_fallback():
-    # Simulate DDG failure followed by GitHub fallback success
+async def test_execute_web_search_bing_fallback():
+    # Simulate DDG failure followed by Bing fallback success
     ddg_fail = MagicMock()
     ddg_fail.status_code = 500
     ddg_fail.text = ""
 
-    gh_success = MagicMock()
-    gh_success.status_code = 200
-    gh_success.json = lambda: {
-        "items": [
-            {
-                "full_name": "ast-org/parser",
-                "html_url": "https://github.com/ast-org/parser",
-                "description": "A fast AST parser in Python",
-            }
-        ]
-    }
+    bing_html = """
+    <ol id="b_results">
+        <li class="b_algo">
+            <h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=abc&amp;u=a1aHR0cHM6Ly9leGFtcGxlLmNvbS9hc3QtcGFyc2Vy">AST Parser</a></h2>
+            <div class="b_caption"><p>A fast AST parser in Python</p></div>
+        </li>
+    </ol>
+    """
+    bing_success = MagicMock()
+    bing_success.status_code = 200
+    bing_success.text = bing_html
 
     async def mock_get(url, *args, **kwargs):
-        if "duckduckgo" in url:
+        if "duckduckgo" in url or "20.43.161.105" in url:
             return ddg_fail
-        return gh_success
+        return bing_success
 
     with patch("httpx.AsyncClient.get", side_effect=mock_get):
         res = await _execute_web_search("ast parser", max_results=1)
-        assert "ast-org/parser" in res
-        assert "https://github.com/ast-org/parser" in res
+        assert "AST Parser" in res
+        assert "https://example.com/ast-parser" in res
+        assert "A fast AST parser in Python" in res
 
 
 @pytest.mark.asyncio

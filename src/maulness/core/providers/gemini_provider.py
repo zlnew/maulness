@@ -244,8 +244,11 @@ class GeminiProvider(BaseProvider):
 
         max_tokens = self.profile.max_tokens or 4096
         effort = self.profile.reasoning_effort
+        system_instruction = self.profile.effective_system_prompt()
+        if kwargs.get("extra_system_prompt"):
+            system_instruction += "\n\n" + str(kwargs["extra_system_prompt"]).strip()
         gen_config_kwargs: dict = {
-            "system_instruction": self.profile.effective_system_prompt(),
+            "system_instruction": system_instruction,
             "temperature": self.profile.temperature,
         }
         if effort:

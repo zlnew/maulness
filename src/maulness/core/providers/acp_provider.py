@@ -45,6 +45,7 @@ class AcpProvider(BaseProvider):
         on_approval: Optional[
             Callable[[ApprovalRequestEvent], Coroutine[Any, Any, bool]]
         ] = None,
+        **kwargs: Any,
     ) -> str:
         if not self.profile.command or not self.profile.command.strip():
             raise ValueError(
@@ -68,6 +69,7 @@ class AcpProvider(BaseProvider):
                 on_message=on_message,
                 on_tool_call=on_tool_call,
                 on_approval=on_approval,
+                **kwargs,
             )
 
         # Standard ACP JSON-RPC 2.0 client
@@ -81,6 +83,7 @@ class AcpProvider(BaseProvider):
             on_message=on_message,
             on_tool_call=on_tool_call,
             on_approval=on_approval,
+            **kwargs,
         )
 
     async def _run_agy_stream(
@@ -95,6 +98,7 @@ class AcpProvider(BaseProvider):
         on_message=None,
         on_tool_call=None,
         on_approval=None,
+        **kwargs: Any,
     ) -> str:
         # If conversation_id is provided, resume existing conversation
         effective_prompt = prompt
@@ -104,6 +108,8 @@ class AcpProvider(BaseProvider):
         else:
             # If starting a fresh conversation, inject SOUL doctrine & system prompt
             system_doctrine = self.profile.effective_system_prompt()
+            if kwargs.get("extra_system_prompt"):
+                system_doctrine += "\n\n" + str(kwargs["extra_system_prompt"]).strip()
             if system_doctrine and system_doctrine.strip():
                 effective_prompt = (
                     f"[SYSTEM OPERATING DOCTRINE & IDENTITY]\n"
@@ -257,6 +263,7 @@ class AcpProvider(BaseProvider):
         on_message=None,
         on_tool_call=None,
         on_approval=None,
+        **kwargs: Any,
     ) -> str:
         """Run standard ACP JSON-RPC 2.0 handshake and session."""
         client = await AcpClient.spawn(command=cmd, cwd=cwd)
@@ -299,6 +306,8 @@ class AcpProvider(BaseProvider):
         effective_prompt = prompt
         if not conversation_id:
             system_doctrine = self.profile.effective_system_prompt()
+            if kwargs.get("extra_system_prompt"):
+                system_doctrine += "\n\n" + str(kwargs["extra_system_prompt"]).strip()
             if system_doctrine and system_doctrine.strip():
                 effective_prompt = (
                     f"[SYSTEM OPERATING DOCTRINE & IDENTITY]\n"
