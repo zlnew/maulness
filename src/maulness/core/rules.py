@@ -88,6 +88,7 @@ DEFAULT_TOOL_POLICIES: dict[str, PolicyAction] = {
     "find_symbol": PolicyAction.ALLOW,
     "web_search": PolicyAction.ALLOW,
     "fetch_doc_markdown": PolicyAction.ALLOW,
+    "load_skill": PolicyAction.ALLOW,
     "write_file": PolicyAction.ASK,
     "write_to_file": PolicyAction.ASK,
     "replace_file_content": PolicyAction.ASK,

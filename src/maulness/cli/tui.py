@@ -18,6 +18,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
+from maulness.cli.commands import expand_context_tags, handle_slash_command
 from maulness.config import config
 from maulness.core.models import (
     AgentMessageEvent,
@@ -82,8 +83,15 @@ class CommandPaletteModal(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="palette-dialog"):
-            yield Label("[bold magenta]Command Palette[/bold magenta] [dim](Type to filter, ↑/↓ to navigate, Enter/Tab to select, Esc to close)[/dim]", classes="palette-title")
-            yield Input(value=self.initial_query, placeholder="Filter commands (/new, /pipeline, /profile, !<cmd>)...", id="palette-filter")
+            yield Label(
+                "[bold magenta]Command Palette[/bold magenta] [dim](Type to filter, ↑/↓ to navigate, Enter/Tab to select, Esc to close)[/dim]",
+                classes="palette-title",
+            )
+            yield Input(
+                value=self.initial_query,
+                placeholder="Filter commands (/new, /pipeline, /profile, !<cmd>)...",
+                id="palette-filter",
+            )
             ol = OptionList(id="palette-options")
             yield ol
 
@@ -103,7 +111,9 @@ class CommandPaletteModal(ModalScreen[Optional[str]]):
                 scored.append((0, cmd, desc))
             elif cmd_clean.lower() == f"/{q}" or cmd_clean.lower() == q:
                 scored.append((100, cmd, desc))
-            elif cmd_clean.lower().startswith(f"/{q}") or cmd_clean.lower().startswith(q):
+            elif cmd_clean.lower().startswith(f"/{q}") or cmd_clean.lower().startswith(
+                q
+            ):
                 scored.append((80, cmd, desc))
             elif q in cmd.lower():
                 scored.append((50, cmd, desc))
@@ -173,25 +183,42 @@ class ApprovalModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="modal-dialog"):
-            yield Label("[bold yellow]HITL Tool Approval Required[/bold yellow]", classes="modal-title")
-            yield Label(f"[bold cyan]Tool:[/bold cyan] {self.event.tool_name}", classes="modal-row")
+            yield Label(
+                "[bold yellow]HITL Tool Approval Required[/bold yellow]",
+                classes="modal-title",
+            )
+            yield Label(
+                f"[bold cyan]Tool:[/bold cyan] {self.event.tool_name}",
+                classes="modal-row",
+            )
             if self.event.tool_name == "run_command":
                 cmd = self.event.args.get("command", "")
                 cwd = self.event.args.get("cwd", "")
-                yield Label(f"[bold green]$[/bold green] [bold white]{cmd}[/bold white]", classes="modal-row")
+                yield Label(
+                    f"[bold green]$[/bold green] [bold white]{cmd}[/bold white]",
+                    classes="modal-row",
+                )
                 if cwd:
                     yield Label(f"[dim]Directory: {cwd}[/dim]", classes="modal-row")
             elif self.event.tool_name in ("write_file", "read_file"):
                 path = self.event.args.get("path", "")
-                yield Label(f"[bold magenta]Path:[/bold magenta] [white]{path}[/white]", classes="modal-row")
+                yield Label(
+                    f"[bold magenta]Path:[/bold magenta] [white]{path}[/white]",
+                    classes="modal-row",
+                )
                 if "bytes" in self.event.args:
-                    yield Label(f"[dim]Size: {self.event.args['bytes']} bytes[/dim]", classes="modal-row")
+                    yield Label(
+                        f"[dim]Size: {self.event.args['bytes']} bytes[/dim]",
+                        classes="modal-row",
+                    )
             else:
                 try:
                     formatted_args = json.dumps(self.event.args, indent=2)
                 except Exception:
                     formatted_args = str(self.event.args)
-                yield Static(Syntax(formatted_args, "json", theme="monokai"), classes="args-box")
+                yield Static(
+                    Syntax(formatted_args, "json", theme="monokai"), classes="args-box"
+                )
             with Horizontal(classes="modal-buttons"):
                 yield Button("Allow Once (y)", variant="success", id="btn-allow")
                 yield Button("Deny (n)", variant="error", id="btn-deny")
@@ -222,7 +249,10 @@ class GateModal(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="modal-dialog"):
-            yield Label("[bold magenta]Pipeline Confirmation Gate[/bold magenta]", classes="modal-title")
+            yield Label(
+                "[bold magenta]Pipeline Confirmation Gate[/bold magenta]",
+                classes="modal-title",
+            )
             yield Label(self.gate_prompt, classes="modal-row")
             with Horizontal(classes="modal-buttons"):
                 yield Button("Proceed (y)", variant="primary", id="btn-proceed")
@@ -258,14 +288,19 @@ class DiffModal(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="diff-dialog"):
-            yield Label("[bold cyan]Git Diff HEAD[/bold cyan] [dim](j/k to scroll, q or Esc to close)[/dim]")
+            yield Label(
+                "[bold cyan]Git Diff HEAD[/bold cyan] [dim](j/k to scroll, q or Esc to close)[/dim]"
+            )
             res = subprocess.run(
                 ["git", "diff", "HEAD"],
                 cwd=str(self.workspace_path),
                 capture_output=True,
                 text=True,
             )
-            diff_text = res.stdout.strip() or "(No uncommitted diffs detected in current workspace)"
+            diff_text = (
+                res.stdout.strip()
+                or "(No uncommitted diffs detected in current workspace)"
+            )
             with VerticalScroll(id="diff-scroll-view"):
                 yield Static(Syntax(diff_text, "diff", theme="monokai"))
             with Horizontal(classes="modal-buttons"):
@@ -316,14 +351,21 @@ class ProfileModal(ModalScreen[Optional[str]]):
 
     def compose(self) -> ComposeResult:
         with Container(classes="palette-dialog"):
-            yield Label("[bold magenta]Select Active Profile[/bold magenta] [dim](Enter to switch, Esc to cancel)[/dim]", classes="palette-title")
+            yield Label(
+                "[bold magenta]Select Active Profile[/bold magenta] [dim](Enter to switch, Esc to cancel)[/dim]",
+                classes="palette-title",
+            )
             ol = OptionList(id="profile-options")
             yield ol
 
     def on_mount(self) -> None:
         ol = self.query_one("#profile-options", OptionList)
         for idx, p in enumerate(self.profiles):
-            is_active = " [bold green]ACTIVE[/bold green]" if p.name == self.current_profile else ""
+            is_active = (
+                " [bold green]ACTIVE[/bold green]"
+                if p.name == self.current_profile
+                else ""
+            )
             label = f"[bold cyan]{p.name}[/bold cyan] ({p.provider}) — [dim]{p.description[:50]}[/dim]{is_active}"
             ol.add_option(Option(label, id=p.name))
             if p.name == self.current_profile:
@@ -424,7 +466,10 @@ class UserCard(Static):
         self.branch = branch
 
     def compose(self) -> ComposeResult:
-        yield Label(f"[bold cyan]Maul[/bold cyan] [dim]({self.repo}:{self.branch})[/dim]", classes="card-header")
+        yield Label(
+            f"[bold cyan]Maul[/bold cyan] [dim]({self.repo}:{self.branch})[/dim]",
+            classes="card-header",
+        )
         yield Static(self.prompt, classes="card-body")
 
 
@@ -439,7 +484,9 @@ class SystemCard(Static):
 
     def compose(self) -> ComposeResult:
         color = "red" if self.is_error else "yellow"
-        yield Label(f"[bold {color}]{self.card_title}[/bold {color}]", classes="card-header")
+        yield Label(
+            f"[bold {color}]{self.card_title}[/bold {color}]", classes="card-header"
+        )
         yield Static(self.card_content, classes="card-body")
 
 
@@ -464,8 +511,15 @@ class AgentCard(Static):
         self._last_render_time = 0.0
 
     def compose(self) -> ComposeResult:
-        tag = f"{self.profile_name} • {self.model_info}" if self.model_info else self.profile_name
-        yield Label(f"[bold magenta]Maulness[/bold magenta] [dim]({tag})[/dim]", classes="card-header")
+        tag = (
+            f"{self.profile_name} • {self.model_info}"
+            if self.model_info
+            else self.profile_name
+        )
+        yield Label(
+            f"[bold magenta]Maulness[/bold magenta] [dim]({tag})[/dim]",
+            classes="card-header",
+        )
         yield self.thought_static
         yield self.tools_static
         yield self.message_static
@@ -480,7 +534,9 @@ class AgentCard(Static):
             full_thought = "".join(self.thought_text).strip()
             lines = [line.strip() for line in full_thought.splitlines() if line.strip()]
             snippet = lines[-1][:75] if lines else "Thinking..."
-            self.thought_static.update(f"[dim italic cyan]Thinking ({elapsed:.1f}s):[/dim italic cyan] [dim]{snippet}[/dim]")
+            self.thought_static.update(
+                f"[dim italic cyan]Thinking ({elapsed:.1f}s):[/dim italic cyan] [dim]{snippet}[/dim]"
+            )
             self.thought_static.add_class("visible")
             if "Provider" not in delta:
                 self.status_label.update("[dim cyan]Thinking...[/dim cyan]")
@@ -500,7 +556,9 @@ class AgentCard(Static):
                 summary = f": {args['TargetFile']}"
             elif "AbsolutePath" in args:
                 summary = f": {args['AbsolutePath']}"
-        self.tools_static.update(f"[bold yellow]Tool:[/bold yellow] [dim]{tool_name}{summary}[/dim]")
+        self.tools_static.update(
+            f"[bold yellow]Tool:[/bold yellow] [dim]{tool_name}{summary}[/dim]"
+        )
         self.tools_static.add_class("visible")
 
     def append_message(self, delta: str, force_render: bool = False) -> None:
@@ -508,7 +566,9 @@ class AgentCard(Static):
             self.has_started_message = True
             self.thought_duration = time.time() - self.thought_start_time
             if self.thought_text:
-                self.thought_static.update(f"[dim]Thought for {self.thought_duration:.1f}s[/dim]")
+                self.thought_static.update(
+                    f"[dim]Thought for {self.thought_duration:.1f}s[/dim]"
+                )
                 self.thought_static.add_class("visible")
             else:
                 self.thought_static.remove_class("visible")
@@ -558,7 +618,9 @@ class PipelineCard(Static):
         yield self.output_static
         yield self.status_label
 
-    def update_stage(self, stage_name: str, profile: str, current: int, total: int) -> None:
+    def update_stage(
+        self, stage_name: str, profile: str, current: int, total: int
+    ) -> None:
         self.stages_static.update(
             f"[bold yellow]Stage {current}/{total}:[/bold yellow] [bold]{stage_name}[/bold] ([magenta]{profile}[/magenta])"
         )
@@ -854,16 +916,43 @@ class MaulnessTUIApp(App):
         commands: list[tuple[str, str]] = []
 
         # 1. Flow Control & Task Orchestration
-        commands.extend([
-            ("/new", "Start fresh session, reset context window, and clear transcript"),
-            ("/stop", "Stop currently running task"),
-            ("/interrupt ", "Interrupt current task and steer with new prompt (<prompt>)"),
-            ("/queue ", "Queue a prompt to run after current task finishes (<prompt>)"),
-            ("/usage", "Display token metrics and estimated cost for this session"),
-            ("/context", "Display current workspace, git branch, and agent status"),
-            ("/providers", "Inspect provider circuit breaker health and cooldowns (/providers [reset])"),
-            ("/compact", "Compact conversation history into SQLite memory"),
-        ])
+        commands.extend(
+            [
+                (
+                    "/new",
+                    "Start fresh session, reset context window, and clear transcript",
+                ),
+                ("/stop", "Stop currently running task"),
+                (
+                    "/interrupt ",
+                    "Interrupt current task and steer with new prompt (<prompt>)",
+                ),
+                (
+                    "/queue ",
+                    "Queue a prompt to run after current task finishes (<prompt>)",
+                ),
+                ("/usage", "Display token metrics and estimated cost for this session"),
+                ("/context", "Display current workspace, git branch, and agent status"),
+                (
+                    "/providers",
+                    "Inspect provider circuit breaker health and cooldowns (/providers [reset])",
+                ),
+                ("/compact", "Compact conversation history into SQLite memory"),
+                ("/undo", "Undo uncommitted changes or rollback last milestone/commit"),
+                ("/diff", "Inspect current uncommitted git changes"),
+                (
+                    "/test",
+                    "Run detected project test suite (pytest, go test, cargo test)",
+                ),
+                ("/commit ", "Stage and commit changes with a message (/commit [msg])"),
+                (
+                    "/skills",
+                    "List all discovered skills across templates, user, and workspace",
+                ),
+                ("/outline ", "Inspect structural code outline (/outline <file>)"),
+                ("/repo-map", "Display dense PageRank AST repo map of workspace"),
+            ]
+        )
 
         # 2. Pipelines from PipelineManager (custom user YAMLs + templates)
         for pipe in self.pipeline_manager.list_pipelines():
@@ -876,17 +965,34 @@ class MaulnessTUIApp(App):
         # 3. Profiles from ProfileManager (custom user YAMLs + templates)
         for prof in self.profile_manager.list_profiles():
             desc = prof.description or f"Profile {prof.name}"
-            ws_hint = f" [ws: {prof.workspace}]" if prof.workspace and prof.workspace != "inherit" else ""
-            commands.append((f"/profile {prof.name}", f"Switch active profile to {prof.name} ({prof.provider}){ws_hint} — {desc[:40]}"))
+            ws_hint = (
+                f" [ws: {prof.workspace}]"
+                if prof.workspace and prof.workspace != "inherit"
+                else ""
+            )
+            commands.append(
+                (
+                    f"/profile {prof.name}",
+                    f"Switch active profile to {prof.name} ({prof.provider}){ws_hint} — {desc[:40]}",
+                )
+            )
 
         # 4. Global actions and shell helpers
-        commands.extend([
-            ("/yolo", "Toggle YOLO mode: bypass human approval on mutating actions"),
-            ("/worktree", "Toggle isolated Git worktree execution"),
-            ("!<command>", "Shell: Execute command in current workspace (e.g. !git status)"),
-            ("/help", "Show keyboard shortcuts and command reference"),
-            ("/exit", "Exit Maulness interactive session"),
-        ])
+        commands.extend(
+            [
+                (
+                    "/yolo",
+                    "Toggle YOLO mode: bypass human approval on mutating actions",
+                ),
+                ("/worktree", "Toggle isolated Git worktree execution"),
+                (
+                    "!<command>",
+                    "Shell: Execute command in current workspace (e.g. !git status)",
+                ),
+                ("/help", "Show keyboard shortcuts and command reference"),
+                ("/exit", "Exit Maulness interactive session"),
+            ]
+        )
         return commands
 
     def set_mode(self, new_mode: str) -> None:
@@ -940,9 +1046,13 @@ class MaulnessTUIApp(App):
         status_text = "[yellow]busy[/yellow]" if self.is_busy else "[green]idle[/green]"
         yolo_badge = " │ [bold red]YOLO[/bold red]" if self.yolo_mode else ""
         wt_badge = " │ [bold cyan]WT[/bold cyan]" if self.use_worktree else ""
+        est_tokens = self.total_chars_out // 4
+        tok_str = (
+            f" │ [bold blue]~{est_tokens:,} tok[/bold blue]" if est_tokens > 0 else ""
+        )
         top_bar.update(
             f"[bold red]MAULNESS[/bold red] │ [bold green]repo:[/bold green] {self.repo_name} │ "
-            f"[bold cyan]branch:[/bold cyan] {branch} │ [bold magenta]profile:[/bold magenta] {self.current_profile}{yolo_badge}{wt_badge} │ "
+            f"[bold cyan]branch:[/bold cyan] {branch} │ [bold magenta]profile:[/bold magenta] {self.current_profile}{yolo_badge}{wt_badge}{tok_str} │ "
             f"{daemon_str} │ {status_text}"
         )
 
@@ -968,11 +1078,18 @@ class MaulnessTUIApp(App):
         if text.startswith("/pipeline "):
             arg = parts[1].lower().strip() if len(parts) > 1 else ""
             pipes = self.pipeline_manager.list_pipelines()
-            matching_pipes = [p for p in pipes if not arg or p.name.lower().startswith(arg)]
+            matching_pipes = [
+                p for p in pipes if not arg or p.name.lower().startswith(arg)
+            ]
             if matching_pipes:
                 popup.clear_options()
                 for p in matching_pipes:
-                    popup.add_option(Option(f"[bold cyan]/pipeline {p.name}[/bold cyan] [dim]— {p.description}[/dim]", id=f"/pipeline {p.name} "))
+                    popup.add_option(
+                        Option(
+                            f"[bold cyan]/pipeline {p.name}[/bold cyan] [dim]— {p.description}[/dim]",
+                            id=f"/pipeline {p.name} ",
+                        )
+                    )
                 popup.highlighted = 0
                 popup.add_class("visible")
                 return
@@ -983,11 +1100,18 @@ class MaulnessTUIApp(App):
         if text.startswith("/profile "):
             arg = parts[1].lower().strip() if len(parts) > 1 else ""
             profs = self.profile_manager.list_profiles()
-            matching_profs = [p for p in profs if not arg or p.name.lower().startswith(arg)]
+            matching_profs = [
+                p for p in profs if not arg or p.name.lower().startswith(arg)
+            ]
             if matching_profs:
                 popup.clear_options()
                 for p in matching_profs:
-                    popup.add_option(Option(f"[bold cyan]/profile {p.name}[/bold cyan] [dim]— {p.description[:40]}[/dim]", id=f"/profile {p.name}"))
+                    popup.add_option(
+                        Option(
+                            f"[bold cyan]/profile {p.name}[/bold cyan] [dim]— {p.description[:40]}[/dim]",
+                            id=f"/profile {p.name}",
+                        )
+                    )
                 popup.highlighted = 0
                 popup.add_class("visible")
                 return
@@ -1005,7 +1129,11 @@ class MaulnessTUIApp(App):
 
         for cmd, desc in all_commands:
             cmd_clean = cmd.strip()
-            if query == "/" or cmd_clean.lower().startswith(query) or query.lstrip("/") in cmd_clean.lower():
+            if (
+                query == "/"
+                or cmd_clean.lower().startswith(query)
+                or query.lstrip("/") in cmd_clean.lower()
+            ):
                 matching.append((cmd, desc))
 
         if not matching:
@@ -1028,7 +1156,11 @@ class MaulnessTUIApp(App):
     def _apply_autocomplete(self, execute_zero_arg: bool = False) -> bool:
         """Apply current highlighted autocomplete suggestion into chat input."""
         popup = self.query_one("#autocomplete-popup", OptionList)
-        if not popup.has_class("visible") or popup.highlighted is None or popup.option_count == 0:
+        if (
+            not popup.has_class("visible")
+            or popup.highlighted is None
+            or popup.option_count == 0
+        ):
             return False
 
         opt = popup.get_option_at_index(popup.highlighted)
@@ -1039,7 +1171,9 @@ class MaulnessTUIApp(App):
             p_name = selected_cmd[len("/profile ") :].strip()
             self.current_profile = p_name
             self._update_top_bar()
-            chat_input.placeholder = f"Ask {self.current_profile} or type / for commands, !<cmd>..."
+            chat_input.placeholder = (
+                f"Ask {self.current_profile} or type / for commands, !<cmd>..."
+            )
             chat_input.value = ""
             self._hide_autocomplete()
             return True
@@ -1056,6 +1190,11 @@ class MaulnessTUIApp(App):
             "/usage",
             "/help",
             "/exit",
+            "/undo",
+            "/diff",
+            "/test",
+            "/skills",
+            "/repo-map",
         ):
             self._hide_autocomplete()
             chat_input.value = selected_cmd
@@ -1203,12 +1342,16 @@ class MaulnessTUIApp(App):
                 self._update_top_bar()
                 try:
                     chat_input = self.query_one("#chat-input", Input)
-                    chat_input.placeholder = f"Ask {self.current_profile} or type / for commands, !<cmd>..."
+                    chat_input.placeholder = (
+                        f"Ask {self.current_profile} or type / for commands, !<cmd>..."
+                    )
                 except Exception:
                     pass
             self.set_mode("normal")
 
-        self.push_screen(ProfileModal(profiles, self.current_profile), callback=_on_profile_selected)
+        self.push_screen(
+            ProfileModal(profiles, self.current_profile), callback=_on_profile_selected
+        )
 
     def action_show_help(self) -> None:
         self.push_screen(HelpModal())
@@ -1243,9 +1386,13 @@ class MaulnessTUIApp(App):
             chat_view = self.query_one("#chat-view", VerticalScroll)
             if self.is_busy:
                 self.cancel_active_task()
-                await chat_view.mount(SystemCard("Stopped", "Active task cancelled upon user request."))
+                await chat_view.mount(
+                    SystemCard("Stopped", "Active task cancelled upon user request.")
+                )
             else:
-                await chat_view.mount(SystemCard("Info", "No task is currently running."))
+                await chat_view.mount(
+                    SystemCard("Info", "No task is currently running.")
+                )
             chat_view.scroll_end(animate=False)
             return
 
@@ -1255,17 +1402,26 @@ class MaulnessTUIApp(App):
             steer_prompt = parts[1].strip() if len(parts) > 1 else ""
             if not steer_prompt:
                 chat_view = self.query_one("#chat-view", VerticalScroll)
-                await chat_view.mount(SystemCard("Error", "Usage: /interrupt <prompt>", is_error=True))
+                await chat_view.mount(
+                    SystemCard("Error", "Usage: /interrupt <prompt>", is_error=True)
+                )
                 chat_view.scroll_end(animate=False)
                 return
 
             chat_view = self.query_one("#chat-view", VerticalScroll)
             if self.is_busy:
                 self.cancel_active_task()
-                await chat_view.mount(SystemCard("Interrupt", f"Interrupted previous task to steer: {steer_prompt}"))
+                await chat_view.mount(
+                    SystemCard(
+                        "Interrupt",
+                        f"Interrupted previous task to steer: {steer_prompt}",
+                    )
+                )
                 chat_view.scroll_end(animate=False)
 
-            self.active_worker = self.run_worker(self._execute_direct(steer_prompt), exclusive=True)
+            self.active_worker = self.run_worker(
+                self._execute_direct(steer_prompt), exclusive=True
+            )
             return
 
         # Queue command: queue prompt to run when current task finishes
@@ -1274,7 +1430,9 @@ class MaulnessTUIApp(App):
             queued_prompt = parts[1].strip() if len(parts) > 1 else ""
             if not queued_prompt:
                 chat_view = self.query_one("#chat-view", VerticalScroll)
-                await chat_view.mount(SystemCard("Error", "Usage: /queue <prompt>", is_error=True))
+                await chat_view.mount(
+                    SystemCard("Error", "Usage: /queue <prompt>", is_error=True)
+                )
                 chat_view.scroll_end(animate=False)
                 return
 
@@ -1290,7 +1448,9 @@ class MaulnessTUIApp(App):
                 chat_view.scroll_end(animate=False)
                 return
 
-            self.active_worker = self.run_worker(self._execute_direct(queued_prompt), exclusive=True)
+            self.active_worker = self.run_worker(
+                self._execute_direct(queued_prompt), exclusive=True
+            )
             return
 
         # Usage command: display session token metrics and cost
@@ -1325,13 +1485,18 @@ class MaulnessTUIApp(App):
                 text=True,
             )
             dirty_count = len([l for l in diff_proc.stdout.splitlines() if l.strip()])
-            dirty_str = f"[red]{dirty_count} uncommitted changes[/red]" if dirty_count > 0 else "[green]clean[/green]"
+            dirty_str = (
+                f"[red]{dirty_count} uncommitted changes[/red]"
+                if dirty_count > 0
+                else "[green]clean[/green]"
+            )
 
             prof = self.profile_manager.get_profile(self.current_profile)
             target = prof.model or prof.command or "default"
             ws_cfg = prof.workspace or "inherit"
 
             from maulness.core.providers.circuit import ProviderHealthRegistry
+
             circuit_status = ProviderHealthRegistry.get_instance().format_status_text()
 
             context_content = (
@@ -1348,13 +1513,16 @@ class MaulnessTUIApp(App):
                 f"[bold]Circuit Breaker Status:[/bold]\n{circuit_status}"
             )
             chat_view = self.query_one("#chat-view", VerticalScroll)
-            await chat_view.mount(SystemCard("Runtime & Workspace Context", context_content))
+            await chat_view.mount(
+                SystemCard("Runtime & Workspace Context", context_content)
+            )
             chat_view.scroll_end(animate=False)
             return
 
         # Providers command: inspect or reset circuit breaker health
         if raw_text.startswith("/providers"):
             from maulness.core.providers.circuit import ProviderHealthRegistry
+
             registry = ProviderHealthRegistry.get_instance()
             parts = raw_text.split()
             if len(parts) > 1 and parts[1].lower() == "reset":
@@ -1425,7 +1593,11 @@ class MaulnessTUIApp(App):
 
         if raw_text == "/yolo":
             self.yolo_mode = not self.yolo_mode
-            status = "ENABLED (Auto-approving mutating actions)" if self.yolo_mode else "DISABLED (HITL confirmations active)"
+            status = (
+                "ENABLED (Auto-approving mutating actions)"
+                if self.yolo_mode
+                else "DISABLED (HITL confirmations active)"
+            )
             chat_view = self.query_one("#chat-view", VerticalScroll)
             await chat_view.mount(SystemCard("YOLO Mode", status))
             self._update_top_bar()
@@ -1435,7 +1607,11 @@ class MaulnessTUIApp(App):
 
         if raw_text == "/worktree":
             self.use_worktree = not self.use_worktree
-            status = "ENABLED (Tasks execute in isolated git worktrees)" if self.use_worktree else "DISABLED (Tasks execute in direct repo workspace)"
+            status = (
+                "ENABLED (Tasks execute in isolated git worktrees)"
+                if self.use_worktree
+                else "DISABLED (Tasks execute in direct repo workspace)"
+            )
             chat_view = self.query_one("#chat-view", VerticalScroll)
             await chat_view.mount(SystemCard("Worktree Isolation", status))
             self._update_top_bar()
@@ -1452,9 +1628,24 @@ class MaulnessTUIApp(App):
             if len(parts) > 1 and parts[1].strip():
                 self.current_profile = parts[1].strip()
                 self._update_top_bar()
-                chat_input.placeholder = f"Ask {self.current_profile} or type / for commands, !<cmd>..."
+                chat_input.placeholder = (
+                    f"Ask {self.current_profile} or type / for commands, !<cmd>..."
+                )
             else:
                 self.action_select_profile()
+            return
+
+        # Developer slash commands (/undo, /diff, /test, /commit, /skills, /outline, /repo-map, /help)
+        handled, out_msg = handle_slash_command(
+            raw_text,
+            workspace_path=self.workspace_path,
+            current_profile=self.current_profile,
+        )
+        if handled:
+            chat_view = self.query_one("#chat-view", VerticalScroll)
+            title = raw_text.split()[0]
+            await chat_view.mount(SystemCard(f"Command {title}", out_msg))
+            chat_view.scroll_end(animate=False)
             return
 
         # Local Shell Command Escape: !<cmd>
@@ -1473,9 +1664,13 @@ class MaulnessTUIApp(App):
                     timeout=30.0,
                 )
                 output = res.stdout or res.stderr or "(Command executed with no output)"
-                await chat_view.mount(SystemCard(f"$ {cmd} (exit {res.returncode})", output))
+                await chat_view.mount(
+                    SystemCard(f"$ {cmd} (exit {res.returncode})", output)
+                )
             except Exception as e:
-                await chat_view.mount(SystemCard(f"$ {cmd} (failed)", str(e), is_error=True))
+                await chat_view.mount(
+                    SystemCard(f"$ {cmd} (failed)", str(e), is_error=True)
+                )
             chat_view.scroll_end(animate=False)
             return
 
@@ -1489,11 +1684,21 @@ class MaulnessTUIApp(App):
             else:
                 p_name, goal = "standard", pipeline_body
 
-            self.active_worker = self.run_worker(self._execute_pipeline(p_name, goal), exclusive=True)
+            expanded_goal = expand_context_tags(
+                goal, workspace_path=self.workspace_path
+            )
+            self.active_worker = self.run_worker(
+                self._execute_pipeline(p_name, expanded_goal), exclusive=True
+            )
             return
 
         # Default Natural Language Prompt -> Direct Execution with Active Profile
-        self.active_worker = self.run_worker(self._execute_direct(raw_text), exclusive=True)
+        expanded_prompt = expand_context_tags(
+            raw_text, workspace_path=self.workspace_path
+        )
+        self.active_worker = self.run_worker(
+            self._execute_direct(expanded_prompt), exclusive=True
+        )
 
     async def _execute_direct(self, prompt: str) -> None:
         self.is_busy = True
@@ -1505,7 +1710,11 @@ class MaulnessTUIApp(App):
         branch = get_git_branch(self.workspace_path)
         user_card = UserCard(prompt, self.repo_name, branch)
         prof = self.profile_manager.get_profile(self.current_profile)
-        model_info = f"{prof.provider}:{prof.model or prof.command or 'default'}" if prof else None
+        model_info = (
+            f"{prof.provider}:{prof.model or prof.command or 'default'}"
+            if prof
+            else None
+        )
         agent_card = AgentCard(self.current_profile, model_info=model_info)
 
         await chat_view.mount(user_card)
@@ -1564,7 +1773,9 @@ class MaulnessTUIApp(App):
             if self.prompt_queue:
                 next_prompt = self.prompt_queue.pop(0)
                 logger.info(f"Auto-dispatching queued prompt: {next_prompt[:40]}")
-                self.active_worker = self.run_worker(self._execute_direct(next_prompt), exclusive=True)
+                self.active_worker = self.run_worker(
+                    self._execute_direct(next_prompt), exclusive=True
+                )
 
     async def _execute_pipeline(self, pipeline_name: str, goal: str) -> None:
         self.is_busy = True
@@ -1574,7 +1785,9 @@ class MaulnessTUIApp(App):
         chat_view = self.query_one("#chat-view", VerticalScroll)
 
         branch = get_git_branch(self.workspace_path)
-        await chat_view.mount(UserCard(f"/pipeline {pipeline_name} {goal}", self.repo_name, branch))
+        await chat_view.mount(
+            UserCard(f"/pipeline {pipeline_name} {goal}", self.repo_name, branch)
+        )
         p_card = PipelineCard(pipeline_name, goal)
         await chat_view.mount(p_card)
         chat_view.scroll_end(animate=False)
@@ -1629,4 +1842,6 @@ class MaulnessTUIApp(App):
             if self.prompt_queue:
                 next_prompt = self.prompt_queue.pop(0)
                 logger.info(f"Auto-dispatching queued prompt: {next_prompt[:40]}")
-                self.active_worker = self.run_worker(self._execute_direct(next_prompt), exclusive=True)
+                self.active_worker = self.run_worker(
+                    self._execute_direct(next_prompt), exclusive=True
+                )

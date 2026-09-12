@@ -284,6 +284,23 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": "Load the full detailed playbook instructions for an available skill (progressive disclosure).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the skill to load (from available skills)",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
 ]
 
 
@@ -1142,6 +1159,16 @@ async def _execute_tool_action(
             return "Error: URL is required for fetch_doc_markdown."
         max_chars = int(args.get("max_chars", 10000))
         return await _execute_fetch_doc_markdown(url, max_chars)
+
+    # 13. load_skill
+    elif name == "load_skill":
+        skill_name = args.get("name", "").strip()
+        if not skill_name:
+            return "Error: Skill name is required."
+        from maulness.core.skills import SkillManager
+
+        manager = SkillManager()
+        return manager.get_skill_instruction(skill_name, workspace_path=cwd)
 
     return f"Error: Unknown tool '{name}'."
 

@@ -6,7 +6,9 @@ import yaml
 from maulness.config import config
 
 USER_SKILLS_DIR = config.skills_dir
-TEMPLATE_SKILLS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "templates" / "skills"
+TEMPLATE_SKILLS_DIR = (
+    Path(__file__).resolve().parent.parent.parent.parent / "templates" / "skills"
+)
 
 
 @dataclass
@@ -27,7 +29,9 @@ class SkillManager:
     ):
         self.root_skills_dir = root_skills_dir or USER_SKILLS_DIR
         self.template_skills_dir = (
-            template_skills_dir if template_skills_dir is not None else TEMPLATE_SKILLS_DIR
+            template_skills_dir
+            if template_skills_dir is not None
+            else TEMPLATE_SKILLS_DIR
         )
 
     def discover_skills_in_dir(self, directory: Path) -> dict[str, Skill]:
@@ -45,8 +49,12 @@ class SkillManager:
                         skills[skill.name] = skill
         return skills
 
-    def list_skills(self, profile_skills_dir: Optional[Path] = None) -> dict[str, Skill]:
-        """List all effective skills, where profile skills extend and override root skills."""
+    def list_skills(
+        self,
+        profile_skills_dir: Optional[Path] = None,
+        workspace_path: Optional[Path] = None,
+    ) -> dict[str, Skill]:
+        """List all effective skills, merging templates, user root, profile, and workspace skills."""
         skills: dict[str, Skill] = {}
 
         # 1. Built-in template skills
@@ -61,9 +69,59 @@ class SkillManager:
         if profile_skills_dir and profile_skills_dir.exists():
             skills.update(self.discover_skills_in_dir(profile_skills_dir))
 
+        # 4. Workspace-level skills (.maulness/skills or .agents/skills)
+        if workspace_path:
+            ws = Path(workspace_path).resolve()
+            for ws_skill_dir in [
+                ws / ".maulness" / "skills",
+                ws / ".agents" / "skills",
+            ]:
+                if ws_skill_dir.exists():
+                    skills.update(self.discover_skills_in_dir(ws_skill_dir))
+
         return skills
 
-    def get_skills_paths(self, profile_skills_dir: Optional[Path] = None) -> list[str]:
+    def get_skill(
+        self,
+        name: str,
+        profile_skills_dir: Optional[Path] = None,
+        workspace_path: Optional[Path] = None,
+    ) -> Optional[Skill]:
+        """Retrieve a specific skill definition by name."""
+        skills = self.list_skills(
+            profile_skills_dir=profile_skills_dir, workspace_path=workspace_path
+        )
+        return skills.get(name)
+
+    def get_skill_instruction(
+        self,
+        name: str,
+        profile_skills_dir: Optional[Path] = None,
+        workspace_path: Optional[Path] = None,
+    ) -> str:
+        """Load full playbook instructions for a skill (progressive disclosure)."""
+        skill = self.get_skill(
+            name, profile_skills_dir=profile_skills_dir, workspace_path=workspace_path
+        )
+        if not skill:
+            available = (
+                ", ".join(self.list_skills(profile_skills_dir, workspace_path).keys())
+                or "none"
+            )
+            return f"Error: Skill '{name}' not found. Available skills: {available}"
+
+        return (
+            f"# Playbook Instruction: {skill.name}\n"
+            f"Description: {skill.description}\n"
+            f"Location: {skill.path}\n\n"
+            f"{skill.instruction}"
+        )
+
+    def get_skills_paths(
+        self,
+        profile_skills_dir: Optional[Path] = None,
+        workspace_path: Optional[Path] = None,
+    ) -> list[str]:
         """Return unique directory paths containing skills for Antigravity LocalAgentConfig."""
         paths: list[str] = []
         if self.template_skills_dir and self.template_skills_dir.exists():
@@ -72,14 +130,25 @@ class SkillManager:
             paths.append(str(self.root_skills_dir))
         if profile_skills_dir and profile_skills_dir.exists():
             paths.append(str(profile_skills_dir))
+        if workspace_path:
+            ws = Path(workspace_path).resolve()
+            for ws_skill_dir in [
+                ws / ".maulness" / "skills",
+                ws / ".agents" / "skills",
+            ]:
+                if ws_skill_dir.exists():
+                    paths.append(str(ws_skill_dir))
         return list(dict.fromkeys(paths))
 
     def format_skills_summary(self, skills: dict[str, Skill]) -> str:
-        """Format an index of available skills for prompt injection."""
+        """Format a lightweight progressive disclosure index of available skills for prompt injection."""
         if not skills:
             return ""
 
-        lines = ["\n---\n## Available Skills"]
+        lines = [
+            "\n---\n## Available Skills (Progressive Disclosure)",
+            "Call tool `load_skill(name)` to load comprehensive instructions when executing a task requiring these playbooks:",
+        ]
         for name, skill in skills.items():
             desc = skill.description or "No description provided."
             lines.append(f"- **{name}**: {desc}")

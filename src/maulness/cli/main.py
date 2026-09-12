@@ -8,10 +8,12 @@ from typing import Optional
 import typer
 import yaml
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
+from maulness.cli.commands import expand_context_tags, handle_slash_command
 from maulness.config import config
 from maulness.core.pipeline import PipelineOrchestrator
 from maulness.core.pipelines import PipelineManager
@@ -68,7 +70,9 @@ def status():
     except Exception:
         daemon_status_text = "[yellow]Unknown[/yellow]"
 
-    table.add_row("Daemon Service", daemon_status_text, "systemd user unit maulness.service")
+    table.add_row(
+        "Daemon Service", daemon_status_text, "systemd user unit maulness.service"
+    )
 
     # Check Discord
     if config.gateway_multiplex_profiles:
@@ -76,7 +80,9 @@ def status():
         detail = f"Multiplexing ({', '.join(allowlist) if allowlist else 'all'})"
         table.add_row("Discord Gateway", "[green]Multiplexing[/green]", detail)
     elif config.has_discord:
-        table.add_row("Discord Gateway", "[green]Configured[/green]", "Single Default Profile")
+        table.add_row(
+            "Discord Gateway", "[green]Configured[/green]", "Single Default Profile"
+        )
     else:
         table.add_row(
             "Discord Gateway",
@@ -90,7 +96,9 @@ def status():
         subprocess.run(["which", agy_binary], capture_output=True).returncode == 0
     )
     if agy_installed:
-        table.add_row("Antigravity ACP", "[green]Ready[/green]", f"Binary at {agy_binary}")
+        table.add_row(
+            "Antigravity ACP", "[green]Ready[/green]", f"Binary at {agy_binary}"
+        )
     else:
         table.add_row(
             "Antigravity ACP",
@@ -133,7 +141,15 @@ def run(
         False, "-w", "--worktree", help="Execute inside an isolated git worktree"
     ),
     yolo: bool = typer.Option(
-        False, "-y", "--yolo", help="YOLO mode: bypass human confirmation on mutating tools"
+        False,
+        "-y",
+        "--yolo",
+        help="YOLO mode: bypass human confirmation on mutating tools",
+    ),
+    afk: bool = typer.Option(
+        False,
+        "--afk",
+        help="AFK autonomous mode: alias to YOLO with process budget enforcement",
     ),
 ):
     """Execute a direct task on a repository with the specified profile."""
@@ -142,14 +158,17 @@ def run(
     effective_repo = repo or current_repo
     target_workspace = config.resolve_repo_path(repo) if repo else current_workspace
 
+    effective_prompt = expand_context_tags(prompt, target_workspace)
+    effective_yolo = yolo or afk
+
     asyncio.run(
         runner.run_direct(
             repo_name=effective_repo,
-            prompt=prompt,
+            prompt=effective_prompt,
             workspace_path=target_workspace,
             profile_name=profile,
             use_worktree=worktree,
-            yolo=yolo,
+            yolo=effective_yolo,
         )
     )
 
@@ -215,13 +234,21 @@ def run_plain_chat(initial_profile: str = "default"):
 
             if raw_prompt == "/yolo":
                 yolo_mode = not yolo_mode
-                state = "[bold red]ENABLED (Auto-approving mutating tools)[/bold red]" if yolo_mode else "[bold green]DISABLED (HITL confirmations active)[/bold green]"
+                state = (
+                    "[bold red]ENABLED (Auto-approving mutating tools)[/bold red]"
+                    if yolo_mode
+                    else "[bold green]DISABLED (HITL confirmations active)[/bold green]"
+                )
                 console.print(f"[*] YOLO mode: {state}")
                 continue
 
             if raw_prompt == "/worktree":
                 worktree_mode = not worktree_mode
-                state = "[bold cyan]ENABLED (Isolated git worktree)[/bold cyan]" if worktree_mode else "[dim]DISABLED (Direct repo workspace)[/dim]"
+                state = (
+                    "[bold cyan]ENABLED (Isolated git worktree)[/bold cyan]"
+                    if worktree_mode
+                    else "[dim]DISABLED (Direct repo workspace)[/dim]"
+                )
                 console.print(f"[*] Worktree isolation: {state}")
                 continue
 
@@ -263,7 +290,29 @@ def run_plain_chat(initial_profile: str = "default"):
                     text=True,
                 )
                 output = res.stdout or res.stderr or "(No output)"
-                console.print(Panel(output, title=f"$ {cmd} (exit {res.returncode})", border_style="yellow"))
+                console.print(
+                    Panel(
+                        output,
+                        title=f"$ {cmd} (exit {res.returncode})",
+                        border_style="yellow",
+                    )
+                )
+                continue
+
+            # Developer slash commands (/undo, /diff, /test, /commit, /skills, /outline, /repo-map, /help)
+            handled, out_msg = handle_slash_command(
+                raw_prompt,
+                workspace_path=workspace_path,
+                current_profile=current_profile,
+            )
+            if handled:
+                if out_msg.startswith("```diff"):
+                    diff_clean = out_msg.replace("```diff\n", "").rstrip("\n```")
+                    console.print(Syntax(diff_clean, "diff", theme="monokai"))
+                elif out_msg.startswith("#") or "|" in out_msg:
+                    console.print(Markdown(out_msg))
+                else:
+                    console.print(Panel(out_msg, border_style="cyan"))
                 continue
 
             # Declarative pipeline command: /pipeline [name] <goal>
@@ -276,7 +325,9 @@ def run_plain_chat(initial_profile: str = "default"):
                 else:
                     p_name, goal = "standard", pipeline_body
 
-                console.print(f"[bold magenta][*] Launching pipeline '{p_name}': [white]{goal}[/white][/bold magenta]\n")
+                console.print(
+                    f"[bold magenta][*] Launching pipeline '{p_name}': [white]{goal}[/white][/bold magenta]\n"
+                )
                 asyncio.run(
                     orchestrator.run_pipeline(
                         repo_name=repo_name,
@@ -295,11 +346,16 @@ def run_plain_chat(initial_profile: str = "default"):
                 nonlocal active_conversation_id
                 active_conversation_id = conv_id
 
+            # Context tag expansion (@file:<path>, @dir:<path>, @diff, @<path>)
+            expanded_prompt = expand_context_tags(
+                raw_prompt, workspace_path=workspace_path
+            )
+
             # Direct prompt turn with active profile (no /code prefix required)
             asyncio.run(
                 runner.run_direct(
                     repo_name=repo_name,
-                    prompt=raw_prompt,
+                    prompt=expanded_prompt,
                     workspace_path=workspace_path,
                     profile_name=current_profile,
                     session_id=session_id,
@@ -344,7 +400,9 @@ def chat(
 # Task Management (Strictly list & show)
 # ==========================================
 @task_app.command("list")
-def task_list(limit: int = typer.Option(20, "-n", "--limit", help="Number of tasks to show")):
+def task_list(
+    limit: int = typer.Option(20, "-n", "--limit", help="Number of tasks to show"),
+):
     """List recent and active tasks."""
     storage = StorageManager(db_path=config.db_path)
 
@@ -354,7 +412,9 @@ def task_list(limit: int = typer.Option(20, "-n", "--limit", help="Number of tas
 
     tasks = asyncio.run(_list())
     if not tasks:
-        console.print("[dim]No tasks recorded yet. Run `maulness chat` to start one.[/dim]")
+        console.print(
+            "[dim]No tasks recorded yet. Run `maulness chat` to start one.[/dim]"
+        )
         return
 
     table = Table(title="Recent & Active Tasks", border_style="cyan")
@@ -454,7 +514,9 @@ def task_abort(task_id: str = typer.Argument(..., help="Task ID to abort")):
 # Session Management (list & show)
 # ==========================================
 @session_app.command("list")
-def session_list(limit: int = typer.Option(20, "-n", "--limit", help="Number of sessions to show")):
+def session_list(
+    limit: int = typer.Option(20, "-n", "--limit", help="Number of sessions to show"),
+):
     """List active and historical agent sessions."""
     storage = StorageManager(db_path=config.db_path)
 
@@ -546,20 +608,45 @@ def profile_show(name: str = typer.Argument(..., help="Profile name to inspect")
     data = profile.model_dump(mode="json", exclude={"env_vars", "soul_content"})
     yaml_str = yaml.dump(data, sort_keys=False)
     syntax = Syntax(yaml_str, "yaml", theme="monokai", line_numbers=True)
-    console.print(Panel(syntax, title=f"Profile Configuration — {profile.name}", border_style="magenta"))
+    console.print(
+        Panel(
+            syntax,
+            title=f"Profile Configuration — {profile.name}",
+            border_style="magenta",
+        )
+    )
 
     if profile.soul_content:
-        console.print(Panel(profile.soul_content, title="Role Operating Doctrine (SOUL.md)", border_style="cyan"))
+        console.print(
+            Panel(
+                profile.soul_content,
+                title="Role Operating Doctrine (SOUL.md)",
+                border_style="cyan",
+            )
+        )
 
     from maulness.core.skills import SkillManager
+
     skills = SkillManager().list_skills(profile_skills_dir=profile.skills_dir)
     if skills:
         skill_lines = []
         for sname, s in skills.items():
             is_local = profile.skills_dir and s.path.is_relative_to(profile.skills_dir)
-            tag = "[magenta](profile-extending)[/magenta]" if is_local else "[dim](root-default)[/dim]"
-            skill_lines.append(f"• [bold #a6e3a1]{sname}[/bold #a6e3a1] {tag}: {s.description}")
-        console.print(Panel("\n".join(skill_lines), title=f"Effective Skills ({len(skills)})", border_style="green"))
+            tag = (
+                "[magenta](profile-extending)[/magenta]"
+                if is_local
+                else "[dim](root-default)[/dim]"
+            )
+            skill_lines.append(
+                f"• [bold #a6e3a1]{sname}[/bold #a6e3a1] {tag}: {s.description}"
+            )
+        console.print(
+            Panel(
+                "\n".join(skill_lines),
+                title=f"Effective Skills ({len(skills)})",
+                border_style="green",
+            )
+        )
 
 
 # ==========================================
@@ -603,7 +690,9 @@ def daemon_restart():
 
 @daemon_app.command("logs")
 def daemon_logs(
-    follow: bool = typer.Option(True, "--follow/--no-follow", "-f", help="Follow log output in real time"),
+    follow: bool = typer.Option(
+        True, "--follow/--no-follow", "-f", help="Follow log output in real time"
+    ),
     lines: int = typer.Option(50, "-n", "--lines", help="Number of lines to show"),
 ):
     """View daemon logs via journalctl."""
@@ -618,10 +707,13 @@ def daemon_logs(
 # ==========================================
 @discord_app.command("run")
 def discord_run(
-    profile: Optional[str] = typer.Option(None, "-p", "--profile", help="Target specific profile"),
+    profile: Optional[str] = typer.Option(
+        None, "-p", "--profile", help="Target specific profile"
+    ),
 ):
     """Run Discord gateway adapter in the foreground."""
     from maulness.daemon.service import main as service_main
+
     asyncio.run(service_main(profile_filter=profile))
 
 
@@ -647,7 +739,9 @@ def soul_show(
                 )
             )
         else:
-            console.print(f"[dim]No profile-specific SOUL.md found for '{profile}'.[/dim]")
+            console.print(
+                f"[dim]No profile-specific SOUL.md found for '{profile}'.[/dim]"
+            )
     else:
         root_soul = config.config_dir / "SOUL.md"
         if root_soul.exists():
@@ -727,7 +821,9 @@ def memory_show(
                 )
             )
         else:
-            console.print(f"[dim]No profile-specific MEMORY.md found for '{profile}'.[/dim]")
+            console.print(
+                f"[dim]No profile-specific MEMORY.md found for '{profile}'.[/dim]"
+            )
     else:
         root_mem = config.config_dir / "MEMORY.md"
         if root_mem.exists():
@@ -758,7 +854,11 @@ def memory_edit(
     else:
         target = config.config_dir / "MEMORY.md"
         if not target.exists():
-            tpl = Path(__file__).resolve().parent.parent.parent.parent / "templates" / "MEMORY.md"
+            tpl = (
+                Path(__file__).resolve().parent.parent.parent.parent
+                / "templates"
+                / "MEMORY.md"
+            )
             if tpl.exists():
                 target.write_text(tpl.read_text(encoding="utf-8"))
             else:
@@ -789,7 +889,9 @@ def user_show(
                 )
             )
         else:
-            console.print(f"[dim]No profile-specific USER.md found for '{profile}'.[/dim]")
+            console.print(
+                f"[dim]No profile-specific USER.md found for '{profile}'.[/dim]"
+            )
     else:
         root_user = config.config_dir / "USER.md"
         if root_user.exists():
@@ -820,7 +922,11 @@ def user_edit(
     else:
         target = config.config_dir / "USER.md"
         if not target.exists():
-            tpl = Path(__file__).resolve().parent.parent.parent.parent / "templates" / "USER.md"
+            tpl = (
+                Path(__file__).resolve().parent.parent.parent.parent
+                / "templates"
+                / "USER.md"
+            )
             if tpl.exists():
                 target.write_text(tpl.read_text(encoding="utf-8"))
             else:

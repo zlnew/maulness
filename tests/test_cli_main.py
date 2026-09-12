@@ -89,10 +89,41 @@ def test_cli_run(tmp_path: Path):
 
         result = runner.invoke(
             main.app,
-            ["run", "Fix bug in handler", "-r", "test-repo", "-p", "builder", "-w", "-y"],
+            [
+                "run",
+                "Fix bug in handler",
+                "-r",
+                "test-repo",
+                "-p",
+                "builder",
+                "-w",
+                "-y",
+            ],
         )
         assert result.exit_code == 0
         mock_runner.run_direct.assert_awaited_once()
+
+
+def test_cli_run_afk_alias(tmp_path: Path):
+    with (
+        patch("maulness.cli.main.TaskRunner") as mock_runner_cls,
+        patch("maulness.cli.main.config") as mock_cfg,
+    ):
+        mock_runner = MagicMock()
+        mock_runner.run_direct = AsyncMock()
+        mock_runner_cls.return_value = mock_runner
+
+        mock_cfg.get_current_workspace.return_value = ("test-repo", tmp_path)
+        mock_cfg.resolve_repo_path.return_value = tmp_path
+
+        result = runner.invoke(
+            main.app,
+            ["run", "Refactor module", "-r", "test-repo", "--afk"],
+        )
+        assert result.exit_code == 0
+        mock_runner.run_direct.assert_awaited_once()
+        call_kwargs = mock_runner.run_direct.call_args[1]
+        assert call_kwargs["yolo"] is True
 
 
 def test_cli_chat_plain_mode(tmp_path: Path):
@@ -119,9 +150,11 @@ def test_cli_chat_plain_mode(tmp_path: Path):
         patch("subprocess.run") as mock_run,
     ):
         mock_runner = MagicMock()
+
         async def fake_run_direct(**kwargs):
             if "on_init" in kwargs and kwargs["on_init"]:
                 await kwargs["on_init"]("conv_999")
+
         mock_runner.run_direct = AsyncMock(side_effect=fake_run_direct)
         mock_runner_cls.return_value = mock_runner
 
@@ -305,7 +338,9 @@ def test_cli_daemon_commands():
 
 
 def test_cli_discord_run():
-    with patch("maulness.daemon.service.main", new_callable=AsyncMock) as mock_service_main:
+    with patch(
+        "maulness.daemon.service.main", new_callable=AsyncMock
+    ) as mock_service_main:
         res = runner.invoke(main.app, ["discord", "run", "-p", "builder"])
         assert res.exit_code == 0
         mock_service_main.assert_awaited_once_with(profile_filter="builder")
@@ -564,6 +599,7 @@ def test_cli_soul_memory_user_root_exists_and_fallback_edit(tmp_path: Path):
 
 def test_cli_dunder_main_module():
     import runpy
+
     with patch("sys.argv", ["maulness", "--help"]):
         with pytest.raises(SystemExit) as exc:
             runpy.run_module("maulness.cli.main", run_name="__main__")
